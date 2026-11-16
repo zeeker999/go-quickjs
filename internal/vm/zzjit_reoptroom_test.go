@@ -3,11 +3,8 @@
 package vm
 
 import (
-	"runtime"
 	"slices"
 	"testing"
-
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
 
 // A function compiled again whose code the cache found no room for once it
@@ -26,7 +23,8 @@ func TestJITReoptWaitsForRoom(t *testing.T) {
 	jitEpochNow = func() uint64 { return epoch }
 	r := jitRuntimeForTest(t, Config{JIT: true, MemoryLimit: 8 << 20})
 	if _, err := r.Run(compileForTest(t, `function g(n) { let s = 0; for (let i = 0; i < n; i++) s += i * 2; return s }
-		g(100); g(100)`)); err != nil {
+		function h(n) { var s = 0; for (var i = 0; i < n; i++) s += i; return s }
+		g(100); g(100); h(100); h(100)`)); err != nil {
 		t.Fatal(err)
 	}
 	cl := r.global.getOwn(r.atoms.intern("g")).value().Object().fn().closure
@@ -34,70 +32,32 @@ func TestJITReoptWaitsForRoom(t *testing.T) {
 	if !ok {
 		t.Fatalf("g was not compiled: %+v", cv.e)
 	}
+	other := r.jitRegKeyOf(r.global.getOwn(r.atoms.intern("h")).value().Object().fn().closure)
+	if x := r.jit.regCache[other]; x == nil || x.code == nil {
+		t.Fatalf("h was not compiled: %+v", x)
+	}
 	e := cv.e
-	var keep []*bytecode.Function
-	defer runtime.KeepAlive(&keep)
-	copyOf := jitCopiesForTest(jitFunctionForTest(t, `function f(n) { var s=0; for(var i=0;i<n;i++) s+=i; return s }`), &keep)
-	for n := 0; r.jitForFunction(copyOf(), nil) != nil; n++ {
-		if n > 1<<14 {
-			t.Fatal("the budget never filled")
-		}
-	}
-	if r.jit.evicted != 0 || !cv.same(r, cl) {
-		t.Fatalf("filling dropped code: %d evicted", r.jit.evicted)
-	}
-	if cv.reg != nil {
-		// The register form's compile again (jitRegCompileFor) places its
-		// code or, with no room, keeps the old and notes the room it was
-		// short of (reoptRoom, jitRegPlace), its budget the runtime's
-		// (jitBudget), which each compile reads: every byte held young, a
-		// limit below what the cache holds leaves no room to make.
-		key := r.jitRegKeyOf(cl)
-		limit := r.jitMemoryLimit
-		r.jitMemoryLimit = int64(r.jit.held() - 1)
-		reopts := r.jit.reoptimized
-		for i := 0; i < 4; i++ {
-			if ne := r.jitRegCompileFor(cl, cl.reg, key, false); ne != nil && ne.code != nil || e.reoptRoom <= 0 || r.jit.reoptimized != reopts || !cv.same(r, cl) {
-				t.Fatalf("compiled again with no room: room %d, %d reoptimized of %d, code kept %v", e.reoptRoom, r.jit.reoptimized, reopts, cv.same(r, cl))
-			}
-		}
-		// With the room -- the limit back, and the cache having let code go
-		// (its generation, which a deferred compile waits for), as filling
-		// it on lets the oldest go -- compiled again and kept; the code
-		// still answers.
-		r.jitMemoryLimit = limit
-		for k, x := range r.jit.cache {
-			if x.ssa != nil && r.jit.dropEntry(k, x) {
-				break
-			}
-		}
-		if ne := r.jitRegCompileFor(cl, cl.reg, key, false); ne == nil || ne.code == nil || r.jit.reoptimized != reopts+1 || e.reoptRoom != 0 || r.jit.regCache[key] != ne {
-			t.Fatalf("not compiled again once there was room: %d reoptimized of %d, room %d", r.jit.reoptimized, reopts, e.reoptRoom)
-		}
-		if v, err := r.Run(compileForTest(t, `g(1000)`)); err != nil || v.Number() != 999000 {
-			t.Fatal(v, err)
-		}
-		return
-	}
-	// Every byte held young: a budget below what the cache holds leaves
-	// no room to make.
-	budget := r.jit.budget
-	r.jit.budget = r.jit.held() - 1
+	// The compile again (jitRegCompileFor) places its code or, with no
+	// room, keeps the old and notes the room it was short of (reoptRoom,
+	// jitRegPlace), its budget the runtime's (jitBudget), which each
+	// compile reads: every byte held young, the clock not moving, a limit
+	// below what the cache holds leaves no room to make.
+	key := r.jitRegKeyOf(cl)
+	limit := r.jitMemoryLimit
+	r.jitMemoryLimit = int64(r.jit.held() - 1)
 	reopts := r.jit.reoptimized
-	r.jitReoptimize(cl, e)
-	if r.jit.discarded != 1 || e.reoptRoom <= 0 || r.jit.reoptimized != reopts {
-		t.Fatalf("the first compile again: %d discarded, room %d, %d reoptimized of %d", r.jit.discarded, e.reoptRoom, r.jit.reoptimized, reopts)
+	for i := 0; i < 4; i++ {
+		if ne := r.jitRegCompileFor(cl, cl.reg, key, false); ne != nil && ne.code != nil || e.reoptRoom <= 0 || r.jit.reoptimized != reopts || !cv.same(r, cl) {
+			t.Fatalf("compiled again with no room: room %d, %d reoptimized of %d, code kept %v", e.reoptRoom, r.jit.reoptimized, reopts, cv.same(r, cl))
+		}
 	}
-	for i := 0; i < 3; i++ {
-		r.jitReoptimize(cl, e)
-	}
-	if r.jit.discarded != 1 || r.jit.reoptimized != reopts {
-		t.Fatalf("compiled again with no room: %d discarded, %d reoptimized of %d", r.jit.discarded, r.jit.reoptimized, reopts)
-	}
-	// With the room, compiled again and kept; the code still answers.
-	r.jit.budget = budget
-	r.jitReoptimize(cl, e)
-	if r.jit.reoptimized != reopts+1 || e.reoptRoom != 0 || r.jit.discarded != 1 {
+	// With the room -- the limit back, and the cache having let code go
+	// (its generation, which a deferred compile waits for), as filling it
+	// on lets the oldest go -- compiled again and kept; the code still
+	// answers.
+	r.jitMemoryLimit = limit
+	r.jit.dropReg(other, r.jit.regCache[other])
+	if ne := r.jitRegCompileFor(cl, cl.reg, key, false); ne == nil || ne.code == nil || r.jit.reoptimized != reopts+1 || e.reoptRoom != 0 || r.jit.regCache[key] != ne {
 		t.Fatalf("not compiled again once there was room: %d reoptimized of %d, room %d", r.jit.reoptimized, reopts, e.reoptRoom)
 	}
 	if v, err := r.Run(compileForTest(t, `g(1000)`)); err != nil || v.Number() != 999000 {
@@ -145,14 +105,10 @@ func TestJITEntriesAtStartAndLoopsOnly(t *testing.T) {
 		wentOn := r.jit.wentOn
 		var serial uint32
 		valid := false
-		if jitRegClosureForTest(r, cl) {
-			// The register form's compiles are counted in its life
-			// (ssaSerial), its validity its cache entry's.
-			if cv, ok := jitViewForTest(r, cl); ok {
-				serial, valid = cv.e.ssaSerial, !cv.invalid()
-			}
-		} else if e := r.jit.hint(cl); e != nil {
-			serial, valid = e.ssaSerial, e.ssa != nil && !e.invalid
+		// The register form's compiles are counted in its life
+		// (ssaSerial), its validity its cache entry's.
+		if cv, ok := jitViewForTest(r, cl); ok {
+			serial, valid = cv.e.ssaSerial, !cv.invalid()
 		}
 		gv, err := r.Run(compileForTest(t, `many(500)`))
 		if err != nil || gv.Number() != wv.Number() {

@@ -52,16 +52,8 @@ func jitAgreesForTest(t *testing.T, setup string, rounds ...string) *Runtime {
 // (jitRegLifeForTest), whose counts its runs keep.
 func jitNativeForTest(t *testing.T, r *Runtime, name string) *jitEntry {
 	t.Helper()
-	if jitRegCodeForTest(r, name) {
-		e := jitRegLifeForTest(r, name)
-		if e == nil || e.ssaStats.entries == 0 {
-			t.Fatalf("%s never ran natively: %+v", name, e)
-		}
-		return e
-	}
-	cl := r.global.getOwn(r.atoms.intern(name)).value().Object().fn().closure
-	e := r.jit.hint(cl)
-	if e == nil || e.ssa == nil || e.ssaStats.entries == 0 {
+	e := jitRegLifeForTest(r, name)
+	if e == nil || e.ssaStats.entries == 0 {
 		t.Fatalf("%s never ran natively: %+v", name, e)
 	}
 	return e
@@ -161,12 +153,9 @@ func TestJITExceptionHandlers(t *testing.T) {
 	}
 	// Called natively, a native callee with handlers of its own, whose
 	// return through its finally clause returns natively.
-	if cl := jitGlobalClosureForTest(r, "returnThrough"); jitRegClosureForTest(r, cl) {
-		if v, ok := jitViewByFnForTest(r, cl); !ok || v.link(r, cl) == nil || v.link(r, cl).in == 0 {
-			t.Fatalf("returnThrough was never called natively: %+v", v.e)
-		}
-	} else if e := r.jit.entryFor(cl.fn); e == nil || e.ssa == nil || e.link == nil || e.link.in == 0 {
-		t.Fatalf("returnThrough was never called natively: %+v", e)
+	cl := jitGlobalClosureForTest(r, "returnThrough")
+	if v, ok := jitViewByFnForTest(r, cl); !ok || v.link(r, cl) == nil || v.link(r, cl).in == 0 {
+		t.Fatalf("returnThrough was never called natively: %+v", v.e)
 	}
 	// A throw caught in the function goes on natively at its handler: a
 	// run in which every turn's property read throws, or every third's
@@ -260,9 +249,7 @@ func TestJITGenerators(t *testing.T) {
 		// by Go, or by a native step through its link (jitGenInForTest).
 		e := jitNativeForTest(t, r, name)
 		n := e.ssaStats.entries
-		if jitRegCodeForTest(r, name) {
-			n += jitGenInForTest(r, name)
-		}
+		n += jitGenInForTest(r, name)
 		if n < 30 {
 			t.Fatalf("%s entered natively %d times", name, n)
 		}

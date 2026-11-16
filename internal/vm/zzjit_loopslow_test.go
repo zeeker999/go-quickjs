@@ -51,14 +51,12 @@ func TestJITCallsOfGoAtLoops(t *testing.T) {
 	runtime.GC()
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	r, want := jitAnswersWithForTest(t, `function integers(n) { let s = 0; for (let i = 0; i < n; i++) s += framedCall('xy', i & 1) === 120 ? 1 : 2; return s }`, jitFramedCallForTest)
-	back := r.jit.backToTree
 	want(`integers(200000)`, "300000")
 	e := jitNativeForTest(t, r, "integers")
 	// Register code's frame goes back to the register interpreter, which
-	// runs every frame code leaves: no tree takes it back (backToTree).
-	tree := !jitRegCodeForTest(r, "integers")
-	if !e.loopSlow || tree && r.jit.backToTree == back {
-		t.Fatalf("integers' calls of Go judged to pay (loopSlow %v), or its frame not given back to its tree (%d)", e.loopSlow, r.jit.backToTree-back)
+	// runs every frame code leaves.
+	if !e.loopSlow {
+		t.Fatalf("integers' calls of Go judged to pay (loopSlow %v)", e.loopSlow)
 	}
 	if e.ssaStats.runGoCalls > 2*jitSSAProbe {
 		t.Fatalf("integers made %d calls of Go natively before it left", e.ssaStats.runGoCalls)
@@ -95,16 +93,11 @@ func TestJITLoopExitsAtEachTurn(t *testing.T) {
 		}
 		function* count(n) { for (let i = 0; i < n; i++) yield i; return () => n }
 		function viaGen(n) { let s = 0; for (let j = 0; j < n; j++) for (const v of count(10)) s = (s + v * j) | 0; return s }`)
-	back, interpreted := r.jit.backToTree, r.jit.interpreted
+	interpreted := r.jit.interpreted
 	want(`viaUsing(200000)`, "-1474336480")
 	e := jitNativeForTest(t, r, "viaUsing")
 	if !e.loopSlow {
 		t.Fatalf("viaUsing's loop, leaving at each turn, judged to pay: %d stretches entered at the loop, %d work", e.ssaStats.osrStretches, e.ssaStats.osrWork)
-	}
-	if !jitRegCodeForTest(r, "viaUsing") && r.jit.backToTree == back {
-		// Register code's frame goes back to the register interpreter,
-		// which runs every frame code leaves: no tree takes it back.
-		t.Fatal("viaUsing's frame did not go back to its tree")
 	}
 	if n := r.jit.interpreted - interpreted; n > 2*jitSSAProbe {
 		t.Fatalf("viaUsing's frame given to the interpreter %d times", n)
@@ -114,10 +107,9 @@ func TestJITLoopExitsAtEachTurn(t *testing.T) {
 	if e.ssaStats.entries != entries {
 		t.Fatalf("viaUsing, judged not to pay at its loop, entered %d times", e.ssaStats.entries-entries)
 	}
-	back = r.jit.backToTree
 	want(`viaGen(30000)`, "-1225511480")
-	if e := jitNativeForTest(t, r, "viaGen"); !e.loopSlow || !jitRegCodeForTest(r, "viaGen") && r.jit.backToTree == back {
-		t.Fatalf("viaGen's steps judged to pay (loopSlow %v), or its frame not given back to its tree (%d)", e.loopSlow, r.jit.backToTree-back)
+	if e := jitNativeForTest(t, r, "viaGen"); !e.loopSlow {
+		t.Fatalf("viaGen's steps judged to pay (loopSlow %v)", e.loopSlow)
 	}
 	want(`viaGen(20000)`, "409615408")
 }

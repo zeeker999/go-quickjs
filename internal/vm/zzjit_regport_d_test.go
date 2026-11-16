@@ -137,11 +137,6 @@ func jitCallbackCodeForTest(r *Runtime, name string) jitCallbackCode {
 		c.callbacks, c.unmade, c.inlined = e.keep.callbacks, e.keep.unmade, len(e.keep.inlined)
 	}
 	return c
-	e := jitCallbackEntry(r, name)
-	if e == nil {
-		return jitCallbackCode{}
-	}
-	return jitCallbackCode{e: e, code: e.ssa != nil, loops: e.loops, callbacks: e.ssaCallbacks, unmade: e.ssaUnmade, inlined: len(e.ssaInlined)}
 }
 
 // regLifeNamedForTest is the state that outlives the register code of the
@@ -169,12 +164,6 @@ func jitLinkInNamedForTest(r *Runtime, names ...string) uint64 {
 		}
 	}
 	return n
-	for k, x := range r.jit.cache {
-		if fn := k.Value(); fn != nil && slices.Contains(names, fn.Name) && x.link != nil {
-			n += x.link.in
-		}
-	}
-	return n
 }
 
 // jitHintForTest is the entry of cl's function in r, nil where it has
@@ -186,7 +175,6 @@ func jitHintForTest(r *Runtime, cl *closure) *jitEntry {
 		return nil
 	}
 	return r.jit.regLearned[jitRegKeyInRealmForTest(r, cl)]
-	return r.jit.hint(cl)
 }
 
 // jitRegKeyInRealmForTest is the key of cl's register code in cl's own
@@ -214,20 +202,13 @@ func jitRegKeyOfLifeForTest(r *Runtime, e *jitEntry) (jitKey, bool) {
 }
 
 // jitEntryCodeForTest reports whether e, an entry jitHintForTest gives,
-// has code: the stack form's entry's own, or the register code in the
-// cache its life (e) belongs to.
+// has code: the register code in the cache its life (e) belongs to.
 func jitEntryCodeForTest(r *Runtime, e *jitEntry) bool {
-	if e == nil {
-		return false
-	}
-	if e.jitLearned != nil && e.reg {
-		return jitEntryRegCodeForTest(r, e) != nil
-	}
-	return e.ssa != nil
+	return jitEntryRegCodeForTest(r, e) != nil
 }
 
 // jitEntryRegCodeForTest is the register code whose life e is, nil where
-// the cache holds none with code or e is a stack form's entry.
+// the cache holds none with code.
 func jitEntryRegCodeForTest(r *Runtime, e *jitEntry) *jitRegEntry {
 	if e == nil || e.jitLearned == nil || !e.reg {
 		return nil
@@ -240,17 +221,13 @@ func jitEntryRegCodeForTest(r *Runtime, e *jitEntry) *jitRegEntry {
 	return nil
 }
 
-// jitEntryLinkForTest is the link native callers call e's code through,
-// in either form: the stack form's entry's, or the register code's
-// (jitLearned's regLink); nil for none.
+// jitEntryLinkForTest is the link native callers call e's code through:
+// the register code's (jitLearned's regLink); nil for none.
 func jitEntryLinkForTest(e *jitEntry) *jitLink {
-	if e == nil {
+	if e == nil || e.jitLearned == nil {
 		return nil
 	}
-	if e.jitLearned != nil && e.reg {
-		return e.regLink
-	}
-	return e.link
+	return e.regLink
 }
 
 // regVirtualsForTest has the register compiles made until stop is called
@@ -294,13 +271,6 @@ func jitVirtualsForTest(t *testing.T) (virtuals func(r *Runtime, name string) (c
 		}
 		return false, 0
 	}, stop
-	return func(r *Runtime, name string) (bool, int) {
-		e := jitCallbackEntry(r, name)
-		if e == nil || e.ssa == nil {
-			return false, 0
-		}
-		return true, e.ssaVirtuals
-	}, func() {}
 }
 
 // regRebuiltVirtualsForTest is how many objects the register code of the
@@ -333,7 +303,6 @@ func regRebuiltVirtualsForTest(t *testing.T, r *Runtime, name string) (bool, int
 // (jitTargets) and counts are the stack form's entry's counterparts.
 func jitEntryNamedForTest(r *Runtime, name string) *jitEntry {
 	return regLifeNamedForTest(r, name)
-	return jitCallbackEntry(r, name)
 }
 
 // jitCachedForTest is what r's JIT's cache holds for the global function
@@ -345,10 +314,6 @@ func jitCachedForTest(r *Runtime, name string) (held any, code bool) {
 	cl := jitGlobalClosure(r, name)
 	if e := r.jit.regCache[r.jitRegKeyOf(cl)]; e != nil {
 		return e, e.code != nil
-	}
-	return nil, false
-	if e := r.jit.cache[r.jitKeyOf(cl.fn)]; e != nil {
-		return e, e.ssa != nil
 	}
 	return nil, false
 }
@@ -401,9 +366,4 @@ func jitCalleeCodeForTest(t *testing.T, r *Runtime, name string) (*jitEntry, *ji
 		t.Fatalf("%s has no link: %+v", name, e)
 	}
 	return e.life, l, e.code
-	e := jitNativeOrCalleeForTest(t, r, name)
-	if e.link == nil {
-		t.Fatalf("%s has no link: %+v", name, e)
-	}
-	return e, e.link, e.ssa
 }

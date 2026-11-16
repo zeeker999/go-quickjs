@@ -3,13 +3,12 @@
 package vm
 
 import (
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"slices"
 	"strings"
 	"testing"
 	"time"
-	"unsafe"
 
+	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit/mir"
 )
 
@@ -77,42 +76,6 @@ func TestJITBackgroundFirstCompile(t *testing.T) {
 		t.Fatalf("submitted %d, discarded %d, jobs %d, pending %d, compiled %d: want 1, 0, 0, 0, 1",
 			s.bgSubmitted, s.bgDiscarded, len(s.regJobs), len(s.regPendingJobs), s.compiled)
 	}
-	return
-	var j *jitJob
-	for call := 1; ; call++ {
-		before := r.JITStats().SSAEntries
-		jitCallForTest(t, r, `sum(10)`, 45)
-		e := r.jit.entryFor(cl.fn)
-		if e == nil {
-			t.Fatalf("call %d: no entry", call)
-		}
-		native := r.JITStats().SSAEntries != before
-		if e.warming {
-			// Its lowering, in the background first (jitLowerLater).
-			if e.ssa != nil || native || j != nil {
-				t.Fatalf("call %d: code %v, native %v, compile seen %v: want it lowering, run in the existing tiers", call, e.ssa != nil, native, j != nil)
-			}
-			continue
-		}
-		if e.pending != nil {
-			j = e.pending
-			if e.ssa != nil || native || j.checks >= k {
-				t.Fatalf("call %d: code %v, native %v, %d checks: want the compile pending, run in the existing tiers", call, e.ssa != nil, native, j.checks)
-			}
-			continue
-		}
-		if j == nil {
-			t.Fatalf("call %d: code %v, native %v, its compile never seen pending", call, e.ssa != nil, native)
-		}
-		if j.checks != k || e.ssa == nil || !native {
-			t.Fatalf("call %d: its compile's checks %d, code %v, native %v: want the code installed at check %d and run", call, j.checks, e.ssa != nil, native, k)
-		}
-		break
-	}
-	if s := r.jit; s.bgLowered != 1 || s.bgSubmitted != 1 || s.bgDiscarded != 0 || len(s.jobs) != 0 || len(s.lowerings) != 0 || s.compiled != 1 {
-		t.Fatalf("lowered %d, submitted %d, discarded %d, jobs %d, lowerings %d, compiled %d: want 1, 1, 0, 0, 0, 1",
-			s.bgLowered, s.bgSubmitted, s.bgDiscarded, len(s.jobs), len(s.lowerings), s.compiled)
-	}
 }
 
 // Code compiled again in the background runs on, valid, until its
@@ -132,18 +95,6 @@ func TestJITBackgroundRecompileRunsOldCode(t *testing.T) {
 	if r.jit.regPendingJobs[e.key] != nil || jitRegOfForTest(r, cl) == e || r.jit.reoptimized != reoptimized+1 {
 		t.Fatalf("pending %v, same code %v, reoptimized %d: want the new code installed", r.jit.regPendingJobs[e.key] != nil, jitRegOfForTest(r, cl) == e, r.jit.reoptimized-reoptimized)
 	}
-	return
-	e, _ := jitPendingRecompileForTest(t, r)
-	old := e.ssa
-	before, reoptimized := r.JITStats().SSAEntries, r.jit.reoptimized
-	jitCallForTest(t, r, `sum(10)`, 45)
-	if e.pending == nil || e.ssa != old || r.JITStats().SSAEntries == before {
-		t.Fatalf("pending %v, same code %v, native %v: want the old code run while the new compiles", e.pending != nil, e.ssa == old, r.JITStats().SSAEntries != before)
-	}
-	jitCallForTest(t, r, `sum(10)`, 45)
-	if e.pending != nil || e.ssa == old || r.jit.reoptimized != reoptimized+1 {
-		t.Fatalf("pending %v, same code %v, reoptimized %d: want the new code installed", e.pending != nil, e.ssa == old, r.jit.reoptimized-reoptimized)
-	}
 }
 
 // A compile again whose function deoptimized since it was built is thrown
@@ -162,17 +113,6 @@ func TestJITBackgroundDiscardsAfterDeopt(t *testing.T) {
 	}
 	if e.busy != 0 || r.jit.regRunning(e) {
 		t.Fatalf("busy %d, in use %v after the compile was thrown away", e.busy, r.jit.regRunning(e))
-	}
-	return
-	e, _ := jitPendingRecompileForTest(t, r)
-	old := e.ssa
-	e.deopts++
-	jitCallForTest(t, r, `sum(10)`, 45)
-	if e.pending != nil || e.ssa != old || r.jit.bgDiscarded != 1 || len(r.jit.jobs) != 0 {
-		t.Fatalf("pending %v, same code %v, discarded %d, jobs %d: want the compile thrown away", e.pending != nil, e.ssa == old, r.jit.bgDiscarded, len(r.jit.jobs))
-	}
-	if e.busy != 0 {
-		t.Fatalf("busy %d after the compile was thrown away", e.busy)
 	}
 }
 
@@ -227,26 +167,6 @@ func TestJITBackgroundWorkerPanic(t *testing.T) {
 	if !j.panicked || r.jit.backendPanics != 1 || r.jit.regPendingJobs[j.key] != nil || jitRegOfForTest(r, cl) != old || old.code != code {
 		t.Fatalf("panicked %v, backend panics %d, pending %v, same code %v", j.panicked, r.jit.backendPanics, r.jit.regPendingJobs[j.key] != nil, jitRegOfForTest(r, cl) == old && old.code == code)
 	}
-	r.jit.backendPanics = 0
-	jitWorkerPanics.Add(-1)
-	jitCallForTest(t, r, `sum(100)`, 4950)
-	return
-	e := jitEntryForTest(t, r, "sum")
-	old := e.ssa
-	j, err := r.compileSSAPrepare(cl.fn, cl, e.ssaProg, e)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// A function the optimization cannot take, built as it was prepared,
-	// not from a snapshot.
-	j.f, j.snap = nil, nil
-	j.deopts, j.install = e.deopts, (*Runtime).jitReoptimized
-	r.jitSubmit(e, j)
-	if !j.panicked || r.jit.backendPanics != 1 || e.pending != nil || e.ssa != old {
-		t.Fatalf("panicked %v, backend panics %d, pending %v, same code %v", j.panicked, r.jit.backendPanics, e.pending != nil, e.ssa == old)
-	}
-	// Counted as it should be: not a backend bug for the cleanup, nor
-	// TestMain, to report.
 	r.jit.backendPanics = 0
 	jitWorkerPanics.Add(-1)
 	jitCallForTest(t, r, `sum(100)`, 4950)
@@ -342,22 +262,6 @@ func TestJITBackgroundCalleeCompile(t *testing.T) {
 		t.Fatal("the installed code is not the callers'")
 	}
 	jitCallForTest(t, r, `sq(6)`, 19)
-	return
-	if ce := r.jitNativeCallee(cl); ce != nil {
-		t.Fatal("code at once")
-	}
-	e := r.jit.entryFor(cl.fn)
-	if e == nil || e.pending == nil || e.ssa != nil {
-		t.Fatalf("entry %v: want its compile pending", e != nil)
-	}
-	r.jitDrain()
-	if e.pending != nil || e.ssa == nil || !e.ssaCallee || !e.entrySlow {
-		t.Fatalf("pending %v, code %v, callee's %v, entry slow %v: want the callers' code installed", e.pending != nil, e.ssa != nil, e.ssaCallee, e.entrySlow)
-	}
-	if ce := r.jitNativeCallee(cl); ce != e {
-		t.Fatal("the installed code is not the callers'")
-	}
-	jitCallForTest(t, r, `sq(6)`, 19)
 }
 
 // A compile in the background is made with the backend's switches and the
@@ -415,22 +319,6 @@ func TestJITBackgroundBuildsFromSnapshot(t *testing.T) {
 	if r.jit.regPendingJobs[e.key] != nil || jitRegOfForTest(r, cl) == e || r.jit.regSnapMisses != 0 {
 		t.Fatalf("pending %v, same code %v, missed %d: want the code built from the snapshot installed", r.jit.regPendingJobs[e.key] != nil, jitRegOfForTest(r, cl) == e, r.jit.regSnapMisses)
 	}
-	return
-	e, _ := jitPendingRecompileForTest(t, r)
-	j := e.pending
-	if j.snap == nil || j.missed {
-		t.Fatalf("snapshot %v, missed %v: want the compile prepared as a snapshot", j.snap != nil, j.missed)
-	}
-	<-j.done
-	if j.f == nil || j.missed || j.buildErr != nil {
-		t.Fatalf("built %v, missed %v, refused %v: want the worker to have built it", j.f != nil, j.missed, j.buildErr)
-	}
-	old := e.ssa
-	r.jitStress.checks = 1
-	jitCallForTest(t, r, `sum(10)`, 45)
-	if e.pending != nil || e.ssa == old || r.jit.bgMissed != 0 {
-		t.Fatalf("pending %v, same code %v, missed %d: want the code built from the snapshot installed", e.pending != nil, e.ssa == old, r.jit.bgMissed)
-	}
 }
 
 // A build that asks what its snapshot was not asked misses, and the compile
@@ -456,22 +344,6 @@ func TestJITBackgroundSnapshotMiss(t *testing.T) {
 	if !j.missed || r.jit.regSnapMisses != 1 || r.jit.regPendingJobs[j.key] != nil || jitRegOfForTest(r, cl) == old {
 		t.Fatalf("missed %v, counted %d, pending %v, same code %v: want it built on the runtime's goroutine and installed",
 			j.missed, r.jit.regSnapMisses, r.jit.regPendingJobs[j.key] != nil, jitRegOfForTest(r, cl) == old)
-	}
-	jitCallForTest(t, r, `sum(100)`, 4950)
-	return
-	e := jitEntryForTest(t, r, "sum")
-	old := e.ssa
-	j, err := r.compileSSAPrepare(cl.fn, cl, e.ssaProg, e)
-	if err != nil || j.snap == nil {
-		t.Fatalf("prepared %v, snapshot %v", err, j != nil && j.snap != nil)
-	}
-	// Every build asks it.
-	delete(j.snap.answers, jitSnapKey{snapKeepLimit, 0})
-	j.deopts, j.install = e.deopts, (*Runtime).jitReoptimized
-	r.jitSubmit(e, j)
-	if !j.missed || r.jit.bgMissed != 1 || e.pending != nil || e.ssa == old {
-		t.Fatalf("missed %v, counted %d, pending %v, same code %v: want it built on the runtime's goroutine and installed",
-			j.missed, r.jit.bgMissed, e.pending != nil, e.ssa == old)
 	}
 	jitCallForTest(t, r, `sum(100)`, 4950)
 }
@@ -527,42 +399,6 @@ func TestJITBackgroundStaleLink(t *testing.T) {
 	in := link.in
 	jitCallForTest(t, r, `loop(100)`, 2475)
 	if n := link.in - in; n < 100 {
-		t.Errorf("loop(100) called half natively %d times, want 100", n)
-	}
-	return
-	// half's code for native callers, installed.
-	r.jitNativeCallee(half)
-	r.jitDrain()
-	he := r.jit.entryFor(half.fn)
-	if he == nil || he.ssa == nil {
-		t.Fatal("half has no code")
-	}
-	old := he.link
-	// loop's compile handed over, its call of half through half's link.
-	if e := r.jitCompileForIn(loop.fn, loop, jitLowerSSA, true); e == nil || e.pending == nil {
-		t.Fatal("loop's compile not pending")
-	}
-	// half's entry dropped meanwhile, and half compiled again: another
-	// link.
-	if !r.jit.dropEntry(r.jitKeyOf(half.fn), he) {
-		t.Fatal("half's entry not dropped")
-	}
-	r.jitNativeCallee(half)
-	r.jitDrain()
-	he = r.jit.entryFor(half.fn)
-	if he == nil || he.ssa == nil || he.link == old {
-		t.Fatalf("half compiled again: entry %v, a link of its own %v", he != nil && he.ssa != nil, he != nil && he.link != old)
-	}
-	le := r.jit.entryFor(loop.fn)
-	if le == nil || le.ssa == nil {
-		t.Fatal("loop's code not installed")
-	}
-	if r.jit.bgStale != 1 {
-		t.Errorf("%d compiles built again for stale links, want 1", r.jit.bgStale)
-	}
-	in := he.link.in
-	jitCallForTest(t, r, `loop(100)`, 2475)
-	if n := he.link.in - in; n < 100 {
 		t.Errorf("loop(100) called half natively %d times, want 100", n)
 	}
 }
@@ -693,16 +529,5 @@ func TestJITBackgroundCompileWaitsForItsCallee(t *testing.T) {
 	inlined := re != nil && re.keep != nil && slices.Contains(re.keep.inlined, add)
 	if re == nil || re.code == nil || !inlined || len(re.unentered) == 0 {
 		t.Fatalf("once does not inline add, whose objects it would leave unmade: %+v", re)
-	}
-	return
-	if r.jit.bgHeld == 0 {
-		t.Fatal("no compile waited for a callee's")
-	}
-	if len(r.jit.heldJobs) != 0 {
-		t.Fatalf("%d compiles still held", len(r.jit.heldJobs))
-	}
-	e := jitCallbackEntry(r, "once")
-	if e == nil || e.ssa == nil || len(e.ssaInlined) == 0 || e.ssaVirtuals == 0 {
-		t.Fatalf("once does not inline add, whose objects it would leave unmade: %+v", e)
 	}
 }

@@ -130,10 +130,6 @@ func TestJITRealmsHaveTheirOwnCode(t *testing.T) {
 				if e := r.jit.regCache[r.jitKeyOf(object)]; e != nil && e.code != nil && e.life.ssaStats.entries != 0 {
 					seen[e] = true
 				}
-				return
-				if e := r.jit.entryFor(object); e != nil && e.ssa != nil && e.ssaStats.entries != 0 {
-					seen[e] = true
-				}
 			})
 		}
 		if len(seen) != len(realms) {
@@ -238,12 +234,6 @@ func jitRealmFlushed(t *testing.T, r *Runtime, setEpoch func(uint64), keep map[w
 		r.jitDrain()
 		r.jit.flush()
 		left = 0
-		for key := range r.jit.cache {
-			if key.realm != cur && !keep[key.realm] {
-				left++
-			}
-		}
-		// The register form's code, by the same keys.
 		for key := range r.jit.regCache {
 			if key.realm != cur && !keep[key.realm] {
 				left++
@@ -286,11 +276,6 @@ func TestJITDroppedRealmsLeaveTheCache(t *testing.T) {
 		}
 		s := r.jit
 		native := 0
-		for key, e := range s.cache {
-			if key.realm.Value() != nil && e.ssa != nil && e.ssaStats.entries != 0 {
-				native++
-			}
-		}
 		for key, e := range s.regCache {
 			if key.realm.Value() != nil && e.code != nil && e.life != nil && e.life.ssaStats.entries != 0 {
 				native++
@@ -301,12 +286,6 @@ func TestJITDroppedRealmsLeaveTheCache(t *testing.T) {
 		}
 		if n := jitRealmFlushed(t, r, setEpoch, nil); n != 0 {
 			t.Errorf("%+v: %d entries of dropped realms left", c, n)
-		}
-		if err := jitLinksHeld(s); err != nil {
-			t.Error(err)
-		}
-		if err := jitEntriesFound(s); err != nil {
-			t.Error(err)
 		}
 		if err := regLinksHeldForTest(s); err != nil {
 			t.Error(err)
@@ -399,17 +378,6 @@ func TestJITFlushKeepsTheRunningRealm(t *testing.T) {
 			if key.realm == cur {
 				own++
 				if e := s.regCache[key]; e == nil || e.code == nil {
-					warming++
-				}
-			} else {
-				other++
-			}
-		}
-		return
-		for key, e := range s.cache {
-			if key.realm == cur {
-				own++
-				if !e.holdsCode() {
 					warming++
 				}
 			} else {

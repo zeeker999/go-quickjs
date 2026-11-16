@@ -66,13 +66,8 @@ func TestJITSSADeepChainsSeenByTheInterpreter(t *testing.T) {
 		if e == nil || e.entrySlow {
 			t.Fatalf("round %d: deep did not run natively", i)
 		}
-		// The compiles again of top-level code, of either form.
+		// The compiles again of top-level code.
 		top := uint64(0)
-		for k, x := range r.jit.cache {
-			if fn := k.Value(); fn != nil && fn.TopLevel {
-				top += uint64(x.reopts) + uint64(x.inlineReopts) + uint64(x.upgradeReopts)
-			}
-		}
 		for k, x := range r.jit.regCache {
 			if fn := k.Value(); fn != nil && fn.TopLevel && x.life != nil {
 				top += uint64(x.life.reopts)

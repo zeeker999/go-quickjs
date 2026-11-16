@@ -134,25 +134,6 @@ func TestJITForEachLoop(t *testing.T) {
 	if r.jit.loopsFinished == 0 {
 		t.Error("Go went on with no loop")
 	}
-	return
-	jitAgreeRoundsForTest(t, r, want, last...)
-	var e *jitEntry
-	for k, x := range r.jit.cache {
-		if fn := k.Value(); fn != nil && fn.Name == "sums" {
-			e = x
-		}
-	}
-	if e == nil || e.ssa == nil || !e.loops {
-		t.Fatalf("sums makes no loop of its forEach: %+v", e)
-	}
-	if e.ssaStats.goCalls != 0 || e.ssaStats.hosts != 0 {
-		t.Errorf("sums called Go %d times, left its code %d times", e.ssaStats.goCalls, e.ssaStats.hosts)
-	}
-	// The holes, the lengths changed, the callbacks that left: Go went on
-	// with those loops.
-	if r.jit.loopsFinished == 0 {
-		t.Error("Go went on with no loop")
-	}
 }
 
 // A callback that leaves native code where the loop's code cannot go on
@@ -180,12 +161,6 @@ func TestJITForEachAfterCallback(t *testing.T) {
 						rt.jitRegInvalidate(fd.closure, x)
 					}
 				}
-				for k, x := range rt.jit.cache {
-					if fn := k.Value(); fn != nil && len(args) == 1 && fn.Name == args[0].String().Go() && x.ssa != nil {
-						fd := rt.global.getOwn(rt.atoms.intern(fn.Name)).value().Object().fn()
-						rt.jitInvalidate(fd.closure, x)
-					}
-				}
 				return Undefined, nil
 			})), propDefault)
 		if _, err := rt.Run(compileForTest(t, afterCallbackSetup)); err != nil {
@@ -210,6 +185,78 @@ func TestJITForEachAfterCallback(t *testing.T) {
 		t.Error("Go went on with no loop")
 	}
 }
+
+// afterCallbackSetup's visit makes a forEach native code makes a loop of,
+// and visitReduce a reduce, visitMap a map and so on, whose callback, at
+// the index at, has its caller's code invalidated (invalidateVisit) and
+// then leaves native code itself, at an object of another shape: Go
+// finishes the callback, and the caller's code, invalid, does not go on
+// after the call -- the callback's result Go finished used as the built-in
+// uses it: reduce's accumulator, map's element, filter's test, some's,
+// every's, find's and findIndex's answer.
+const afterCallbackSetup = `
+	var items = []
+	for (let i = 0; i < 8; i++) items.push({ v: i })
+	var odd = { w: 0, v: 100 }
+	function visit(at) {
+		let s = 0
+		items.forEach((o, i) => {
+			if (i === at) invalidateVisit('visit')
+			s += (i === at ? odd : o).v
+		})
+		return s
+	}
+	function visitReduce(at) {
+		return items.reduce((s, o, i) => {
+			if (i === at) invalidateVisit('visitReduce')
+			return s + (i === at ? odd : o).v
+		}, 0)
+	}
+	function visitMap(at) {
+		return items.map((o, i) => {
+			if (i === at) invalidateVisit('visitMap')
+			return (i === at ? odd : o).v
+		}).join()
+	}
+	function visitFilter(at) {
+		return items.filter((o, i) => {
+			if (i === at) invalidateVisit('visitFilter')
+			return (i === at ? odd : o).v % 2 === 0
+		}).length
+	}
+	function visitSome(at) {
+		return items.some((o, i) => {
+			if (i === at) invalidateVisit('visitSome')
+			return (i === at ? odd : o).v > 50
+		})
+	}
+	function visitEvery(at) {
+		return items.every((o, i) => {
+			if (i === at) invalidateVisit('visitEvery')
+			return (i === at ? odd : o).v < 50
+		})
+	}
+	function visitFind(at) {
+		const r = items.find((o, i) => {
+			if (i === at) invalidateVisit('visitFind')
+			return (i === at ? odd : o).v > 50
+		})
+		return r === undefined ? 'none' : r.v
+	}
+	function visitFindIndex(at) {
+		return items.findIndex((o, i) => {
+			if (i === at) invalidateVisit('visitFindIndex')
+			return (i === at ? odd : o).v > 50
+		})
+	}
+	function drive(n, at) {
+		let r = ''
+		for (let i = 0; i < n; i++) {
+			r = visit(at) + ' ' + visitReduce(at) + ' ' + visitMap(at) + ' ' + visitFilter(at) + ' ' + visitSome(at) + ' ' + visitEvery(at) + ' ' + visitFind(at) + ' ' + visitFindIndex(at)
+		}
+		return r
+	}
+`
 
 // stackSetup's throws throws from its forEach's callback, which leaves
 // native code there, Go making the frames of the levels native code had
@@ -254,16 +301,6 @@ func TestJITForEachStackTrace(t *testing.T) {
 	r := jitAgreesForTest(t, stackSetup, rounds...)
 	for _, name := range []string{"throws", "undefinedCall", "reduces", "maps", "finds", "holeStack"} {
 		if !regMakesLoopsForTest(r, regEntryNamedForTest(r, name)) {
-			t.Errorf("%s makes no loop of its forEach", name)
-		}
-		continue
-		var e *jitEntry
-		for k, x := range r.jit.cache {
-			if fn := k.Value(); fn != nil && fn.Name == name {
-				e = x
-			}
-		}
-		if e == nil || e.ssa == nil || !e.loops {
 			t.Errorf("%s makes no loop of its forEach", name)
 		}
 	}
@@ -337,23 +374,6 @@ func TestJITReduceLoop(t *testing.T) {
 		t.Errorf("sumInit called Go %d times, left its code %d times", st.goCalls-b.goCalls, st.hosts-b.hosts)
 	}
 	jitAgreeRoundsForTest(t, r, want, last...)
-	if r.jit.loopsFinished == 0 {
-		t.Error("Go went on with no loop")
-	}
-	return
-	jitAgreeRoundsForTest(t, r, want, last...)
-	var e *jitEntry
-	for k, x := range r.jit.cache {
-		if fn := k.Value(); fn != nil && fn.Name == "sumInit" {
-			e = x
-		}
-	}
-	if e == nil || e.ssa == nil || !e.loops {
-		t.Fatalf("sumInit makes no loop of its reduce: %+v", e)
-	}
-	if e.ssaStats.goCalls != 0 || e.ssaStats.hosts != 0 {
-		t.Errorf("sumInit called Go %d times, left its code %d times", e.ssaStats.goCalls, e.ssaStats.hosts)
-	}
 	if r.jit.loopsFinished == 0 {
 		t.Error("Go went on with no loop")
 	}

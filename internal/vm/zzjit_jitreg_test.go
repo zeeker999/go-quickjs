@@ -6,12 +6,6 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/jit"
 )
 
-// jitRegCodeForTest reports whether the global function name's closure
-// was given its function's register code, which r's JIT compiles.
-func jitRegCodeForTest(r *Runtime, name string) bool {
-	return r.global.getOwn(r.atoms.intern(name)).value().Object().fn().closure.reg != nil
-}
-
 // jitRegLifeForTest is the state of the global function name's register
 // code that outlives its compiles (jitRegLifeOf), if the cache holds code
 // compiled from it, and nil otherwise: its counts -- entries, hosts,
@@ -33,28 +27,15 @@ func jitRegLifeForTest(r *Runtime, name string) *jitEntry {
 // register code (jitRegCodeForTest), its register code's state
 // (jitRegLifeForTest).
 func jitCodeForTest(r *Runtime, name string) *jitEntry {
-	if jitRegCodeForTest(r, name) {
-		return jitRegLifeForTest(r, name)
-	}
-	e := r.jit.entryFor(r.global.getOwn(r.atoms.intern(name)).value().Object().fn().closure.fn)
-	if e == nil || e.ssa == nil {
-		return nil
-	}
-	return e
+	return jitRegLifeForTest(r, name)
 }
 
 // jitSSACodeForTest is the native code of the global function name, nil
 // where it has none: its stack form's entry's, or its register code's.
 func jitSSACodeForTest(r *Runtime, name string) *jit.SSACode {
-	if jitRegCodeForTest(r, name) {
-		cl := r.global.getOwn(r.atoms.intern(name)).value().Object().fn().closure
-		if e := r.jit.regCache[r.jitRegKeyOf(cl)]; e != nil {
-			return e.code
-		}
-		return nil
-	}
-	if e := jitCodeForTest(r, name); e != nil {
-		return e.ssa
+	cl := r.global.getOwn(r.atoms.intern(name)).value().Object().fn().closure
+	if e := r.jit.regCache[r.jitRegKeyOf(cl)]; e != nil {
+		return e.code
 	}
 	return nil
 }
@@ -65,24 +46,26 @@ func jitSSACodeForTest(r *Runtime, name string) *jit.SSACode {
 // link, in either form.
 func jitNativeUsesForTest(r *Runtime, name string) uint64 {
 	cl := r.global.getOwn(r.atoms.intern(name)).value().Object().fn().closure
-	if jitRegCodeForTest(r, name) {
-		e := jitRegLifeForTest(r, name)
-		if e == nil {
-			return 0
-		}
-		n := e.ssaStats.entries
-		if k := r.jit.regLinks[r.jitRegKeyOf(cl)]; k != nil {
-			n += k.in
-		}
-		return n
-	}
-	e := r.jit.hint(cl)
-	if e == nil || e.ssa == nil {
+	e := jitRegLifeForTest(r, name)
+	if e == nil {
 		return 0
 	}
 	n := e.ssaStats.entries
-	if e.link != nil {
-		n += e.link.in
+	if k := r.jit.regLinks[r.jitRegKeyOf(cl)]; k != nil {
+		n += k.in
 	}
 	return n
+}
+
+// jitHasCodeForTest reports whether r's JIT holds native code.
+func jitHasCodeForTest(r *Runtime) bool {
+	if r.jit == nil {
+		return false
+	}
+	for _, e := range r.jit.regCache {
+		if e.code != nil {
+			return true
+		}
+	}
+	return false
 }

@@ -98,17 +98,11 @@ func TestJITDerivedDefaultConstruct(t *testing.T) {
 
 // jitDerivedForTest is the entry of the derived class name's constructor:
 // a class is a lexical binding, not the global object's, so it is found
-// by its function's name. Where runtimes run register code, it is the
-// state its register code's compiles share (regLearned).
+// by its function's name: the state its register code's compiles share
+// (regLearned).
 func jitDerivedForTest(t *testing.T, r *Runtime, name string) *jitEntry {
 	t.Helper()
 	for k, x := range r.jit.regLearned {
-		if fn := k.Value(); fn != nil && fn.Name == name && fn.Kind == bytecode.KindDerivedConstructor {
-			return x
-		}
-	}
-	t.Fatalf("%s has no entry", name)
-	for k, x := range r.jit.cache {
 		if fn := k.Value(); fn != nil && fn.Name == name && fn.Kind == bytecode.KindDerivedConstructor {
 			return x
 		}
@@ -327,7 +321,7 @@ func TestJITDerivedNativeMarking(t *testing.T) {
 	r := jitAgreesForTest(t, setup, rounds...)
 	for _, name := range []string{"B", "C"} {
 		if e := jitDerivedForTest(t, r, name); !jitEntryCodeForTest(r, e) || jitDerivedCalls(e) == 0 {
-			t.Errorf("%s was not constructed natively while the collector marked: code %v, slow %v, callee %v, %+v", name, jitEntryCodeForTest(r, e), e.entrySlow, e.ssaCallee, e.ssaStats)
+			t.Errorf("%s was not constructed natively while the collector marked: code %v, slow %v, %+v", name, jitEntryCodeForTest(r, e), e.entrySlow, e.ssaStats)
 		}
 	}
 }
@@ -535,12 +529,6 @@ func TestJITDerivedParentCodeEntered(t *testing.T) {
 			entries := mid.ssaStats.entries
 			agree()
 			if mid.ssaStats.entries == entries {
-				t.Errorf("Go never ran Mid's code from its start")
-			}
-			return
-			entered := r.jit.entered
-			agree()
-			if r.jit.entered == entered {
 				t.Errorf("Go never ran Mid's code from its start")
 			}
 		})

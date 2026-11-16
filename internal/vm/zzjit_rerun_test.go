@@ -32,20 +32,17 @@ func TestJITProgramRerunsKeepLayouts(t *testing.T) {
 		}
 		cl := globalObject(r, "make").fn().closure
 		found := 0
-		entries := r.jit.cache
 		// Register code's literals, which its functions' states that
 		// outlive their compiles hold (jitRegFeedback's literalAt), by
 		// register pc.
-		entries = r.jit.regLearned
-		for _, e := range entries {
+		for _, e := range r.jit.regLearned {
 			for i := range e.literals {
 				l := &e.literals[i]
 				if l.root == nil || l.fn != cl.fn {
 					continue
 				}
 				found++
-				site := cl.fn.Code[l.pc].B
-				site = uint32(cl.fn.RegCode().Code[l.pc].C())
+				site := uint32(cl.fn.RegCode().Code[l.pc].C())
 				if root := cl.ic[site].shape; root != l.root {
 					t.Fatalf("run %d: native code makes objects of root %p, the site's is %p", run, l.root, root)
 				}

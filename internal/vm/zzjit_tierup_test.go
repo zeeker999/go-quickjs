@@ -587,20 +587,6 @@ func TestJITWarmingCalleeCompiledOnDemand(t *testing.T) {
 	if e = jitEntryOfForTest(r, cl); e == nil || !jitHasCodeOfForTest(r, cl) || e.warming || cl.closureCode.jitRegRefused || cl.closureCode.jitReg == nil {
 		t.Fatalf("g not compiled at its native caller's call: %+v", jitHasCodeOfForTest(r, cl))
 	}
-	return
-	if _, err := r.jitLower(cl.fn, jitLowerInline); err == nil {
-		t.Fatal("g is lowered for native callers: no test of a refusal")
-	}
-	e := r.jit.entryFor(cl.fn)
-	if e == nil || !e.warming || e.ssa != nil {
-		t.Fatalf("g is not warming up: %+v", e)
-	}
-	if !r.jitNativeOrLinked(cl) {
-		t.Fatal("a native caller may not call g")
-	}
-	if e = r.jit.entryFor(cl.fn); e == nil || e.ssa == nil || e.warming || e.calleeRefused {
-		t.Fatalf("g not compiled at its native caller's call: %+v", e != nil && e.ssa != nil)
-	}
 }
 
 // jitRareCallForTest has h make call, of i, once in twenty-five of its
@@ -647,7 +633,7 @@ func TestJITLongCalleeWarmsUp(t *testing.T) {
 	// decided (callsDecided); register code's call of a known callee Go
 	// makes decides nothing (jitRegCallSeen's nativeCalls), and counts
 	// none.
-	if n := r.jit.callsDecided - decided; !true && n > 4 {
+	if n := r.jit.callsDecided - decided; false {
 		t.Fatalf("h's call of g decided %d times while g warmed", n)
 	}
 	for range 25 * jitInvocationsForMaglev {
@@ -1017,10 +1003,9 @@ func TestJITInlinedLiterals(t *testing.T) {
 	}
 	e := jitNativeForTest(t, r, "each")
 	reset := r.global.getOwn(r.atoms.intern("s")).value().Object().proto().getOwn(r.atoms.intern("reset")).value().Object().fn().closure
-	inlined := e.ssaInlined
 	// The closures register code inlines are its keep's (jitRegEntry's
 	// keep, jitRegFeedback's Inline).
-	inlined = jitRegOfForTest(r, jitGlobalClosure(r, "each")).keep.inlined
+	inlined := jitRegOfForTest(r, jitGlobalClosure(r, "each")).keep.inlined
 	if !slices.Contains(inlined, reset) {
 		t.Fatal("each does not inline reset: no test of an inlined callee's literals")
 	}

@@ -21,11 +21,10 @@ import (
 // budget, its next call compiling it (jitRegCallTier). Each template the
 // script prepares -- its functions', and theirs within them -- has its
 // first call sent to Go's tier-up (closureCode's jitEnters), which, its
-// budget one invocation, compiles it there, as the stack form's does: so
-// that what a test asks of native code is asked of the register form's at
-// the same call. Under the stack form it is Run.
+// budget one invocation, compiles it there: so that what a test asks of
+// native code is asked of it at the first call.
 func jitRunFirstForTest(r *Runtime, fn *bytecode.Function) (Value, error) {
-	if !true || !r.jitEnabled {
+	if !r.jitEnabled {
 		return r.Run(fn)
 	}
 	_, v, err := jitRunScriptForTest(r, fn, true)
@@ -70,47 +69,29 @@ func jitRunFirstSourceForTest(t *testing.T, r *Runtime, source string) (Value, e
 
 // jitWarmForTest runs source in r, a runtime with the JIT, with its JIT
 // off, as tests that fill their sites' caches before the JIT compiles do,
-// and returns a function that turns the JIT on again. The warm-up runs on
-// the tiers the JIT's code is compiled from: a runtime whose JIT is off
-// runs register code (regOn), so one whose JIT is the stack form's keeps
-// the old tiers meanwhile (oldTiers), whose caches its compiles read.
-// Where r runs register code, the functions source made, whose calls with
-// the JIT off had their budgets stop counting (jitRegCallTier,
-// regEdgesOff), as the stack form's closures never stop, have their next
-// call go to Go's tier-up, which compiles them there
-// (jitEnterFirstForTest), as the stack form compiles a warmed function at
-// its next call.
+// and returns a function that turns the JIT on again. The functions
+// source made, whose calls with the JIT off had their budgets stop
+// counting (jitRegCallTier, regEdgesOff), have their next call go to Go's
+// tier-up, which compiles them there (jitEnterFirstForTest).
 func jitWarmForTest(t *testing.T, r *Runtime, source string) func() {
 	t.Helper()
-	reg, old := true, r.oldTiers
-	r.oldTiers = old || !reg
 	r.jitEnabled = false
 	cl, _, err := jitRunScriptForTest(r, compileForTest(t, source), false)
-	r.oldTiers = old
 	if err != nil {
 		t.Fatal(err)
 	}
 	return func() {
 		r.jitEnabled = true
-		if reg {
-			jitEnterFirstForTest(cl)
-		}
+		jitEnterFirstForTest(cl)
 	}
 }
 
 // jitClosureCodeForTest is the state of cl's native code, nil where it
-// has none: the stack form's entry with code (entryOf), or, where cl runs
-// register code, its register code's that outlives its compiles (life),
-// whose counts and judgments -- entrySlow among them -- its runs keep.
+// has none: its register code's that outlives its compiles (life), whose
+// counts and judgments -- entrySlow among them -- its runs keep.
 func jitClosureCodeForTest(r *Runtime, cl *closure) *jitEntry {
 	if e := jitClosureRegForTest(r, cl); e != nil {
 		return e.life
-	}
-	if r.jit == nil || cl.reg != nil && true {
-		return nil
-	}
-	if e := r.entryOf(cl); e != nil && e.ssa != nil {
-		return e
 	}
 	return nil
 }
@@ -118,7 +99,7 @@ func jitClosureCodeForTest(r *Runtime, cl *closure) *jitEntry {
 // jitClosureRegForTest is the cache's register code of cl's function
 // with code, nil where it has none or cl does not run register code.
 func jitClosureRegForTest(r *Runtime, cl *closure) *jitRegEntry {
-	if r.jit == nil || cl.reg == nil || !true || cl.closureCode == nil {
+	if r.jit == nil || cl.reg == nil || cl.closureCode == nil {
 		return nil
 	}
 	if e := r.jit.regCache[r.jitRegKeyOf(cl)]; e != nil && e.code != nil {
@@ -127,32 +108,24 @@ func jitClosureRegForTest(r *Runtime, cl *closure) *jitRegEntry {
 	return nil
 }
 
-// jitClosureSSAForTest is cl's native code, nil where it has none, of
-// either form.
+// jitClosureSSAForTest is cl's native code, nil where it has none.
 func jitClosureSSAForTest(r *Runtime, cl *closure) *jit.SSACode {
 	if e := jitClosureRegForTest(r, cl); e != nil {
 		return e.code
 	}
-	if e := jitClosureCodeForTest(r, cl); e != nil {
-		return e.ssa
-	}
 	return nil
 }
 
-// jitClosureRefusedForTest reports whether the JIT refused cl's function
-// for good: its stack form's, or its register code's.
+// jitClosureRefusedForTest reports whether the JIT refused cl's
+// function's register code for good.
 func jitClosureRefusedForTest(r *Runtime, cl *closure) bool {
-	if cl.reg != nil && true {
-		return cl.closureCode.jitRegRefused
-	}
-	return cl.jitRefused
+	return cl.closureCode != nil && cl.closureCode.jitRegRefused
 }
 
-// jitCodeBytesForTest is the size of the native code r holds, of either
-// form: the stack form's entries' (jitCodeBytes), and the register form's
-// code in its cache.
+// jitCodeBytesForTest is the size of the native code r holds: the
+// register code in its cache.
 func jitCodeBytesForTest(r *Runtime) int64 {
-	n := r.jitCodeBytes()
+	var n int64
 	if r.jit != nil {
 		for _, e := range r.jit.regCache {
 			if e.code != nil {
@@ -164,20 +137,13 @@ func jitCodeBytesForTest(r *Runtime) int64 {
 }
 
 // jitLinkCallsForTest is how many calls native callers made of cl's
-// function's code through its link: the link of the stack form's entry the
-// cache holds for its function, or the register form's (regLinks).
+// function's code through its link (regLinks).
 func jitLinkCallsForTest(r *Runtime, cl *closure) uint64 {
 	if r.jit == nil {
 		return 0
 	}
-	if cl.reg != nil && true {
-		if k := r.jit.regLinks[r.jitRegKeyOf(cl)]; k != nil {
-			return k.in
-		}
-		return 0
-	}
-	if e := r.jit.cache[r.jitKeyOf(cl.fn)]; e != nil && e.link != nil {
-		return e.link.in
+	if k := r.jit.regLinks[r.jitRegKeyOf(cl)]; k != nil {
+		return k.in
 	}
 	return 0
 }
@@ -302,19 +268,8 @@ func jitRegHeldCountsEachKindForTest(t *testing.T, r *Runtime) {
 	}
 }
 
-// jitFunctionCodeForTest is jitClosureCodeForTest by cl's function: the
-// stack form's entry the cache holds for it (jitKeyOf), whatever cl's
-// hint names -- a native callee's closure need not know it -- or its
-// register code's state.
+// jitFunctionCodeForTest is jitClosureCodeForTest by cl's function: its
+// register code's state, whatever closure of it cl is.
 func jitFunctionCodeForTest(r *Runtime, cl *closure) *jitEntry {
-	if e := jitClosureRegForTest(r, cl); e != nil {
-		return e.life
-	}
-	if r.jit == nil || cl.reg != nil && true {
-		return nil
-	}
-	if e := r.jit.cache[r.jitKeyOf(cl.fn)]; e != nil && e.ssa != nil {
-		return e
-	}
-	return nil
+	return jitClosureCodeForTest(r, cl)
 }

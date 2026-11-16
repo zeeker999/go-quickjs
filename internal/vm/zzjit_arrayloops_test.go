@@ -93,14 +93,13 @@ func TestJITArrayLoops(t *testing.T) {
 	// The rounds of Array.prototype's element last, after the counts.
 	protoRounds := rounds[len(rounds)-2:]
 	r, want := jitAgreesPairForTest(t, arrayLoopsSetup+drivers, rounds[:len(rounds)-2]...)
-	// The register code's counts (its life's) go on over its compiles,
-	// where the stack form's entry's begin afresh at each: what the
-	// code compiled last does is counted over a pass of the functions'
-	// rounds more, their answers the interpreter's, before
+	// The register code's counts (its life's) go on over its compiles:
+	// what the code compiled last does is counted over a pass of the
+	// functions' rounds more, their answers the interpreter's, before
 	// Array.prototype has an element.
-	names := []string{"mapNums", "filterEven", "someAt", "findIndexAt", "everyBelow", "findObj"}
+	counted := []string{"mapNums", "filterEven", "someAt", "findIndexAt", "everyBelow", "findObj"}
 	before := map[string]jitSSAStats{}
-	for _, name := range names {
+	for _, name := range counted {
 		e := regEntryNamedForTest(r, name)
 		if !regMakesLoopsForTest(r, e) {
 			t.Fatalf("%s makes no loop of its call: %+v", name, e)
@@ -110,7 +109,7 @@ func TestJITArrayLoops(t *testing.T) {
 	jitAgreeRoundsForTest(t, r, want, `drive_mapNums(30, 2)`, `drive_filterEven(30, 1)`, `drive_someAt(30, 5)`, `drive_someAt(30, 99)`,
 		`drive_findIndexAt(30, 6)`, `drive_findIndexAt(30, 99)`, `drive_everyBelow(30, 99)`, `drive_everyBelow(30, 4)`,
 		`drive_findObj(30, 3)`, `drive_findObj(30, 99)`)
-	for _, name := range names {
+	for _, name := range counted {
 		e := regEntryNamedForTest(r, name)
 		if !regMakesLoopsForTest(r, e) {
 			t.Errorf("%s makes no loop of its call: %+v", name, e)
@@ -122,26 +121,6 @@ func TestJITArrayLoops(t *testing.T) {
 		}
 	}
 	jitAgreeRoundsForTest(t, r, want, protoRounds...)
-	if r.jit.loopsFinished == 0 {
-		t.Error("Go went on with no loop")
-	}
-	return
-	jitAgreeRoundsForTest(t, r, want, protoRounds...)
-	for _, name := range []string{"mapNums", "filterEven", "someAt", "findIndexAt", "everyBelow", "findObj"} {
-		var e *jitEntry
-		for k, x := range r.jit.cache {
-			if fn := k.Value(); fn != nil && fn.Name == name {
-				e = x
-			}
-		}
-		if e == nil || e.ssa == nil || !e.loops {
-			t.Errorf("%s makes no loop of its call: %+v", name, e)
-			continue
-		}
-		if e.ssaStats.goCalls != 0 || e.ssaStats.hosts != 0 {
-			t.Errorf("%s called Go %d times, left its code %d times", name, e.ssaStats.goCalls, e.ssaStats.hosts)
-		}
-	}
 	if r.jit.loopsFinished == 0 {
 		t.Error("Go went on with no loop")
 	}

@@ -56,12 +56,9 @@ func TestJITStringGuessFilledLater(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.entrySlow, e.loopSlow = false, false
-	site := cl.fn.Code[jitPCOf(t, cl.fn, "get_prop_this")].B
-	if jitRegCodeOfForTest(r, cl) {
-		// The register code's method read, get_method's or get_method_w's,
-		// whose cache is its C.
-		site = jitRegMethodSiteForTest(t, cl.fn)
-	}
+	// The register code's method read, get_method's or get_method_w's,
+	// whose cache is its C.
+	site := jitRegMethodSiteForTest(t, cl.fn)
 	if c := &cl.ic[site]; c.fills == 0 {
 		t.Fatal("the interpreter did not fill the read's cache")
 	}

@@ -89,12 +89,6 @@ func TestJITFlushesUnusedCode(t *testing.T) {
 	if e, _ := jitCachedForTest(r, "f"); e != nil {
 		t.Fatalf("f's unused code was not flushed: %+v", e)
 	}
-	if err := jitLinksHeld(s); err != nil {
-		t.Fatal(err)
-	}
-	if err := jitEntriesFound(s); err != nil {
-		t.Fatal(err)
-	}
 	if err := regLinksHeldForTest(s); err != nil {
 		t.Fatal(err)
 	}
@@ -212,30 +206,6 @@ func TestJITDroppedCallerLeavesCallees(t *testing.T) {
 	if s.regCache[keyA] != nil {
 		t.Fatal("a's unused code was not flushed")
 	}
-	return
-	ea := s.cache[s.rt.jitKeyOf(jitGlobalClosure(r, "a").fn)]
-	eh := s.cache[s.rt.jitKeyOf(jitGlobalClosure(r, "h").fn)]
-	if ea == nil || ea.ssa == nil || eh == nil || !slices.Contains(eh.nativeCallers, ea) {
-		t.Fatalf("a's code does not call h's natively: %+v, %+v", ea, eh)
-	}
-	for k := uint64(1); k <= 2; k++ {
-		setEpoch(1000 + k*jitFlushAge)
-		s.flush()
-		// b, and h through it, stay in use; a does not.
-		for i := 0; i < 20; i++ {
-			if _, err := r.Run(compileForTest(t, `b(100)`)); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	if s.cache[s.rt.jitKeyOf(jitGlobalClosure(r, "a").fn)] != nil {
-		t.Fatal("a's unused code was not flushed")
-	}
-	for _, e := range s.cache {
-		if slices.Contains(e.nativeCallers, ea) {
-			t.Fatal("a callee keeps a's dropped entry among its native callers")
-		}
-	}
 }
 
 // A callee whose code runs only inlined in its caller's, or called
@@ -261,12 +231,9 @@ func TestJITFlushKeepsInlinedCallees(t *testing.T) {
 	if !fCode || !gCode {
 		t.Fatalf("f or g has no code: %+v, %+v", ef, eg)
 	}
-	if e, ok := ef.(*jitRegEntry); ok {
-		// The register code's inlined callees are its keep's.
-		e.keep.inlined = append(e.keep.inlined, jitGlobalClosure(r, "g"))
-	} else {
-		ef.(*jitEntry).ssaInlined = append(ef.(*jitEntry).ssaInlined, jitGlobalClosure(r, "g"))
-	}
+	// The register code's inlined callees are its keep's.
+	e := ef.(*jitRegEntry)
+	e.keep.inlined = append(e.keep.inlined, jitGlobalClosure(r, "g"))
 	for k := uint64(1); k <= 4; k++ {
 		setEpoch(1000 + k*jitFlushAge)
 		s.flush()

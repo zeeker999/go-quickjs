@@ -141,12 +141,5 @@ func TestJITHotCallsWhileMarking(t *testing.T) {
 // code, its register code's state, the code compiled as the register
 // form's compiles a function of calls and no loop (LowerRegHot).
 func jitHotForTest(r *Runtime, name string) *jitEntry {
-	if jitRegCodeForTest(r, name) {
-		return jitRegLifeForTest(r, name)
-	}
-	e := r.jit.hint(r.global.getOwn(r.atoms.intern(name)).value().Object().fn().closure)
-	if e == nil || !e.hot || e.ssa == nil {
-		return nil
-	}
-	return e
+	return jitRegLifeForTest(r, name)
 }

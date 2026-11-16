@@ -465,7 +465,7 @@ func TestJITEscapeTakeOperand(t *testing.T) {
 			}
 		}
 		code, n := virtuals(r, "held")
-		if c.background && true {
+		if c.background {
 			// Compiled in the background, which no compile's hook sees:
 			// built again as it was.
 			code, n = regRebuiltVirtualsForTest(t, r, "held")

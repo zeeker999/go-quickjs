@@ -115,7 +115,7 @@ func TestJITArrayLiteralBoundary(t *testing.T) {
 		// (regTickRet, jitRegCallTier): f runs once before, for its second
 		// run to be native code's.
 		first := ""
-		if enabled && true {
+		if enabled {
 			first = "f(original);"
 		}
 		v, err := r.Run(compileForTest(t, `let original={x:7};function f(o){let a=[o,1,2];for(let i=1;i<3;i++)a[i]+=1;return a}`+first+`let a=f(original);a[0]===original&&a[1]===2&&a[2]===3&&a.length===3`))

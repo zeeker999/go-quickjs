@@ -70,10 +70,7 @@ func TestJITClassConstructors(t *testing.T) {
 // returns its this (push_this, return), where a function's constructor
 // returns nothing (ssa's returnsThis).
 func TestJITClassConstructorsNative(t *testing.T) {
-	if false {
-		// Under the register JIT it sets the process's SSA hook.
-		t.Parallel()
-	}
+
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
@@ -82,14 +79,12 @@ func TestJITClassConstructorsNative(t *testing.T) {
 	// The closures chain's last compile inlined (ssa.Func's Inlined),
 	// which register code's entry does not keep.
 	var inlined []uintptr
-	if true {
-		jitSSAOptimized = func(fn *bytecode.Function, f *ssa.Func) {
-			if fn.Name == "chain" {
-				inlined = slices.Clone(f.Inlined)
-			}
+	jitSSAOptimized = func(fn *bytecode.Function, f *ssa.Func) {
+		if fn.Name == "chain" {
+			inlined = slices.Clone(f.Inlined)
 		}
-		t.Cleanup(func() { jitSSAOptimized = nil })
 	}
+	t.Cleanup(func() { jitSSAOptimized = nil })
 	const setup = `
 		var Node = class { constructor(id) { this.id = id; this.next = null; this.mark = 0 } }
 		function chain(n) { let head = null; for (let i = 0; i < n; i++) { const x = new Node(i); x.next = head; head = x } let s = 0; for (let x = head; x; x = x.next) s += x.id; return s }`
@@ -101,27 +96,9 @@ func TestJITClassConstructorsNative(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	e := jitNativeForTest(t, r, "chain")
+	jitNativeForTest(t, r, "chain")
 	node := r.global.getOwn(r.atoms.intern("Node")).value().Object().fn().closure
-	if jitRegCodeForTest(r, "chain") {
-		if !slices.Contains(inlined, uintptr(unsafe.Pointer(node))) {
-			t.Errorf("chain inlines %#x, not Node's constructor %p", inlined, node)
-		}
-		return
+	if !slices.Contains(inlined, uintptr(unsafe.Pointer(node))) {
+		t.Errorf("chain inlines %#x, not Node's constructor %p", inlined, node)
 	}
-	if !slices.Contains(e.ssaInlined, node) {
-		t.Errorf("chain inlines %v, not Node's constructor %p", e.ssaInlined, node)
-	}
-}
-
-// jitNativeOrCalleeForTest is the entry of the global name's function,
-// with code, whether Go enters it or only native callers call it.
-func jitNativeOrCalleeForTest(t *testing.T, r *Runtime, name string) *jitEntry {
-	t.Helper()
-	cl := r.global.getOwn(r.atoms.intern(name)).value().Object().fn().closure
-	e := r.jit.hint(cl)
-	if e == nil || e.ssa == nil {
-		t.Fatalf("%s has no code: %+v", name, e)
-	}
-	return e
 }

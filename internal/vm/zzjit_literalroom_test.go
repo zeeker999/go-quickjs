@@ -3,7 +3,6 @@
 package vm
 
 import (
-	"fmt"
 	"runtime"
 	"testing"
 	"unsafe"

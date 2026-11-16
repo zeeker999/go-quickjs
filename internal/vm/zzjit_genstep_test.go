@@ -17,14 +17,8 @@ func jitGenInForTest(r *Runtime, name string) uint64 {
 	if r.jit == nil {
 		return 0
 	}
-	if jitRegCodeForTest(r, name) {
-		// Its register code's link, which native steps resume it by.
-		if l := r.jit.regLinks[r.jitRegKeyOf(cl)]; l != nil {
-			return l.in
-		}
-		return 0
-	}
-	if l := r.jit.links[r.jitKeyOf(cl.fn)]; l != nil {
+	// Its register code's link, which native steps resume it by.
+	if l := r.jit.regLinks[r.jitRegKeyOf(cl)]; l != nil {
 		return l.in
 	}
 	return 0

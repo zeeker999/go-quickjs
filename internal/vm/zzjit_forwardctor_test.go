@@ -90,7 +90,7 @@ func TestJITForwardingConstructors(t *testing.T) {
 	// Its register code's state that outlives its compiles, which
 	// holds what it inlines and what its runs did.
 	e = jitCodeEntryNamedForTest(r, "build")
-	if e == nil || !true && e.ssa == nil {
+	if e == nil {
 		t.Fatalf("build has no native code: %+v", e)
 	}
 	// A construction of a forwarding constructor inlined: the stack form's

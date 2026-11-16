@@ -6,6 +6,8 @@ import (
 	"runtime/debug"
 	"slices"
 	"testing"
+
+	"github.com/go-quickjs/go-quickjs/internal/jit"
 )
 
 // Code judged not to pay on its first stretches (entrySlow) -- here
@@ -33,8 +35,9 @@ func TestJITSlowCodeJudgedAgain(t *testing.T) {
 	if _, err := r.Run(compileForTest(t, `for (let k = 0; k < 400; k++) f(0)`)); err != nil {
 		t.Fatal(err)
 	}
-	e := r.jit.hint(cl)
-	if e == nil || e.ssa == nil || !e.entrySlow {
+	// Its register code's state that outlives its compiles (regLearned).
+	e := jitHintForTest(r, cl)
+	if e == nil || !jitEntryCodeForTest(r, e) || !e.entrySlow {
 		t.Skipf("f was not judged slow on its empty invocations: %+v", e)
 	}
 	v, err := r.Run(compileForTest(t, `let t = 0; for (let k = 0; k < 3000; k++) t = (t + f(200)) | 0; t`))
@@ -50,7 +53,7 @@ func TestJITSlowCodeJudgedAgain(t *testing.T) {
 	if v.Number() != wv.Number() {
 		t.Fatalf("= %v, interpreter %v", v, wv)
 	}
-	if e = r.jit.hint(cl); e == nil || e.entrySlow || e.slowBackoff == 0 {
+	if e = jitHintForTest(r, cl); e == nil || e.entrySlow || e.slowBackoff == 0 {
 		t.Errorf("f, its loops long now, was not entered again: %+v", e)
 	}
 }
@@ -83,8 +86,10 @@ func TestJITCallLeftToGoDecidedAgain(t *testing.T) {
 		}
 	}
 	cl := r.global.getOwn(r.atoms.intern("h")).value().Object().fn().closure
-	e := r.jit.hint(cl)
-	if e == nil || e.ssa == nil || !slices.Contains(e.callSites, jitCallDone) {
+	// Its register code's state that outlives its compiles (regLearned),
+	// its call sites by register pc.
+	e := jitHintForTest(r, cl)
+	if e == nil || !jitEntryCodeForTest(r, e) || !slices.Contains(e.callSites, jitCallDone) {
 		t.Skipf("h's call of a bound function was not left to Go: %+v", e)
 	}
 	// The plain function from now on, and a count that is a string, a
@@ -92,7 +97,7 @@ func TestJITCallLeftToGoDecidedAgain(t *testing.T) {
 	if _, err := r.Run(compileForTest(t, `fn = add; for (let k = 0; k < 12; k++) h('200', 0)`)); err != nil {
 		t.Fatal(err)
 	}
-	e = r.jit.hint(cl)
+	e = jitHintForTest(r, cl)
 	if e == nil || !slices.ContainsFunc(e.nativeCalls, func(x jitInline) bool { return x.cl != nil && x.cl.fn.Name == "add" }) &&
 		!slices.ContainsFunc(e.inlines, func(x jitInline) bool { return x.cl != nil && x.cl.fn.Name == "add" }) {
 		t.Errorf("h's call, left to Go, not decided again for add: reopts %d inline %d callSites %v nativeCalls %d inlines %d failed %v", e.reopts, e.inlineReopts, e.callSites, len(e.nativeCalls), len(e.inlines), e.failed)
@@ -122,12 +127,15 @@ func TestJITCallsOfNotNativeCalleesAreGos(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	leaf := r.jit.cache[r.jitKeyOf(r.global.getOwn(r.atoms.intern("leaf")).value().Object().fn().closure.fn)]
-	mid := r.jit.cache[r.jitKeyOf(r.global.getOwn(r.atoms.intern("mid")).value().Object().fn().closure.fn)]
-	if leaf == nil || leaf.ssa == nil || mid == nil || mid.ssa == nil || mid.link.in == 0 {
+	// Their register code's states that outlive their compiles, and the
+	// links native callers call them through.
+	leaf := jitHintForTest(r, r.global.getOwn(r.atoms.intern("leaf")).value().Object().fn().closure)
+	mid := jitHintForTest(r, r.global.getOwn(r.atoms.intern("mid")).value().Object().fn().closure)
+	leafLink, midLink := jitEntryLinkForTest(leaf), jitEntryLinkForTest(mid)
+	if !jitEntryCodeForTest(r, leaf) || leafLink == nil || !jitEntryCodeForTest(r, mid) || midLink == nil || midLink.in == 0 {
 		t.Skipf("mid not called natively, or leaf without code: %+v %+v", mid, leaf)
 	}
-	leaf.notNative, leaf.link.entry, leaf.nativeRetry = true, 0, 0
+	leaf.notNative, leafLink.entry, leaf.nativeRetry = true, 0, 0
 	unwound, goCalls := r.jit.unwound, r.jit.goCalls
 	wv, err := want.Run(compileForTest(t, `outer(300)`))
 	if err != nil {
@@ -276,14 +284,23 @@ func TestJITKnownNotNativeCalleeCounted(t *testing.T) {
 	fnOf := func(name string) *closure {
 		return r.global.getOwn(r.atoms.intern(name)).value().Object().fn().closure
 	}
-	leaf, mid := r.jit.cache[r.jitKeyOf(fnOf("leaf").fn)], r.jit.cache[r.jitKeyOf(fnOf("mid").fn)]
-	if leaf == nil || leaf.ssa == nil || mid == nil || mid.ssa == nil || mid.link.in == 0 ||
+	// Their register code's states that outlive their compiles, and the
+	// links native callers call them through.
+	leaf, mid := jitHintForTest(r, fnOf("leaf")), jitHintForTest(r, fnOf("mid"))
+	leafLink, midLink := jitEntryLinkForTest(leaf), jitEntryLinkForTest(mid)
+	if !jitEntryCodeForTest(r, leaf) || leafLink == nil || !jitEntryCodeForTest(r, mid) || midLink == nil || midLink.in == 0 ||
 		!slices.ContainsFunc(mid.nativeCalls, func(x jitInline) bool { return x.cl == fnOf("leaf") }) {
 		t.Skipf("mid not called natively, or not calling leaf so: %+v %+v", mid, leaf)
 	}
 	leaf.notNative, leaf.nativeRetry, leaf.nativeBackoff = true, 0, 2
-	leaf.link.clearCode()
-	code, targets := mid.ssa, len(mid.nativeCalls)
+	leafLink.clearCode()
+	code, targets := jitEntryRegCodeForTest(r, mid).code, len(mid.nativeCalls)
+	midCode := func() *jit.SSACode {
+		if c := jitEntryRegCodeForTest(r, mid); c != nil {
+			return c.code
+		}
+		return nil
+	}
 	wv, err := want.Run(compileForTest(t, `outer(300)`))
 	if err != nil {
 		t.Fatal(err)
@@ -299,9 +316,9 @@ func TestJITKnownNotNativeCalleeCounted(t *testing.T) {
 	if !leaf.notNative || leaf.nativeRetry == 0 {
 		t.Fatalf("leaf's 600 calls: notNative %v, counted %d", leaf.notNative, leaf.nativeRetry)
 	}
-	if mid.ssa != code || len(mid.nativeCalls) != targets || mid.inlineReopt || mid.reopt {
+	if midCode() != code || len(mid.nativeCalls) != targets || mid.inlineReopt || mid.reopt {
 		t.Fatalf("mid learned from calls of a known target: code kept %v, targets %d -> %d, inlineReopt %v, reopt %v",
-			mid.ssa == code, targets, len(mid.nativeCalls), mid.inlineReopt, mid.reopt)
+			midCode() == code, targets, len(mid.nativeCalls), mid.inlineReopt, mid.reopt)
 	}
 	for i := 0; leaf.notNative; i++ {
 		if i == 10 {

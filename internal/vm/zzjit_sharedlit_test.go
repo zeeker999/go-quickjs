@@ -131,7 +131,7 @@ func TestJITMakesSharedLiteral(t *testing.T) {
 			t.Error("native code's array of a literal of constants does not share them")
 		}
 		var native bool
-		if cv, ok := jitViewForTest(r, jitGlobalClosureForTest(r, "reads")); ok && cv.reg != nil {
+		if cv, ok := jitViewForTest(r, jitGlobalClosureForTest(r, "reads")); ok {
 			// The register form's literals are the life's of the function
 			// whose instruction makes them (jitRegSharedLiteral): reads'
 			// own, and those of the callees its code inlines -- mk's.
@@ -142,13 +142,6 @@ func TestJITMakesSharedLiteral(t *testing.T) {
 			for _, l := range lives {
 				for i := 0; l != nil && i < len(l.literals); i++ {
 					native = native || l.literals[i].shared
-				}
-			}
-		}
-		for k, x := range r.jit.cache {
-			if fn := k.Value(); fn != nil && fn.Name == "reads" && x.ssa != nil {
-				for _, l := range x.literals {
-					native = native || l.shared
 				}
 			}
 		}
@@ -206,11 +199,6 @@ func TestJITSortsSharedLiteral(t *testing.T) {
 			if fe, ok := fb.ForEach(pc); ok && fe.Kind&abi.LoopKindMask == abi.LoopSort {
 				native = true
 			}
-		}
-	}
-	for k, x := range r.jit.cache {
-		if fn := k.Value(); fn != nil && (fn.Name == "sortLit" || fn.Name == "drive") && x.ssa != nil && x.loops {
-			native = true
 		}
 	}
 	if !native {

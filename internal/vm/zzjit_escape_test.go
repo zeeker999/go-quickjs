@@ -359,12 +359,4 @@ func TestJITEscapeMadeAnyway(t *testing.T) {
 	if _, n := virtuals(r, "madeAnyway"); n != 0 || len(e.unresumed) != 0 || len(e.unentered) != 0 {
 		t.Errorf("%d objects unmade, entries dropped at %v and %v", n, e.unresumed, e.unentered)
 	}
-	return
-	e := jitCallbackEntry(r, "madeAnyway")
-	if e == nil || e.ssa == nil {
-		t.Fatalf("madeAnyway was not compiled: %+v", e)
-	}
-	if e.ssaVirtuals != 0 || len(e.ssaUnresumed) != 0 || len(e.ssaUnentered) != 0 {
-		t.Errorf("%d objects unmade, entries dropped at %v and %v", e.ssaVirtuals, e.ssaUnresumed, e.ssaUnentered)
-	}
 }

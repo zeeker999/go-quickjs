@@ -75,13 +75,11 @@ func TestJITGenericCallsNative(t *testing.T) {
 	r := New(Config{JIT: true})
 	t.Cleanup(func() { r.Close(); r.ReleaseClosed() })
 	jitFewCallsForTest(r)
-	if true {
-		// The register JIT compiles round, which calls f1 to f7
-		// natively, and they inline forEach, its callback with it: no
-		// generic call is left. Without inlining, forEach's own code makes
-		// them.
-		regNoInline(t)
-	}
+	// The register JIT compiles round, which calls f1 to f7
+	// natively, and they inline forEach, its callback with it: no
+	// generic call is left. Without inlining, forEach's own code makes
+	// them.
+	regNoInline(t)
 	const setup = `
 		function forEach(a, f) { for (let i = 0; i < a.length; i++) f(a[i]) }
 		const a = []

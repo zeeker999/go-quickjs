@@ -152,12 +152,6 @@ func TestJITPrologueEnter(t *testing.T) {
 	if e.ssaStats.entries == entries {
 		t.Fatal("Go never ran wide17 from its start")
 	}
-	return
-	entered := r.jit.entered
-	both.agree(t, `wides17(300, { x: 2 })`, `wides17(30, getter)`)
-	if r.jit.entered == entered {
-		t.Fatal("Go never ran wide17 from its start")
-	}
 }
 
 // jitInlinedHas reports whether the closures a compile inlined include cl.

@@ -9,44 +9,6 @@ import (
 	"testing"
 )
 
-// jitLinksHeld reports a function's link whose entry -- what native callers
-// call -- is not in the code of the entry the cache holds for the function:
-// a link no entry owns, or whose owner the cache does not hold, or whose
-// owner has other code. Native code calls through it, and nothing would
-// keep that code from being released.
-func jitLinksHeld(s *jitState) error {
-	for key, l := range s.links {
-		if l.entry == 0 {
-			continue
-		}
-		switch {
-		case l.owner == nil:
-			return fmt.Errorf("a link no entry owns calls %#x", l.entry)
-		case s.cache[key] != l.owner:
-			return fmt.Errorf("a link's owner is not the cache's entry")
-		case l.owner.ssa == nil || !l.owner.ssa.Contains(l.entry):
-			return fmt.Errorf("a link calls %#x, outside its owner's code", l.entry)
-		}
-	}
-	return nil
-}
-
-// jitEntriesFound reports an entry the cache holds that entryFor does not
-// find by its function, or one entryFor keeps that the cache does not hold.
-func jitEntriesFound(s *jitState) error {
-	for key, e := range s.cache {
-		if fn := key.Value(); fn != nil && s.entryFor(fn) != e {
-			return fmt.Errorf("entryFor does not find %s's entry", fn.Name)
-		}
-	}
-	for _, x := range s.byFn {
-		if s.cache[x.key] != x.e {
-			return fmt.Errorf("byFn keeps an entry the cache does not hold")
-		}
-	}
-	return nil
-}
-
 // Runtimes on goroutines of their own compile at once, each in a workspace
 // of the pool's no other compile uses meanwhile: their code computes what
 // the interpreter does.
@@ -153,10 +115,10 @@ func TestJITEvictionKeepsRunningCode(t *testing.T) {
 	// the code nothing holds -- which native code then must not run.
 	var broken error
 	r.global.setOwnRaw(r.atoms.intern("check"), Obj(r.newNativeFunc("check", 0, func(rt *Runtime, _ Value, _ []Value) (Value, error) {
-		if err := jitLinksHeld(rt.jit); err != nil && broken == nil {
+		if err := regLinksHeldForTest(rt.jit); err != nil && broken == nil {
 			broken = err
 		}
-		if err := jitEntriesFound(rt.jit); err != nil && broken == nil {
+		if err := regEntriesFoundForTest(rt.jit); err != nil && broken == nil {
 			broken = err
 		}
 		runtime.GC()

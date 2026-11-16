@@ -33,6 +33,19 @@ func jitNoInlineForTest(t *testing.T, name string) {
 	t.Cleanup(func() { jitNoInline = nil })
 }
 
+// jitNoLoopInlineForTest keeps every function with a loop -- register
+// code with a backward jump (RegCode's BackLive) -- out of line while the
+// test runs, as the inliner kept them before it inlined small ones (ssa's
+// maxInlineLoop): the tests of native calls give the callees they call
+// natively a loop of a turn or two for that.
+func jitNoLoopInlineForTest(t *testing.T) {
+	jitNoInline = func(fn *bytecode.Function) bool {
+		rc := fn.RegCode()
+		return rc != nil && len(rc.BackLive) != 0
+	}
+	t.Cleanup(func() { jitNoInline = nil })
+}
+
 // jitClosureForTest is the closure of the function the script's global
 // expression src gives.
 func jitClosureForTest(t *testing.T, r *Runtime, src string) uintptr {

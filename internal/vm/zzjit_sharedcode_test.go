@@ -39,12 +39,6 @@ func jitArrowsForTest(t *testing.T, r *Runtime) []jitArrowForTest {
 		}
 	}
 	return es
-	for k, x := range r.jit.cache {
-		if fn := k.Value(); fn != nil && fn.Kind == bytecode.KindArrow {
-			es = append(es, jitArrowForTest{code: x.ssa != nil, link: x.link, e: x})
-		}
-	}
-	return es
 }
 
 // The closures of a function made anew at each call -- an arrow its maker

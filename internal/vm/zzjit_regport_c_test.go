@@ -27,7 +27,6 @@ func jitEntryOfForTest(r *Runtime, cl *closure) *jitEntry {
 		return nil
 	}
 	return r.jit.regLearned[r.jitRegKeyOf(cl)]
-	return r.jit.entryFor(cl.fn)
 }
 
 // jitRegOfForTest is the register code the cache holds for cl's function,
@@ -44,8 +43,6 @@ func jitRegOfForTest(r *Runtime, cl *closure) *jitRegEntry {
 func jitHasCodeOfForTest(r *Runtime, cl *closure) bool {
 	e := jitRegOfForTest(r, cl)
 	return e != nil && e.code != nil
-	e := jitEntryOfForTest(r, cl)
-	return e != nil && e.ssa != nil
 }
 
 // jitLinkOfForTest is the link native callers call cl's function through:
@@ -54,10 +51,6 @@ func jitHasCodeOfForTest(r *Runtime, cl *closure) bool {
 // yet -- the stack form's entry has one from its first compile on.
 func jitLinkOfForTest(r *Runtime, cl *closure) *jitLink {
 	return r.jitState().regLinkOf(cl, r.regOf(cl))
-	if e := jitEntryOfForTest(r, cl); e != nil {
-		return e.link
-	}
-	return nil
 }
 
 // jitRegLoopsForTest are the lengths of the loops of c, register code, in
@@ -127,7 +120,6 @@ func jitMethodSiteForTest(t *testing.T, r *Runtime, cl *closure) (int, Atom) {
 // register code's, converted (jitRegInlineSize).
 func jitInlineSizeForTest(r *Runtime, cl *closure) int {
 	return jitRegInlineSize(r.regOf(cl))
-	return len(cl.fn.Code)
 }
 
 // jitLongRepeatsForTest is how many times a test's body repeats a
@@ -137,7 +129,6 @@ func jitInlineSizeForTest(r *Runtime, cl *closure) int {
 // instructions, and two and a half of register code's (jitRegInlineSize).
 func jitLongRepeatsForTest(n int) int {
 	return n * 3 / 2
-	return n
 }
 
 // osrRegHeader is the register pc of the header of the only loop e's

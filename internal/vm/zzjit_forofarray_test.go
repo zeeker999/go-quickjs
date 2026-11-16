@@ -4,7 +4,6 @@ package vm
 
 import (
 	"fmt"
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 	"runtime"
@@ -452,31 +451,6 @@ func TestJITDerivedConstructor(t *testing.T) {
 			t.Errorf("Imp, an implicit constructor, was compiled: it left native code %d times", x.life.ssaStats.hosts)
 		}
 	}
-	return
-	for _, name := range []string{"B", "C", "G"} {
-		// A class is a lexical binding, not the global object's: its
-		// constructor's entry, by its name.
-		var e *jitEntry
-		for k, x := range r.jit.cache {
-			if fn := k.Value(); fn != nil && fn.Name == name && fn.Kind == bytecode.KindDerivedConstructor {
-				e = x
-			}
-		}
-		if e == nil || e.ssa == nil || e.ssaStats.entries == 0 {
-			t.Fatalf("%s never ran natively: %+v", name, e)
-		}
-		if e.ssaStats.hosts+e.ssaStats.guards != 0 {
-			t.Errorf("%s left native code %d times for Go and failed %d guards", name, e.ssaStats.hosts, e.ssaStats.guards)
-		}
-	}
-	// An implicit constructor, super(...arguments) alone, which native
-	// code would only leave for at its super(), is left to the tree tier
-	// as any function of host operations alone is (jitcompile's hostOnly).
-	for k, x := range r.jit.cache {
-		if fn := k.Value(); fn != nil && fn.Name == "Imp" && x.ssa != nil {
-			t.Errorf("Imp, an implicit constructor, was compiled: it left native code %d times", x.ssaStats.hosts)
-		}
-	}
 }
 
 // A keyed read of a name the object and its chain do not have -- a name
@@ -509,12 +483,7 @@ func TestJITKeyedReadAbsent(t *testing.T) {
 	}
 	rounds = append(rounds, `odd(viaProxy)`, `odd(getterProto)`, `odd(viaProxy)`, `odd(getterProto)`)
 	r := jitAgreesForTest(t, setup, rounds...)
-	var e *jitEntry
-	for k, x := range r.jit.cache {
-		if fn := k.Value(); fn != nil && fn.Name == "lookup" {
-			e = x
-		}
-	}
+	e := jitCodeEntryNamedForTest(r, "lookup")
 	h := jitNativeForTest(t, r, "hits")
 	hosts, entries := h.ssaStats.hosts, h.ssaStats.entries
 	var lookupHosts uint64
@@ -659,22 +628,6 @@ func TestJITCapturedLocalCallees(t *testing.T) {
 		}
 		if e.p == nil || !e.p.Cells {
 			t.Errorf("%s's code has its captured locals in its frame", name)
-		}
-		continue
-		var e *jitEntry
-		for k, x := range r.jit.cache {
-			if fn := k.Value(); fn != nil && fn.Name == name {
-				e = x
-			}
-		}
-		if e == nil || e.ssa == nil || e.calleeRefused {
-			t.Errorf("%s has no code for native callers: %+v", name, e)
-			continue
-		}
-		// Compiled for native callers alone, its captured locals in cells
-		// of their own (ir.Program's Cells), as V8 allocates a context.
-		if !e.ssaCallee || e.ssaProg == nil || !e.ssaProg.Cells {
-			t.Errorf("%s's code has its captured locals in its frame: callee %v", name, e.ssaCallee)
 		}
 	}
 }

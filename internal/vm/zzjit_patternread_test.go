@@ -5,8 +5,6 @@ package vm
 import (
 	"runtime/debug"
 	"testing"
-
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
 
 // An object pattern's read (get_prop_under), which has no cache of its
@@ -102,20 +100,11 @@ func TestJITPatternReadsLearnTheirMisses(t *testing.T) {
 		mega bool
 	}{{"hits", false}, {"misses", true}} {
 		e := jitCodeNamedForTest(t, r, c.name).e
-		fn := r.global.getOwn(r.atoms.intern(c.name)).value().Object().fn().closure.fn
 		mega := false
-		if jitRegCodeForTest(r, c.name) {
-			// The register form's sites are by register pc: the pattern's
-			// reads are the only property reads of hits and misses.
-			for i := range e.poly {
-				mega = mega || e.poly[i].mega
-			}
-		} else {
-			for pc, in := range fn.Code {
-				if in.Op == bytecode.OpGetPropUnder && jitPolyMega(e, pc) {
-					mega = true
-				}
-			}
+		// The register form's sites are by register pc: the pattern's
+		// reads are the only property reads of hits and misses.
+		for i := range e.poly {
+			mega = mega || e.poly[i].mega
 		}
 		if mega != c.mega || e.deopts > 2 {
 			t.Errorf("%s: a pattern read megamorphic %v, want %v; %d deoptimizations (run inlines %v; sites %+v)", c.name, mega, c.mega, e.deopts, jitInlinedNamesForTest(r, "run"), e.poly)

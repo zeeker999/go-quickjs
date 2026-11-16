@@ -237,16 +237,6 @@ func TestJITCallbackEnteredByGo(t *testing.T) {
 	}
 }
 
-// jitCallbackEntry is the entry of name's function in r.
-func jitCallbackEntry(r *Runtime, name string) *jitEntry {
-	for k, x := range r.jit.cache {
-		if fn := k.Value(); fn != nil && fn.Name == name {
-			return x
-		}
-	}
-	return nil
-}
-
 // jitCallbackMallocs is how many allocations src makes in r, a run of it.
 func jitCallbackMallocs(t *testing.T, r *Runtime, src string) uint64 {
 	t.Helper()

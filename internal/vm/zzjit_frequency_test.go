@@ -3,12 +3,46 @@
 package vm
 
 import (
-	"fmt"
 	"slices"
 	"testing"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
+
+// frequencySetup's caller makes, at each invocation, three calls of g in a
+// loop, one method call, none of g where k is negative, one construction,
+// one call of a pure body, which the call path answers without a frame,
+// one of g through Function.prototype.call, whose frame is the built-in's,
+// and one call in tail position; tail's call of g is in tail position too.
+const frequencySetup = `
+	function C(x) { let t = x + 1; this.v = t }
+	function g(o) { let t = o.n + 1; o.n = t & 1023; return t }
+	var obj = { m(o) { let t = o.n + 2; o.n = t & 1023; return t } }
+	function pure(o) { return o.n * 2 }
+	function tail(o) { return g(o) }
+	function caller(o, k) {
+		let s = 0
+		for (let i = 0; i < 3; i++) s += g(o)
+		s += obj.m(o)
+		if (k < 0) s += g(o)
+		const c = new C(s)
+		s += c.v + pure(o)
+		s += g.call(null, o)
+		return tail(o) + s
+	}
+	var o = {n: 0}`
+
+// frequencyRuntime is a runtime running frequencySetup with the JIT's own
+// thresholds.
+func frequencyRuntime(t *testing.T) *Runtime {
+	t.Helper()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	jitDefaultsForTest(r)
+	if _, err := r.Run(compileForTest(t, frequencySetup)); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
 
 // Native code counts nothing, as V8's optimized code counts no feedback:
 // once caller and c2 are compiled, from their budgets, their invocations
@@ -20,7 +54,7 @@ func TestJITCountsNotNative(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
-	r := frequencyRuntime(t, true)
+	r := frequencyRuntime(t)
 	want := New(Config{})
 	t.Cleanup(func() { want.Close(); want.ReleaseClosed() })
 	if _, err := want.Run(compileForTest(t, frequencySetup)); err != nil {
@@ -35,8 +69,7 @@ func TestJITCountsNotNative(t *testing.T) {
 		both.agree(t, `drive(100)`)
 	}
 	// Register code's counts are its closures' (jitRegCounts), which
-	// the feedback dispatcher counts and native code does not: the
-	// counts the stack tiers make by site are theirs alone (their
+	// the feedback dispatcher counts and native code does not (their
 	// frequencies TestJITRegFrequency's).
 	var counts [][]uint64
 	for _, name := range []string{"caller", "c2"} {
@@ -60,37 +93,6 @@ func TestJITCountsNotNative(t *testing.T) {
 			t.Errorf("%s's code counted: %v, after %v", name, got, counts[i])
 		}
 	}
-	return
-	for _, name := range []string{"caller", "c2"} {
-		if e := jitCallbackEntry(r, name); e == nil || e.ssa == nil || e.invalid || e.calls == nil {
-			t.Fatalf("%s has no code: %+v", name, e)
-		}
-	}
-	// The last run counted may have gone on in native code from its loop,
-	// by on-stack replacement, its calls after it uncounted.
-	runs, calls := frequencyCounts(t, r, "caller")
-	within := func(n, per uint32) bool { return n <= per*runs && n+per >= per*runs }
-	if runs < 43 || runs > 600 || !within(calls[0], 3) || !within(calls[1], 1) || calls[2] != 0 || !within(calls[3], 1) || !within(calls[6], 1) {
-		t.Fatalf("caller counts %d runs, calls %v", runs, calls)
-	}
-	runs2, calls2 := frequencyCounts(t, r, "c2")
-	if runs2 < 8 || runs2 > 600 || !slices.Equal(calls2, []uint32{runs2, runs2, 0}) {
-		t.Fatalf("c2 counts %d runs, calls %v", runs2, calls2)
-	}
-	goCalls := r.jit.goCalls
-	both.agree(t, `drive(1000)`)
-	if r.jit.goCalls-goCalls < 1000 {
-		t.Errorf("c2's code made %d calls of Go in 1,000 runs", r.jit.goCalls-goCalls)
-	}
-	for _, c := range []struct {
-		name  string
-		runs  uint32
-		calls []uint32
-	}{{"caller", runs, calls}, {"c2", runs2, calls2}} {
-		if n, got := frequencyCounts(t, r, c.name); n != c.runs || !slices.Equal(got, c.calls) {
-			t.Errorf("%s's code counted: %d runs, %v, after %d, %v", c.name, n, got, c.runs, c.calls)
-		}
-	}
 }
 
 // The counts outlive the code the cache drops, as V8's feedback outlives
@@ -101,7 +103,7 @@ func TestJITCountsOutliveCode(t *testing.T) {
 		t.Skip("no SSA backend on this architecture")
 	}
 	setEpoch := jitFlushForTest(t)
-	r := frequencyRuntime(t, true)
+	r := frequencyRuntime(t)
 	if _, err := r.Run(compileForTest(t, `for (let i = 0; i < 700; i++) caller(o, i)`)); err != nil {
 		t.Fatal(err)
 	}
@@ -125,26 +127,6 @@ func TestJITCountsOutliveCode(t *testing.T) {
 	}
 	if now := jitGlobalClosure(r, "caller").jitRegCounts; len(now) == 0 || &now[0] != &c[0] || now[0] < runs {
 		t.Fatalf("caller counts %v, not %v from %d runs", now, c, runs)
-	}
-	return
-	e := jitCallbackEntry(r, "caller")
-	if e == nil || e.ssa == nil || e.calls == nil {
-		t.Fatalf("caller has no code: %+v", e)
-	}
-	c, runs := e.calls, e.calls.runs
-	setEpoch(1000 + jitFlushAge)
-	r.jit.flush()
-	setEpoch(1000 + 2*jitFlushAge)
-	r.jit.flush()
-	if e := jitCallbackEntry(r, "caller"); e != nil {
-		t.Fatalf("caller's unused code was not flushed: %+v", e)
-	}
-	if _, err := r.Run(compileForTest(t, `for (let i = 0; i < 20; i++) caller(o, i)`)); err != nil {
-		t.Fatal(err)
-	}
-	e = jitCallbackEntry(r, "caller")
-	if e == nil || e.calls != c || c.runs < runs {
-		t.Fatalf("caller's entry %+v counts %+v, not %+v from %d runs", e, e.calls, c, runs)
 	}
 }
 
