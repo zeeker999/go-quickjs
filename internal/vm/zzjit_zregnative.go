@@ -2570,7 +2570,14 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 		// compiled again (jitRegCallSeen), or make a loop of its own
 		// (jitRegForEachSeen): asked while the call is unsettled
 		// (jitRegCallSettle), as the stack form's (jitCallUnsettled).
-		jitRegCallSettle(run.e, c, rpc, callee)
+		if !r.jitRegViaCall(op, callee, this) {
+			// G.call(x, ...) of a script function G keeps the call
+			// unsettled, as a call of a function with code does: its G
+			// called natively once compiled (jitRegViaSeen), which a call
+			// settled as the built-in's never learned -- a parent whose
+			// compile was put off, called by Go at every construction.
+			jitRegCallSettle(run.e, c, rpc, callee)
+		}
 		if op == bytecode.RNewW && callee.IsObject() && callee.Object() == r.proto.arrayCtor {
 			// new Array(n), its length the call's operand (jitRegAllocLength).
 			n := Undefined
@@ -2944,6 +2951,17 @@ func (r *Runtime) jitRegStepCalled(f *frame, c *regCode, wb, rpc int, v Value, e
 		return v, err
 	}
 	return r.jitRegStepAnswer(st, v, err)
+}
+
+// jitRegViaCall reports whether a call op of callee on this is G.call(x,
+// ...) through the realm's Function.prototype.call of G, this, a function
+// written in script.
+func (r *Runtime) jitRegViaCall(op bytecode.ROp, callee, this Value) bool {
+	if op != bytecode.RCallMW || r.callFn == nil || !callee.IsObject() || callee.Object() != r.callFn || !this.IsObject() {
+		return false
+	}
+	fd := this.Object().fn()
+	return fd != nil && fd.closure != nil && fd.native == nil
 }
 
 // jitRegCallUnsettled reports whether the learning of a call of Go

@@ -7286,9 +7286,10 @@ func TestJITCallsThroughParentsWithoutCode(t *testing.T) {
 	s := r.jitState()
 	span := jitGlobalClosureForTest(r, "Span")
 	var se *jitEntry
-	if jitPortReg(r, span) {
+	if regJITForTest() {
 		// The register form keeps its function's deferral in the state
-		// that outlives its compiles (jitRegForAs).
+		// that outlives its compiles (jitRegForAs), keyed by its register
+		// code, which Span has none of yet.
 		se = s.regLearnedOf(r.jitRegKeyOf(span))
 	} else {
 		se = r.jitFor(span)
