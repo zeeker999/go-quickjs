@@ -395,14 +395,22 @@ func joinComma(parts []string) string {
 // runtime made for another constant of that text while it lives, so that
 // two literals of one text are one string, which === finds equal by
 // identity (the native jseq's first test) rather than by their text. The
-// strings are held weakly, the dead swept out as the table doubles.
+// strings are held weakly, the dead swept out as the table doubles. Each
+// is the table's own allocation, which the weak pointer is to: never
+// static data nor part of another object, which Go 1.24's weak.Make
+// refuses ("getWeakHandle on invalid pointer"). The empty string is the
+// runtime's one (emptyString), identical already and never held.
 func (r *Runtime) constString(s string) *String {
+	if s == "" {
+		return emptyString
+	}
 	if p, ok := r.strConsts[s]; ok {
 		if v := p.Value(); v != nil {
 			return v
 		}
 	}
-	v := NewString(s)
+	v := new(String)
+	*v = *NewString(s)
 	if r.strConsts == nil {
 		r.strConsts = map[string]weak.Pointer[String]{}
 	}

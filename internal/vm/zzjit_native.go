@@ -656,6 +656,18 @@ type jitEntry struct {
 	// which hold no function alive: what a caller learned outlives its
 	// code.
 	regCallers []jitKey
+	// regCounted marks, for a function's register code, the state the
+	// JIT keeps for it (jitState's regLearned), whose bytes (bytes) count
+	// in what the JIT holds (regHeld) as a stack form's entry's measure
+	// counts what it learned (regAccount); regFlushed marks one whose
+	// code the cache let go of (regLetGo), whose next compile is one
+	// again of code dropped (jitState's recompiled), as a ghost's
+	// dropped marks the stack form's.
+	regCounted, regFlushed bool
+	// inlinePending marks calls found to inline since the code was
+	// compiled (jitLearned's callSites), which it is compiled again for
+	// once the calls around them have been seen.
+	inlinePending bool
 	// inlineReopt marks code to be compiled again for the calls found to
 	// inline. upgradeReopts counts the times it was to inline a call it
 	// makes natively, its callee now inlining its own calls
@@ -679,6 +691,19 @@ type jitEntry struct {
 	// compile needed and was refused, for want of room in the budget: the
 	// room a compile again asks for before it compiles (jitRegReoptimize).
 	reoptRoom int
+	// bytes is what a function's register state holds, as last measured
+	// (regAccount), which the cache counts against the JIT's budget while
+	// it holds the state; busy marks a state whose function is being
+	// compiled, which the cache does not let go of meanwhile to make room.
+	bytes int
+	busy  uint8
+	// used is the cache's epoch (jitState.epoch) at which the state was
+	// last found used -- its uses other than at the look before, seen --
+	// or made; serial orders states by when they were made. The cache lets
+	// the least recently used go to make room (makeRoom). flushSeen is its
+	// uses at the cache's last look for code to flush (regFlush).
+	used, seen, serial uint64
+	flushSeen          uint64
 	// slowCalls counts the calls the interpreter made, that did not enter
 	// its code (entrySlow).
 	slowCalls uint64
@@ -719,6 +744,9 @@ type jitLink struct {
 	// tailJump): 0 whenever entry is.
 	body uintptr
 	in   uint64
+	// refs counts the code that calls through the link, which keeps it
+	// while any does (regPruneLinks).
+	refs int
 	key  jitKey
 	// The function's frame and flags (abi.LinkCoerce...), for a generic
 	// call (abi.Encoding's Link fields).
@@ -754,6 +782,12 @@ func (l *jitLink) clearCode() {
 // Weak keys prevent a refusal or cached program from retaining a source graph.
 // Native entry cannot call Go, so buffers are shared only until a guard exit.
 type jitState struct {
+	// manyRealms says a look of the cache's has found code kept for
+	// another realm than the current one's (jitFlushRealms).
+	manyRealms bool
+	// recompiled counts the compiles of functions whose code the cache
+	// had let go of (regLetGo).
+	recompiled uint64
 	// unavailable marks a runtime the OS will not give executable memory.
 	unavailable bool
 	// reporting marks a runtime whose JIT notes why its runs ended in the
@@ -788,7 +822,10 @@ type jitState struct {
 	// the entries kept for a frame (jitRegCalleesKeptNoEntries), which ask
 	// for no more of them.
 	regKeptSeeding bool
-	// regHeld is what the register code in regCache takes (held).
+	// regHeld is what the register code in regCache takes (held), and
+	// what the JIT keeps for each function besides, its learned state in
+	// regLearned (regAccount), as the stack form's entryBytes counts its
+	// entries' code and what they learned.
 	regHeld int
 	// regLearned is what the code made from a function's register code
 	// learned at its exits, by the function's key, kept across its
@@ -807,6 +844,12 @@ type jitState struct {
 	// regLowered, before which a program not asked for since is let go of
 	// (regFlush).
 	regLowerLook uint64
+	// regBuilds are the feedback of the register compiles under way on
+	// the runtime's goroutine, built or installed (jitRegCompile,
+	// jitRegInstall): the links their code is to call through, which no
+	// code holds yet (jitLink's refs), are let go of by none meanwhile
+	// (regUnlink).
+	regBuilds []**jitRegFeedback
 	// regHostOps counts register code's host exits by the register
 	// instruction Go ran whole, by its operation, for tests
 	// (RegNativeStats' HostOps): an array, not a map of the operation's
@@ -1094,9 +1137,9 @@ type jitState struct {
 	// refused without another look. agedAt is 1 plus the epoch the cache
 	// last found its entries' uses in (age), and flushedAt the flush's tick
 	// at its last look for code to flush (flush).
-	scans, evicted, flushed, refusedRoom uint64
-	floor                                int
-	floorAt, agedAt, flushedAt           uint64
+	scans, serial, evicted, flushed, refusedRoom uint64
+	floor                                        int
+	floorAt, agedAt, flushedAt                   uint64
 
 	// What follows is last so that it moves no field before it, which
 	// the interpreter's and the native code's calls of Go read.
@@ -1150,6 +1193,7 @@ const jitMapSlot = 64
 // What the JIT counts for each thing it keeps, apart from the slices it
 // holds: a link, a lowering, an object pool, a context.
 var (
+	jitEntryFixed    = int(unsafe.Sizeof(jitEntry{})) + int(unsafe.Sizeof(jitLearned{})) + int(unsafe.Sizeof(jitHintSlot{})) + 2*jitMapSlot
 	jitLinkFixed     = int(unsafe.Sizeof(jitLink{})) + jitMapSlot
 	jitLoweringFixed = int(unsafe.Sizeof(jitLowering{})) + jitMapSlot
 	jitPoolFixed     = int(unsafe.Sizeof(abi.ObjectPool{})) + int(unsafe.Sizeof(jitPoolSource{}))
@@ -1281,7 +1325,9 @@ func (s *jitState) sharedBytes() int {
 // jitVictim is what the cache may reclaim to make room (makeRoom): a
 // lowering or an entry, by its class.
 type jitVictim struct {
-	key          jitKey
+	key jitKey
+	// e is the register state of a state's victim (regReclaim).
+	e            *jitEntry
 	re           *jitRegEntry
 	l            *jitLowering
 	reg          bool

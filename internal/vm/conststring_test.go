@@ -32,3 +32,26 @@ func TestConstStringShared(t *testing.T) {
 	}
 	runtime.KeepAlive(a)
 }
+
+// TestConstStringEmpty pins the empty string's constant, the runtime's
+// one empty string (emptyString), static data: it is never held weakly --
+// Go 1.24's weak.Make faults on a pointer to no heap object ("getWeakHandle
+// on invalid pointer") -- and a script's empty literals are it.
+func TestConstStringEmpty(t *testing.T) {
+	r := New(Config{})
+	defer r.Close()
+	if s := r.constString(""); s != emptyString {
+		t.Fatal("the empty constant is not the runtime's empty string")
+	}
+	if _, ok := r.strConsts[""]; ok {
+		t.Error("the empty string is held in the constants' table")
+	}
+	fn := compileForTest(t, `var a = "", b = ""; function f() { return "" } [a === b, f() === a, typeof f(), ("" + "x").length].join()`)
+	v, err := r.Run(fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := v.String().Go(); got != "true,true,string,1" {
+		t.Errorf("got %s, want true,true,string,1", got)
+	}
+}

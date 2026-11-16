@@ -70,3 +70,23 @@ func (f *jitRegFeedback) Frequency(pc int) (float64, bool) {
 	}
 	return float64(counts[1+int(w.C())]) / float64(counts[0]), true
 }
+
+// jitFramed reports whether the interpreter counts every call of x's
+// callee it makes (jitRegCounts): a function of the script's, called with
+// a frame of its own, through Function.prototype.call too, or a pure body
+// or a forwarding constructor, which the call path answers without one
+// where it can -- not another body the call path may answer without one
+// (bytecode.LeafKind).
+func jitFramed(x jitInline) bool {
+	return x.cl != nil && jitCountedCallee(x.cl)
+}
+
+// jitCountedCallee reports whether the interpreter counts every call of
+// cl's function it makes (jitFramed).
+func jitCountedCallee(cl *closure) bool {
+	switch cl.fn.Leaf {
+	case bytecode.LeafNone, bytecode.LeafPure, bytecode.LeafForward:
+		return true
+	}
+	return false
+}
