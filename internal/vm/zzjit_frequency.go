@@ -144,7 +144,7 @@ func (r *Runtime) jitCountPure() { r.jitCountCallAt(r.frameDepth + 1) }
 // at an exit, or of a callee with no code (nativeCallDepth).
 func (r *Runtime) jitCountCallAt(d int) {
 	s := r.jit
-	if s == nil || d < 2 || d == s.goCallDepth || d == s.nativeCallDepth {
+	if s == nil || d < 2 || d == s.goCallDepth {
 		return
 	}
 	var g *frame

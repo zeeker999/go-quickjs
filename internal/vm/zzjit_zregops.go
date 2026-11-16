@@ -435,7 +435,7 @@ func (r *Runtime) jitRegFrameless(ctx *abi.Context, cl *closure, c *regCode, rpc
 		return false
 	}
 	args := unsafe.Slice((*Value)(unsafe.Pointer(&ctx.GoArgs[0])), n)
-	v, ok := r.jitOpFrameless(nil, nil, in, args)
+	v, ok := r.jitOpFrameless(nil, in, args)
 	if !ok {
 		return false
 	}

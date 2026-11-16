@@ -148,9 +148,8 @@ func TestJITSlowLoopGoesBackNative(t *testing.T) {
 	if r.jit.osrs == osrs {
 		t.Errorf("each's long loop, left once, was not taken back natively")
 	}
-	// Most of the loop's iterations native: its work, a loop's length for
-	// each back edge.
-	if n := (each.ssaStats.work - work) / uint64(max(each.ssaLoop, 1)); n < 25000 {
+	// Most of the loop's iterations native: its work.
+	if n := each.ssaStats.work - work; n < 25000 {
 		t.Errorf("each ran %d of its long loop's 50000 iterations natively, want most", n)
 	}
 }

@@ -784,7 +784,7 @@ func (r *Runtime) jitRegForwardSeen(f *frame, c *regCode, e *jitRegEntry, rpc in
 	if n := l.callSites[rpc]; n+1 < jitCallsToInline {
 		l.callSites[rpc]++
 		if cl != nil && !slices.ContainsFunc(l.settling, func(x jitInline) bool { return int(x.pc) == rpc && x.obj == o }) {
-			l.settling = append(l.settling, jitInline{pc: int32(rpc), cl: cl, obj: o, forward: true})
+			l.settling = append(l.settling, jitInline{pc: int32(rpc), cl: cl, obj: o})
 		}
 		return false, true
 	}

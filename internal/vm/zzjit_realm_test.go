@@ -438,8 +438,8 @@ func TestJITRegRealmsWithinTheBudgetClocked(t *testing.T) {
 					t.Fatal(err)
 				}
 				if s := r.jit; s != nil && s.held() > s.budget {
-					t.Fatalf("step %d, limit %d KB, realm %d: held %d of %d: register code %d, programs %d, shared %d, entries %d",
-						step, limit>>10, i, s.held(), s.budget, s.regHeld, s.lowerBytes, s.sharedBytes(), s.entryBytes)
+					t.Fatalf("step %d, limit %d KB, realm %d: held %d of %d: register code %d, programs %d, shared %d",
+						step, limit>>10, i, s.held(), s.budget, s.regHeld, s.lowerBytes, s.sharedBytes())
 				}
 			}
 			r.Close()

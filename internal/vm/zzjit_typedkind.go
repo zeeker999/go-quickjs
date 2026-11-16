@@ -29,7 +29,7 @@ const jitTypedCellBytes = int(unsafe.Sizeof(Value{})) + jitMapSlot
 // jitTypedSeen is ssa.GoTypedSeen: the typed array in the first operand,
 // the site's cell in the second's pointer word. It sets the bit of the
 // array's element type in the cell, and marks the code the call was made
-// from to be compiled again (jitRunEntry). It refuses only what native
+// from to be compiled again (jitRegReopt). It refuses only what native
 // code never asks, which exits.
 func (r *Runtime) jitTypedSeen(ctx *abi.Context) bool {
 	o := *(**Object)(unsafe.Pointer(&ctx.GoArgs[0].Ref))
@@ -48,8 +48,6 @@ func (r *Runtime) jitTypedSeen(ctx *abi.Context) bool {
 			// Register code's: compiled again as what its calls of Go
 			// learn has it (jitRegReopt).
 			r.jitRegReopt(nil, e)
-		} else if e := r.jitRunEntry(ctx); e != nil && e.ssa != nil {
-			e.reopt = true
 		}
 	}
 	return true
@@ -80,13 +78,3 @@ func (r *Runtime) jitTypedView(ctx *abi.Context) bool {
 // jitTypedViewMade, if set, is called at each view's copy jitTypedView
 // makes: tests count them.
 var jitTypedViewMade func()
-
-// jitRunEntry is the entry of the code a call of Go was made from, with
-// ctx: the run's, at its own level, which may be a loop's (osrOf).
-func (r *Runtime) jitRunEntry(ctx *abi.Context) *jitEntry {
-	s := r.jit
-	if idx := int(ctx.Level); ctx.Live == 0 && idx < len(s.goRuns) && idx < len(s.ssaCtxs) && s.goRuns[idx].f != nil && s.ssaCtxs[idx] == ctx {
-		return s.goRuns[idx].e
-	}
-	return nil
-}

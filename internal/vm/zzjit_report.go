@@ -61,9 +61,9 @@ func JITHoldClocks() (restore func()) {
 	return func() { jitEpochNow, jitFlushNow = epoch, flush }
 }
 
-// SetJITReport has the JIT note, for JITReport, the functions it does not
-// try to compile: too long, or too large for its memory. What it compiles
-// or refuses it keeps anyway.
+// SetJITReport has the JIT note why its runs ended in the interpreter and
+// what its calls of Go made (RegNativeStats). What it compiles or refuses,
+// which JITReport lists, it keeps anyway.
 func (r *Runtime) SetJITReport(on bool) {
 	if r.jitEnabled {
 		r.jitState().reporting = on
@@ -110,15 +110,6 @@ func (r *Runtime) JITReport() []JITFunction {
 			f.Hosts, f.Guards, f.Ended, f.Declined = st.hosts, st.guards, st.ended, l.slowCalls
 			f.GoCalls, f.Work, f.Reopts = st.goCalls, st.work, int(l.reopts)
 		}
-		out = append(out, f)
-	}
-	for k, why := range s.skipped {
-		fn := k.Value()
-		if fn == nil {
-			continue
-		}
-		f := jitFunctionOf(fn)
-		f.Status, f.Reason = "skipped", why
 		out = append(out, f)
 	}
 	slices.SortFunc(out, func(a, b JITFunction) int {

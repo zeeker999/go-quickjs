@@ -331,7 +331,7 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 	s := r.jit
 	osrAt := frameAt
 	if frameAt == 0 {
-		frameAt = r.jitRegFrameAt(cl, key)
+		frameAt = r.jitRegFrameAt(cl)
 	}
 	if !jitCompiles(cl.fn, r.jitBudget()) {
 		// Too large for the JIT's memory (jitCompiles): no room, at every
@@ -507,16 +507,10 @@ func (r *Runtime) jitRegCompileRepeat(cl *closure, c *regCode, p *ir.Program, ke
 }
 
 // jitRegFrameAt is the register pc of the loop's header a frame of cl's
-// function waits at for this compile, whose key is key (ssa.Func's
-// FrameAt), or 0: there is none, or the compile is of another function, or
-// native callers call the function's code (its link's refs), whose calls
-// would then make objects the code could leave unmade, with no check of
-// Go's to find out that they do.
-func (r *Runtime) jitRegFrameAt(cl *closure, key jitKey) int {
+// function waits at for this compile (ssa.Func's FrameAt), or 0: there is
+// none, or the compile is of another function.
+func (r *Runtime) jitRegFrameAt(cl *closure) int {
 	if r.jitFrameFn != cl.fn {
-		return 0
-	}
-	if l := r.jit.regLinks[key]; l != nil && l.refs != 0 {
 		return 0
 	}
 	return r.jitFramePC
@@ -1074,8 +1068,7 @@ func (r *Runtime) jitRegPinLevel(root int, e *jitRegEntry) {
 	}
 	run := &s.goRuns[root]
 	if !run.pinned {
-		s.pinSerial++
-		run.pinned, run.pinnedAt, run.serial = true, len(s.goPinned), s.pinSerial
+		run.pinned, run.pinnedAt = true, len(s.goPinned)
 	}
 	if !slices.Contains(s.goPinned[run.pinnedAt:], e.code) {
 		s.goPinned = append(s.goPinned, e.code)

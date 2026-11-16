@@ -769,13 +769,7 @@ func jitNumberMissed(e *jitEntry, pc int) {
 	if e.reg {
 		// A register instruction's: its every instruction built generic.
 		e.failed = append(e.failed, int32(pc))
-		return
 	}
-	if p := e.ssaProg; e.ssa == nil || p == nil || pc >= len(p.Code) || p.Code[pc].Op != ir.PropertyRead {
-		return
-	}
-	e.failed = append(e.failed, int32(pc))
-	e.reopt = true
 }
 
 // jitPolySiteAt is e's site at pc (jitEntry.poly), made if it has none.
@@ -1312,7 +1306,7 @@ func (r *Runtime) jitFillClosures(pool *abi.ObjectPool, tmpl Value, fn *bytecode
 // runs on, and is compiled again once it has spent a budget itself
 // (jitRegLearnedDue).
 func (e *jitEntry) reoptPending() bool {
-	return e.reopt || e.inlineReopt || e.polyReopt || e.upgradeReopt || e.unwindReopt || e.resumeReopt
+	return e.reopt || e.inlineReopt || e.polyReopt
 }
 
 // jitLearnedMark is jitFeedbackMark of cl's caches with what e's code has
@@ -1327,7 +1321,7 @@ func jitLearnedMark(cl *closure, e *jitEntry) uint64 {
 func jitLearnedCount(e *jitEntry) int {
 	return len(e.failed) + len(e.failedEntries) + len(e.resumed) + len(e.bigints) + len(e.bigwide) + len(e.poly) + len(e.typedReads) + len(e.stringReads) +
 		len(e.keyedReads) + len(e.keyedWrites) + len(e.strSites) + len(e.numSites) + len(e.boolSites) + len(e.nativeCalls) + len(e.inlines) + len(e.notInline) +
-		len(e.literals) + len(e.definesUnfed)
+		len(e.literals)
 }
 
 // jitFeedbackMark sums what cl's function's caches hold: each entry a
@@ -1659,12 +1653,6 @@ type jitInline struct {
 	// that calls cl's function (jitCalledVia).
 	pool *abi.ObjectPool
 	via  bool
-	// push marks a call of Array.prototype.push (jitPushes), pop one of
-	// Array.prototype.pop (jitPops), charCode one of
-	// String.prototype.charCodeAt (jitCharCodes), fromChar one of
-	// String.fromCharCode (jitFromCharCodes), substring one of
-	// String.prototype's substring, slice, substr or charAt (jitSubstrings).
-	push, pop bool
 	// forEach marks a call of Array.prototype.forEach, or another of
 	// jitLoops, on an array (jitRegForEachSeen), cb the closure of the callback
 	// it was given and cbObj its function object.
@@ -1677,20 +1665,9 @@ type jitInline struct {
 	// proto is a typed array's loop's typed arrays' prototype
 	// (jitLoopTyped), nil for an array's.
 	proto *Object
-	// parseInt marks a plain call of the realm's parseInt with a number
-	// (jitParseInts), indexOf a string's or an array's call of one of
-	// jitSearches (jitIndexOfs), bigString a BigInt's call of
-	// BigInt.prototype.toString (jitBigStrings), leaf a call of a leaf
-	// native code made without a frame (jitLeafSeen).
-	leaf bool
 	// byCode marks a function the call met two objects of, closures its
 	// maker makes anew at each call: called by its code (jitRegSameCode).
 	byCode bool
-	// forward marks a forwarding call's function, f of an
-	// apply_arguments, f.apply(x, arguments) (ssa.CallSite's Forward):
-	// called natively with the frame's arguments, as many as there are at
-	// run time, never inlined there, where they are not known.
-	forward bool
 	// parent, for a construction with a class whose constructor is the
 	// one a class without one has (jitRegDerivedBase), is the class it
 	// extends, whose constructor cl is: the call checks obj's prototype is
@@ -1908,18 +1885,11 @@ func jitHostCall(ctx *abi.Context) bool {
 		return r.jitMakeCells(ctx)
 	case ssa.GoClosure, ssa.GoClose:
 		// On the frame whose locals are where native code assigns
-		// captured ones: the one Go entered the code with, or a native
-		// callee's, which its context stands for (jitCalleeFrame).
-		f := r.jitRunFrame(ctx)
-		callee := f == nil
-		if callee {
-			if f = r.jitCalleeFrame(ctx); f == nil {
-				return false
-			}
-		} else {
-			// An arrow shares a derived constructor's binding, which a
-			// super() native code made has bound in the context alone.
-			jitBindThis(f, ctx)
+		// captured ones: a native callee's, which its context stands for
+		// (jitCalleeFrame).
+		f := r.jitCalleeFrame(ctx)
+		if f == nil {
+			return false
 		}
 		i := int(ctx.GoOp >> abi.GoOpIndexShift)
 		if ctx.GoOp>>abi.GoOpKindShift&0xff == abi.GoClosurePool {
@@ -1938,16 +1908,14 @@ func jitHostCall(ctx *abi.Context) bool {
 		}
 		v := Undefined
 		if ssa.GoOp(ctx.GoOp&0xff) == ssa.GoClosure {
-			if i >= len(f.cl.consts) || callee && !jitCalleeMakes(f, f.cl.consts[i]) {
+			if i >= len(f.cl.consts) || !jitCalleeMakes(f, f.cl.consts[i]) {
 				return false
 			}
 			v = Obj(r.makeClosure(f, f.cl.consts[i]))
 		} else if len(f.openUpvalues) != 0 {
 			r.closeUpvaluesFrom(f, i)
 		}
-		if callee {
-			r.jit.calleeOpen[ctx.Level] = f.openUpvalues
-		}
+		r.jit.calleeOpen[ctx.Level] = f.openUpvalues
 		ctx.Open = uint64(len(f.openUpvalues))
 		if ssa.GoOp(ctx.GoOp&0xff) == ssa.GoClosure {
 			// A close's writes none, so that one made with every cell
@@ -2120,31 +2088,17 @@ func jitHostCall(ctx *abi.Context) bool {
 		if r.debug != nil || r.jitStress.budget != 0 {
 			return false
 		}
-		if idx := int(ctx.Level); ctx.Live == 0 && idx < len(s.goRuns) && s.goRuns[idx].f != nil && s.ssaCtxs[idx] == ctx {
-			if e := s.goRuns[idx].e; e != nil && e.reoptPending() && !e.invalid {
-				// The run's code learned what to be compiled again for, at a
-				// call of Go, say, which an exit would have counted: its
-				// loop leaves at the header (abi.ExitPoll), where the
-				// stretch's work is counted toward the code's budget
-				// (jitRegLearnedDue) and the code compiled again once it is
-				// spent, as V8's back edges spend its interrupt budget.
-				// Never leaving, a loop that ran a whole invocation natively
-				// -- each of microbench's tests -- counted none of its work,
-				// and its code, its calls of a function made anew by Go, was
-				// never compiled again.
-				return false
-			}
-		}
 		if idx := int(ctx.Level); ctx.Live == 0 && idx < len(s.regRuns) && s.regRuns[idx].f != nil && s.ssaCtxs[idx] == ctx {
 			if e := s.regRuns[idx].e; e != nil && e.life != nil && e.life.reopt && !e.invalid {
 				// Register code that learned what to be compiled again for
 				// (jitRegReopt), at a call of Go its loop goes on after: the
 				// loop leaves at its header (abi.ExitPoll), where its work is
-				// counted and the code compiled again once that is due, the
-				// loop going on in the new code (jitRegLeft), as the stack
-				// form's run leaves above. Never leaving, a loop that runs a
-				// whole invocation natively had made each construction it
-				// learned by Go to the end.
+				// counted toward the code's budget and the code compiled again
+				// once that is due, the loop going on in the new code
+				// (jitRegLeft), as V8's back edges spend its interrupt
+				// budget. Never leaving, a loop that runs a whole invocation
+				// natively had made each construction it learned by Go to the
+				// end.
 				return false
 			}
 		}
@@ -2185,32 +2139,14 @@ func jitHostCall(ctx *abi.Context) bool {
 	return false
 }
 
-// jitGoRun is what a run of native code in a context runs: its frame,
-// entry and code (jitState's goRuns).
+// jitGoRun is what a run of native code in a context has pinned
+// (jitState's goRuns).
 type jitGoRun struct {
-	f    *frame
-	e    *jitEntry
-	code *jit.SSACode
-	// inlined are the closures code inlines (jitEntry's ssaInlined), whose
-	// frames Go makes at an exit inside one (jitRegUnwind): e's lists
-	// are another code's once e is compiled again while the run goes on
-	// (jitRegReoptimize), and code's, closed once its native code has left,
-	// keep nothing.
-	inlined []*closure
-	pinned  bool
+	pinned bool
 	// pinnedAt is where its pins start in goPinned: its own code, then
 	// that of the native callees whose calls of Go it is suspended in
-	// (jitRegGoCallNested), all released when its native code leaves. serial
-	// names those pins: no other run's, nor this run's after they are
-	// released, have it (jitState's pinSerial).
+	// (jitRegGoCallNested), all released when its native code leaves.
 	pinnedAt int
-	serial   uint64
-	// edges and pc are where its last call of Go returned, or its
-	// stretch began: the back-edge counter then, net of the polls'
-	// budgets, and the PC -- the start of the work its next call of Go
-	// is judged against (jitGoCall), in a run on-stack replacement began
-	// (osr).
-	pc int
 }
 
 // jitGoUnpin ends what calls of Go the run in context idx made: its code,
@@ -2326,17 +2262,6 @@ func jitGoPropertyAt(fn *bytecode.Function, pc int, in bytecode.Instr) bool {
 	return true
 }
 
-// jitRunFrame is the frame Go entered the code running in ctx with, or
-// nil for code a native call runs in it, which has none of the VM's.
-func (r *Runtime) jitRunFrame(ctx *abi.Context) *frame {
-	s := r.jit
-	idx := int(ctx.Level)
-	if ctx.Live != 0 || idx >= len(s.goRuns) || s.ssaCtxs[idx] != ctx {
-		return nil
-	}
-	return s.goRuns[idx].f
-}
-
 // jitCalleeFrame is a frame for the native callee running in ctx, which
 // has none of the VM's, to make a closure on or close what closures
 // captured (ssa.GoClosure, GoClose): its closure, its locals where its
@@ -2387,40 +2312,13 @@ func jitCellsOf(ctx *abi.Context, fn *bytecode.Function) []*upvalue {
 
 // jitMakeCells makes, at an entry of code whose captured locals are in
 // cells of their own (ir.Program's Cells, ssa.GoCells), those cells, the
-// context's, as V8's code allocates a function's context. On the frame Go
-// entered the code with, they are open on its slots -- those closures it
-// made before took among them -- which it closes as it is popped. For a
-// native callee, whose frame Go does not keep, each is a cell of its own,
+// context's, as V8's code allocates a function's context. For a native
+// callee, whose frame Go does not keep, each is a cell of its own,
 // closed, holding its parameter's argument or undefined, as the frame's
 // slot is at the call: what a closure captures, and native code reads and
 // assigns, from then on, and what Go puts in the frame it makes if the
 // callee leaves native code (jitRegReopenCells).
 func (r *Runtime) jitMakeCells(ctx *abi.Context) bool {
-	if f := r.jitRunFrame(ctx); f != nil {
-		fn := f.cl.fn
-		n := jitCaptured(fn)
-		if n == 0 {
-			return false
-		}
-		cells, room := jitNewCells(n)
-		k := 0
-		for slot, l := range fn.Locals {
-			if !l.Captured {
-				continue
-			}
-			u := openUpvalue(f, slot)
-			if u == nil {
-				u = &room[k]
-				u.slot = &f.locals[slot]
-				f.openUpvalues = append(f.openUpvalues, u)
-			}
-			cells[k] = u
-			k++
-		}
-		ctx.Cells = unsafe.Pointer(unsafe.SliceData(cells))
-		ctx.Open = uint64(len(f.openUpvalues))
-		return true
-	}
 	cl := (*closure)(ctx.Closure)
 	if ctx.Live != abi.LiveCall || cl == nil || ctx.Locals == nil {
 		return false
@@ -2513,21 +2411,18 @@ func jitFillCells(pool *abi.ObjectPool) {
 }
 
 // jitCellsClosure is GoClosure and GoClose for code whose captured locals
-// are in cells of their own (abi.Context's Cells), on f, the frame Go
-// entered it with or a native callee's stand-in (jitCalleeFrame): a
-// closure, its constant i, capturing the cells; or a scope's end, from
-// local i on, whose captured locals take fresh cells holding what they
-// hold -- the closures that captured the old ones keep them, as closing
-// an upvalue leaves them, and a loop's next iteration's capture new ones.
-// On the frame Go entered, the old ones are closed and the new ones open
-// on its slots, as the interpreter's are.
+// are in cells of their own (abi.Context's Cells), on f, a native callee's
+// stand-in (jitCalleeFrame): a closure, its constant i, capturing the
+// cells; or a scope's end, from local i on, whose captured locals take
+// fresh cells holding what they hold -- the closures that captured the old
+// ones keep them, as closing an upvalue leaves them, and a loop's next
+// iteration's capture new ones.
 func (r *Runtime) jitCellsClosure(ctx *abi.Context, f *frame, i int) bool {
 	fn := f.cl.fn
 	cells := jitCellsOf(ctx, fn)
-	run := r.jitRunFrame(ctx) == f
 	v := Undefined
 	if ssa.GoOp(ctx.GoOp&0xff) == ssa.GoClosure {
-		if i >= len(f.cl.consts) || !run && !jitCalleeMakes(f, f.cl.consts[i]) {
+		if i >= len(f.cl.consts) || !jitCalleeMakes(f, f.cl.consts[i]) {
 			return false
 		}
 		o := r.newClosureIn(f, f.cl.consts[i], cells)
@@ -2536,33 +2431,18 @@ func (r *Runtime) jitCellsClosure(ctx *abi.Context, f *frame, i int) bool {
 		}
 		v = Obj(o)
 	} else {
-		if run && len(f.openUpvalues) != 0 {
-			r.closeUpvaluesFrom(f, i)
-		}
 		k := 0
 		for slot, l := range fn.Locals {
 			if !l.Captured {
 				continue
 			}
 			if slot >= i {
-				if run {
-					// What the cell holds, which may be one native code
-					// gave it (mir's cellsClose), not open on the slot.
-					f.locals[slot] = *cells[k].slot
-					u := &upvalue{slot: &f.locals[slot]}
-					f.openUpvalues = append(f.openUpvalues, u)
-					cells[k] = u
-				} else {
-					u := &upvalue{closed: *cells[k].slot}
-					u.slot = &u.closed
-					cells[k] = u
-				}
+				u := &upvalue{closed: *cells[k].slot}
+				u.slot = &u.closed
+				cells[k] = u
 			}
 			k++
 		}
-	}
-	if run {
-		ctx.Open = uint64(len(f.openUpvalues))
 	}
 	if ssa.GoOp(ctx.GoOp&0xff) == ssa.GoClosure {
 		*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
@@ -2596,32 +2476,6 @@ func jitCalleeMakes(f *frame, c Value) bool {
 	}
 	t := c.template()
 	return t == nil || t.fn.Kind != bytecode.KindArrow || f.cl.fn.Kind != bytecode.KindDerivedConstructor || !f.this.IsUninitialized()
-}
-
-// jitLevels is the frames the last call of Go from a native callee made
-// for its levels (jitRegGoCallNested), which the next call from the same
-// levels, or from those of them it shares, takes as they are, but for
-// their PCs: in the run whose pins serial names (0 for none), from context
-// root on, n of them, above depth. Nothing else makes a frame there while
-// native code runs: a call of Go at the run's own level, which makes the
-// built-in's there, forgets them (serial 0), as does the run's native code
-// leaving; what a call runs makes its frames above them. Any number of
-// levels: limited to four, every call of AWFY's Json's parser, its
-// readValue native, made a frame for each of its six to twelve levels.
-type jitLevels struct {
-	serial   uint64
-	depth, n int
-	at       []jitLevelFrame
-}
-
-// jitLevelFrame is a level's frame and entry, and the closure, stack base
-// and receiver its context had when it was made.
-type jitLevelFrame struct {
-	f    *frame
-	e    *jitEntry
-	cl   unsafe.Pointer
-	base uint64
-	this abi.Slot
 }
 
 // jitStoreElem stores v at index n of o as an assignment would, where that
@@ -4259,8 +4113,7 @@ const jitInliningFrequency = 5
 // compile asks for its function's and for each callee's it inlines, and a
 // function is compiled again as it learns, and inlined into each of its
 // callers -- lowering them again had been some 8% of a compile. A program
-// is never changed once lowered. inlinable is jitInlinable's answer, once
-// asked: 1 if the function may be inlined, 2 if not.
+// is never changed once lowered.
 //
 // bytes is what the lowering holds, its programs' (ir.Program's
 // Footprint), which the JIT counts (jitState.lowerBytes); used the epoch
@@ -4268,12 +4121,11 @@ const jitInliningFrequency = 5
 // drops the lowerings of functions it has no entry for to make room
 // (makeRoom), the least recently used first, before any code.
 type jitLowering struct {
-	inlinable uint8
-	done      [jitLowerKinds]bool
-	progs     [jitLowerKinds]*ir.Program
-	errs      [jitLowerKinds]error
-	bytes     int
-	used      uint64
+	done  [jitLowerKinds]bool
+	progs [jitLowerKinds]*ir.Program
+	errs  [jitLowerKinds]error
+	bytes int
+	used  uint64
 	// hints are what its code's exits have shown it does that its
 	// bytecode does not say (jitcompile.Hints): its programs are lowered
 	// with them. treeAdds is how many additions its tree had marked
@@ -4333,7 +4185,6 @@ func (s *jitState) relower(l *jitLowering) {
 		}
 		l.done[k], l.progs[k], l.errs[k] = false, nil, nil
 	}
-	l.inlinable = 0
 	l.serial++
 }
 
@@ -5044,10 +4895,6 @@ type jitSSAStats struct {
 	// began entering the code again (jitRegRetrySlow): it is judged by what
 	// it has done since.
 	workBase, stretchBase uint64
-	// guardsAt counts failed guards by their site (abi.Context.ExitSite:
-	// the slot IR PC of the operation, or -1 for an entry's speculation);
-	// nil until one fails.
-	guardsAt map[int32]uint64
 }
 
 // jitSSAProbe is how many native stretches a function runs between looks
@@ -5461,12 +5308,11 @@ const (
 
 // jitLearning reports whether e's code has met, since it was compiled,
 // what a compile would take that it was not compiled for: what is to be
-// compiled again for (reoptPending), calls its exits learned
-// (inlinePending), or a call it has left native
-// code at but not yet decided, which the compile would decide if the
-// interpreter has met its target.
+// compiled again for (reoptPending), or a call it has left native code at
+// but not yet decided, which the compile would decide if the interpreter
+// has met its target.
 func jitLearning(e *jitEntry) bool {
-	if e.reoptPending() || e.inlinePending {
+	if e.reoptPending() {
 		return true
 	}
 	for _, n := range e.callSites {
@@ -5492,9 +5338,8 @@ const (
 	jitNativeBackoffs = 8
 )
 
-// jitArgument is ssa.GoArgument's answer, for the code ctx runs, a run of
-// a function's own code Go entered with its frame, which has the call's
-// arguments: arguments[k] -- the first operand k, the second the local
+// jitArgument is ssa.GoArgument's answer, for the code ctx runs, a native
+// callee's, whose call wrote its arguments to its context: arguments[k] -- the first operand k, the second the local
 // the arguments object is kept in once made -- or, of one operand, that
 // local, arguments.length; and whether it answers. While the object is
 // not made, an index of the arguments is the argument, as the
@@ -5505,23 +5350,13 @@ const (
 // (ir.Program's ArgumentParams) -- and their count is how many there are.
 // The rest it leaves to the code's exit, where Go makes it.
 func (r *Runtime) jitArgument(ctx *abi.Context) (Value, bool) {
-	s, idx := r.jit, int(ctx.Level)
-	var args []Value
-	var fn *bytecode.Function
-	switch {
-	case ctx.Live == abi.LiveCall:
-		// A native callee's, whose call wrote them to its context
-		// (jitFrameArgs).
-		cl := (*closure)(ctx.Closure)
-		if cl == nil || !jitFrameArgs(cl.fn) {
-			return Undefined, false
-		}
-		args, fn = jitContextArgs(ctx), cl.fn
-	case ctx.Live != 0 || idx >= len(s.goRuns) || idx >= len(s.ssaCtxs) || s.ssaCtxs[idx] != ctx || s.goRuns[idx].f == nil:
+	// A native callee's, whose call wrote them to its context
+	// (jitFrameArgs).
+	cl := (*closure)(ctx.Closure)
+	if ctx.Live != abi.LiveCall || cl == nil || !jitFrameArgs(cl.fn) {
 		return Undefined, false
-	default:
-		args, fn = s.goRuns[idx].f.args, s.goRuns[idx].f.cl.fn
 	}
+	args, fn := jitContextArgs(ctx), cl.fn
 	if ctx.GoOp>>abi.GoOpArgcShift&0xff == 1 {
 		if jitGoArg(ctx, 0).IsObject() {
 			return Undefined, false

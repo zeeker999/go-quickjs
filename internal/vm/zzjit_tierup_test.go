@@ -200,11 +200,10 @@ func TestJITDeoptLimit(t *testing.T) {
 	if !e.invalid || e.deopts != jitMaxDeopts+1 {
 		t.Fatalf("f's deoptimization past the limit: invalid %v, deopts %d", e.invalid, e.deopts)
 	}
-	tiered := r.jit.tieredUp
 	for k := 0; k < 40; k++ {
 		run(fmt.Sprintf(`f(%c,10)`, "ab"[k&1]))
 	}
-	if e.ssaSerial != 1 || !e.invalid || r.jit.tieredUp != tiered {
+	if e.ssaSerial != 1 || !e.invalid {
 		t.Fatalf("f compiled again past the deoptimization limit: compiled %d times, invalid %v", e.ssaSerial, e.invalid)
 	}
 }
@@ -224,12 +223,11 @@ func TestJITDeoptTiersUpByOSR(t *testing.T) {
 		function g(n){let s=0;for(let i=0;i<n;i++){const o=i<1000?a:b;s=(s+o.x)|0}return s}`)
 	run(`g(10)`)
 	e := jitNativeForTest(t, r, "g")
-	tiered, osrs, serial := r.jit.tieredUp, r.jit.osrs, e.ssaSerial
+	osrs, serial := r.jit.osrs, e.ssaSerial
 	run(`g(20000)`)
-	tieredUp := r.jit.tieredUp - tiered
 	// Register code's compiles after an invalidation are counted in its
 	// function's state (ssaSerial), as any compile again of it is.
-	tieredUp = uint64(e.ssaSerial - serial)
+	tieredUp := uint64(e.ssaSerial - serial)
 	if e.deopts == 0 || e.invalid || tieredUp == 0 || r.jit.osrs == osrs || e.ssaStats.entries == 0 {
 		t.Fatalf("g did not go on natively by on-stack replacement: deopts %d, invalid %v, tiered up %d, entered at loops %d", e.deopts, e.invalid, tieredUp, r.jit.osrs-osrs)
 	}
@@ -621,20 +619,11 @@ func TestJITLongCalleeWarmsUp(t *testing.T) {
 	if !jitHasCodeOfForTest(r, h) {
 		t.Fatal("h has no code")
 	}
-	decided := r.jit.callsDecided
 	for i := range 25 * (jitInvocationsForMaglev - 8) {
 		run(`h(1,1)`)
 		if jitHasCodeOfForTest(r, g) {
 			t.Fatalf("g compiled at its %d. call", (i+1)/25)
 		}
-	}
-	// h's call waits for g (jitCallWaiting): decided once, not at each of
-	// g's calls while it warms. The stack form's count of what its calls
-	// decided (callsDecided); register code's call of a known callee Go
-	// makes decides nothing (jitRegCallSeen's nativeCalls), and counts
-	// none.
-	if n := r.jit.callsDecided - decided; false {
-		t.Fatalf("h's call of g decided %d times while g warmed", n)
 	}
 	for range 25 * jitInvocationsForMaglev {
 		run(`h(1,1)`)

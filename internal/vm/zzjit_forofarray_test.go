@@ -619,10 +619,9 @@ func TestJITCapturedLocalCallees(t *testing.T) {
 	for _, name := range []string{"inputsKnown", "counter", "maker", "exits", "blocks", "addr"} {
 		// Register code is one for Go and native callers alike, its
 		// captured locals in cells of their own wherever closures
-		// capture them (ir.Program's Cells): no lowering of its own
-		// for native callers alone (the stack form's ssaCallee).
+		// capture them (ir.Program's Cells).
 		e := regEntryNamedForTest(r, name)
-		if e == nil || e.life.calleeRefused || regLinkInForTest(r, e) == 0 {
+		if e == nil || regLinkInForTest(r, e) == 0 {
 			t.Errorf("%s has no code for native callers: %+v", name, e)
 			continue
 		}

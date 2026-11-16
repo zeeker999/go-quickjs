@@ -100,7 +100,7 @@ func TestJITCallLeftToGoDecidedAgain(t *testing.T) {
 	e = jitHintForTest(r, cl)
 	if e == nil || !slices.ContainsFunc(e.nativeCalls, func(x jitInline) bool { return x.cl != nil && x.cl.fn.Name == "add" }) &&
 		!slices.ContainsFunc(e.inlines, func(x jitInline) bool { return x.cl != nil && x.cl.fn.Name == "add" }) {
-		t.Errorf("h's call, left to Go, not decided again for add: reopts %d inline %d callSites %v nativeCalls %d inlines %d failed %v", e.reopts, e.inlineReopts, e.callSites, len(e.nativeCalls), len(e.inlines), e.failed)
+		t.Errorf("h's call, left to Go, not decided again for add: reopts %d callSites %v nativeCalls %d inlines %d failed %v", e.reopts, e.callSites, len(e.nativeCalls), len(e.inlines), e.failed)
 	}
 }
 

@@ -143,11 +143,6 @@ func (r *Runtime) jitLevelFrameFill(f *frame, c *abi.Context, lcl *closure, e *j
 			f.newTarget = Obj(*(**Object)(unsafe.Pointer(&c.NewTarget)))
 		}
 	}
-	if c.Function != 0 && lcl.fn.Kind != bytecode.KindDerivedConstructor && e != nil && e.ssaProg != nil && e.ssaProg.FrameCallee {
-		// The function object its code reads, which the call wrote
-		// (jitFrameCallee); a derived construction's is jitDerivedFrame's.
-		f.callee = *(**Object)(unsafe.Pointer(&c.Function))
-	}
 	f.openUpvalues, f.handlers = f.openUpvalues[:0], f.handlers[:0]
 	f.thisRef, f.withScopes, f.evalVars, f.native, f.savedSP = nil, nil, nil, "", 0
 	if lcl.fn.Kind == bytecode.KindDerivedConstructor {

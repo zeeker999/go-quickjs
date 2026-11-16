@@ -42,10 +42,6 @@ type jitLearned struct {
 	// reads of its method, by register pc (jitRegFeedback's
 	// regLitProperty).
 	regLitReads map[int32]*propCache
-	// regexpLitCalls says, of each call of Go the code has made that
-	// jitRegExpLitPool has asked about, the pc of the RegExp literal it
-	// calls exec or test of, or -1.
-	regexpLitCalls map[int32]int32
 	// cellsPool is the pool the code takes its captured locals' cells
 	// from at its entries, kept across compiles (jitFeedback.CellsPool).
 	cellsPool *abi.ObjectPool

@@ -259,8 +259,8 @@ func jitRegHeldCountsEachKindForTest(t *testing.T, r *Runtime) {
 	if len(s.ssaCtxs) == 0 || len(s.regLinks) == 0 {
 		t.Fatalf("%d contexts, %d links", len(s.ssaCtxs), len(s.regLinks))
 	}
-	shared := s.ctxCounted()*jitContextBytes + (len(s.links)+len(s.regLinks))*jitLinkFixed + jitCapBytes(s.hints)
-	if s.sharedBytes() < shared || s.held() != s.entryBytes+s.lowerBytes+s.sharedBytes()+s.regHeld {
+	shared := s.ctxCounted()*jitContextBytes + len(s.regLinks)*jitLinkFixed + jitCapBytes(s.hints)
+	if s.sharedBytes() < shared || s.held() != s.lowerBytes+s.sharedBytes()+s.regHeld {
 		t.Errorf("shared %d counted, at least %d held", s.sharedBytes(), shared)
 	}
 	if r.jitHeldBytes() > int64(r.jitBudget()) {

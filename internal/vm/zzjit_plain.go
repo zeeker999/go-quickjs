@@ -86,20 +86,11 @@ func (r *Runtime) jitGoCallPlain(ctx *abi.Context) bool {
 			v = Undefined
 			break
 		}
-		var cl *closure
-		switch ctx.Live {
-		case 0:
-			if idx >= len(s.goRuns) || s.goRuns[idx].f == nil {
-				return false
-			}
-			cl = s.goRuns[idx].f.cl
-		case abi.LiveCall:
-			cl = (*closure)(ctx.Closure)
+		if ctx.Live != abi.LiveCall || jitGoInline(ctx) {
+			// A run's own frame, or an inlined callee's: none kept.
+			return false
 		}
-		pc := int(ctx.ExitPC)
-		if st := jitGoCallState(ctx); st != nil && st.Inline != 0 {
-			cl, pc = r.jitGoInlined(ctx, st.Inline), int(st.InlinePC)
-		}
+		cl, pc := (*closure)(ctx.Closure), int(ctx.ExitPC)
 		if cl == nil || !jitGoPropertyAt(cl.fn, pc, in) || !r.jitPlainWrite(cl, cl.fn.Code[pc], jitGoArg(ctx, 0), jitGoArg(ctx, 1)) {
 			return false
 		}
@@ -134,21 +125,6 @@ func jitGoCallState(ctx *abi.Context) *abi.GoCallState {
 func jitGoInline(ctx *abi.Context) bool {
 	st := jitGoCallState(ctx)
 	return st != nil && st.Inline != 0
-}
-
-// jitGoInlined is the closure at addr, an inlined callee's, among those
-// the code making the call of Go in ctx inlines, the run's code's, or nil.
-func (r *Runtime) jitGoInlined(ctx *abi.Context, addr uintptr) *closure {
-	var inlined []*closure
-	if s, idx := r.jit, int(ctx.Level); ctx.Live == 0 && idx < len(s.goRuns) {
-		inlined = s.goRuns[idx].inlined
-	}
-	for _, x := range inlined {
-		if uintptr(unsafe.Pointer(x)) == addr {
-			return x
-		}
-	}
-	return nil
 }
 
 // jitPlainCall is the result of the call of a built-in among its operands

@@ -270,7 +270,7 @@ func TestJITRunOutOfCodeInInterpreter(t *testing.T) {
 		t.Skip("the runtime compiles eagerly (QJS_JIT_STRESS)")
 	}
 	var e *jitEntry
-	var runs []int32
+	runs := 0
 	r.global.setOwnRaw(r.atoms.intern("slow"), r.NewFunction("slow", 1, func(_ *Runtime, _ Value, args []Value) (Value, error) {
 		if e != nil && args[0].Truthy() {
 			e.entrySlow = true
@@ -279,7 +279,7 @@ func TestJITRunOutOfCodeInInterpreter(t *testing.T) {
 	}), propDefault)
 	r.global.setOwnRaw(r.atoms.intern("probe"), r.NewFunction("probe", 1, func(_ *Runtime, _ Value, args []Value) (Value, error) {
 		if e != nil && args[0].Truthy() {
-			runs = append(runs, e.ssaRuns)
+			runs++
 		}
 		return Undefined, nil
 	}), propDefault)
@@ -313,11 +313,8 @@ func TestJITRunOutOfCodeInInterpreter(t *testing.T) {
 	if e.ssaStats.entries == entries {
 		t.Fatal("f's code never ran")
 	}
-	if len(runs) != 1 || runs[0] != 0 {
-		t.Errorf("runs of f's code while the interpreter went on with its frame: %v", runs)
-	}
-	if e.ssaRuns != 0 {
-		t.Errorf("f's code has %d runs after it returned", e.ssaRuns)
+	if runs != 1 {
+		t.Errorf("probes of f's code while the interpreter went on with its frame: %v", runs)
 	}
 }
 

@@ -80,7 +80,7 @@ func TestJITFlushesUnusedCode(t *testing.T) {
 	if _, err := r.Run(compileForTest(t, `probe = null; g = null;`)); err != nil {
 		t.Fatal(err)
 	}
-	flushed0, recompiled0 := r.JITCacheCounts()
+	flushed0 := r.JITCacheCounts()
 	// Two looks, jitFlushAge epochs apart, f unused between them.
 	setEpoch(1000 + jitFlushAge)
 	s.flush()
@@ -111,10 +111,9 @@ func TestJITFlushesUnusedCode(t *testing.T) {
 		t.Fatalf("f was not compiled again once hot again: %+v", e)
 	}
 	// What the report counts (JITCacheCounts): the code flushed -- f's,
-	// g's and make's, each compiled at its first call -- and each compiled
-	// again once called again.
-	if flushed, recompiled := r.JITCacheCounts(); flushed-flushed0 != 3 || recompiled-recompiled0 != 3 {
-		t.Fatalf("%d flushed, %d compiled again once dropped", flushed-flushed0, recompiled-recompiled0)
+	// g's and make's, each compiled at its first call.
+	if flushed := r.JITCacheCounts(); flushed-flushed0 != 3 {
+		t.Fatalf("%d flushed", flushed-flushed0)
 	}
 }
 
@@ -146,7 +145,7 @@ func TestJITFlushKeepsCodeInUse(t *testing.T) {
 		t.Fatalf("f was not compiled: %+v", e)
 	}
 	ew, wCode := jitCachedForTest(r, "w")
-	if x, ok := ew.(*jitEntry); ew == nil || wCode || ok && x.holdsCode() {
+	if ew == nil || wCode {
 		t.Fatalf("w is not an entry with no code: %+v", ew)
 	}
 	for k := uint64(1); k <= 4; k++ {

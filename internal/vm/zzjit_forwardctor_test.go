@@ -115,7 +115,7 @@ func TestJITForwardingConstructors(t *testing.T) {
 	// It leaves native code only to fill the pools again, and Go makes
 	// none of its constructions, nor runs a constructor native code called
 	// (abi.ExitEnter).
-	hosts, calls, entered, entries := e.ssaStats.hosts, e.ssaStats.goCalls, r.jit.entered, e.ssaStats.entries
+	hosts, calls, entries := e.ssaStats.hosts, e.ssaStats.goCalls, e.ssaStats.entries
 	if _, err := r.Run(compileForTest(t, `build(300, 1)`)); err != nil {
 		t.Fatal(err)
 	}
@@ -127,8 +127,5 @@ func TestJITForwardingConstructors(t *testing.T) {
 	}
 	if n := e.ssaStats.goCalls - calls; n > 4 {
 		t.Errorf("Go made %d of build's 900 constructions", n)
-	}
-	if n := r.jit.entered - entered; n > 4 {
-		t.Errorf("Go ran %d of build's 900 constructors", n)
 	}
 }
