@@ -377,6 +377,13 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 	// budget was full was the first that the next compile's room let go
 	// of, and the compiles that filled it dropped each other's code.
 	life := s.regLearnedOf(key)
+	if !life.regCounted {
+		// No room for the JIT to keep its state in (regLearnedOf), nor so
+		// for its code, as the stack form compiles nothing it made no entry
+		// for.
+		s.refusedRoom++
+		return nil
+	}
 	if life.deferred && life.generation == s.generation {
 		// No room for it at its last compile, and the cache has let no
 		// code go since (jitRegPlace).

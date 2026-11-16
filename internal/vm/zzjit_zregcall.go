@@ -78,7 +78,7 @@ func (s *jitState) regLinkIfCached(cl *closure) {
 // nil where none has asked for one (regLinkOf), as regLinks has it by e's
 // key.
 func (s *jitState) regLinkFor(e *jitRegEntry) *jitLink {
-	if e.life != nil {
+	if e.life != nil && e.life.regLink != nil {
 		return e.life.regLink
 	}
 	return s.regLinks[e.key]
