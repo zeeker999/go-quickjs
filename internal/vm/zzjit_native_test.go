@@ -1648,12 +1648,12 @@ func TestJITHostErrors(t *testing.T) {
 
 func jitRuntimeForTest(t *testing.T, cfg Config) *Runtime {
 	t.Helper()
+	// The tiers the JIT works with are the runtime's own: the register
+	// interpreter and the register JIT where runtimes with the JIT run
+	// register code (QJS_JITREG, SetJITRegTier), the stack interpreter,
+	// the tree tier and the stack JIT otherwise. A runtime made without
+	// the JIT, to compare with, runs the register interpreter.
 	r := New(cfg)
-	// The JIT's tests are of the tiers it works with, the stack
-	// interpreter and the tree tier, which a runtime with the JIT runs:
-	// one made without it, to compare with or to enable it later
-	// (initJIT), runs them too.
-	r.oldTiers = true
 	// Boundary tests force promotion so guard and budget assertions cannot
 	// pass by running only the existing tiers.
 	r.jitCallThreshold, r.jitICThreshold = 1, 1
