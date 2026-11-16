@@ -235,17 +235,17 @@ func (r *Runtime) regWithResolve(f *frame, c *regCode, pc int, w bytecode.RInstr
 	return nil
 }
 
-// regDebug is debug, the stack form's debug_stmt: a place code compiled
-// for a debugger can stop, the statement's index in Aux. The frame's pc is
-// the stack form's debug_stmt's, which the debugger finds the statement,
-// its scope and its position by, and its this the one in register 1.
+// regDebug is debug: a place code compiled for a debugger can stop, the
+// statement's index in Aux. The frame's pc is the instruction's, which
+// the debugger finds the statement, its scope and its position by
+// (regStatementAt), and its this the one in register 1.
 func (r *Runtime) regDebug(f *frame, c *regCode, pc int, w bytecode.RInstr, regs *[1 << 16]Value) error {
 	d := r.debug
 	if d == nil || !d.armed && w.B() == 0 {
 		return nil
 	}
 	idx := regAuxAt(c, pc)
-	f.pc = f.cl.fn.Debug.Statements[idx].PC + 1
+	f.pc = uint32(pc) + 1
 	regSyncThis(f, regs)
 	return r.debugStatement(f, bytecode.Instr{Op: bytecode.OpDebugStmt, A: idx, B: uint32(w.B())})
 }
@@ -268,25 +268,61 @@ func (r *Runtime) regDebugFrame(f *frame) (*regCode, *[1 << 16]Value) {
 }
 
 // regCaughtAt reports whether register code c catches what an instruction
-// of it throws at the stack form's pc -- one past, as a frame keeps it --
-// in a catch clause's handler (RHandler.Catches), for a debugger asking
-// whether an exception is caught.
+// of it throws at pc -- one past, as a frame keeps it -- in a catch
+// clause's handler (RHandler.Catches), for a debugger asking whether an
+// exception is caught.
 func regCaughtAt(c *regCode, pc uint32) bool {
 	if pc == 0 {
 		return false
 	}
-	for i, s := range c.src {
-		if s != pc-1 {
-			continue
-		}
-		for j := range c.rc.Handlers {
-			h := &c.rc.Handlers[j]
-			for k := 0; h.Catches && k+1 < len(h.Ranges); k += 2 {
-				if uint32(i) >= h.Ranges[k] && uint32(i) < h.Ranges[k+1] {
-					return true
-				}
+	i, ok := regThrowerAt(c, int(pc-1))
+	if !ok {
+		return false
+	}
+	for j := range c.rc.Handlers {
+		h := &c.rc.Handlers[j]
+		for k := 0; h.Catches && k+1 < len(h.Ranges); k += 2 {
+			if uint32(i) >= h.Ranges[k] && uint32(i) < h.Ranges[k+1] {
+				return true
 			}
 		}
 	}
 	return false
+}
+
+// regThrowerAt is the instruction of c a frame's pc, less one, stands
+// for: pc itself, or, for a pc past the code -- the position of an error
+// an instruction places apart from its own (bytecode.RegCode.Lines) --
+// the instruction whose Aux holds it.
+func regThrowerAt(c *regCode, pc int) (int, bool) {
+	rc := c.rc
+	if pc < len(rc.Code) {
+		return pc, pc >= 0
+	}
+	for i, a := range rc.Aux {
+		if int(a) == pc {
+			switch rc.Code[i].Op() {
+			case bytecode.RCharCodeAt, bytecode.RLit, bytecode.RAddI32, bytecode.RSubI32, bytecode.RAddII32,
+				bytecode.RAddIndex, bytecode.RAddIndexK, bytecode.RAddIndexI:
+				return i, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// regStatementAt is the index of the statement of code compiled for a
+// debugger that the instruction at pc is in: that of the last debug
+// instruction at or before it, or -1.
+func regStatementAt(c *regCode, pc int) int {
+	pc, ok := regThrowerAt(c, pc)
+	if !ok {
+		return -1
+	}
+	for ; pc >= 0; pc-- {
+		if regAt(c.code, pc).Op() == bytecode.RDebug {
+			return int(regAuxAt(c, pc))
+		}
+	}
+	return -1
 }

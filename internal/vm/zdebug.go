@@ -711,12 +711,15 @@ func (df *DebugFrame) statement() *bytecode.Statement {
 	if df.fn.Debug == nil {
 		return nil
 	}
-	st := df.fn.Debug.Statements
-	i := sort.Search(len(st), func(i int) bool { return st[i].PC > df.pc })
-	if i == 0 {
+	if df.rc == nil {
 		return nil
 	}
-	return &st[i-1]
+	st := df.fn.Debug.Statements
+	i := regStatementAt(df.rc, int(df.pc))
+	if i < 0 || i >= len(st) {
+		return nil
+	}
+	return &st[i]
 }
 
 // Scopes are what the frame sees at the statement it is in, innermost

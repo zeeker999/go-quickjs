@@ -118,7 +118,7 @@ func (r *Runtime) regNewObjectLit(f *frame, c *regCode, k *regKept, regs *[1 << 
 func (r *Runtime) regNewArrayE(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value) {
 	pc := k.pc - 1
 	w := regAt(c.code, pc)
-	n := arrayEmptyNode[struct{}]{site: int(w.B()), pc: int32(regSrc(c, pc))}
+	n := arrayEmptyNode[struct{}]{site: int(w.B()), pc: int32(uint32(pc))}
 	regs[w.A()] = n.make(r, f.cl.closureCode)
 }
 
@@ -134,7 +134,7 @@ func (r *Runtime) regCharCodeAtSlow(f *frame, c *regCode, pc int, regs *[1 << 16
 		return err
 	}
 	a := regs[w.X()]
-	f.pc = c.src[pc] + 1
+	f.pc = uint32(pc) + 1
 	v, err := r.regCall(m, o, []Value{a})
 	if err != nil {
 		return err

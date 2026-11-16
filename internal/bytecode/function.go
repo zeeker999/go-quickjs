@@ -543,14 +543,15 @@ type Function struct {
 	Reg *RegLater
 }
 
-// LineAt returns the source line of the instruction at pc, or 0 if unknown.
+// LineAt returns the source line of the register code's instruction at
+// pc, or 0 if unknown.
 func (f *Function) LineAt(pc uint32) int32 {
 	line, _ := f.PositionAt(pc)
 	return line
 }
 
-// PositionAt returns the source line and column of the instruction at pc, or
-// zeros if unknown.
+// PositionAt returns the source line and column of the register code's
+// instruction at pc, or zeros if unknown.
 func (f *Function) PositionAt(pc uint32) (line, col int32) {
 	if pos, ok := f.PosAt(pc); ok {
 		return f.Script.Position(pos)
@@ -558,15 +559,12 @@ func (f *Function) PositionAt(pc uint32) (line, col int32) {
 	return 0, 0
 }
 
-// PosAt returns the byte offset in the script of the instruction at pc, and
-// whether it is known.
+// PosAt returns the byte offset in the script of the register code's
+// instruction at pc -- or of the error a pc past the code stands for
+// (RegCode.Lines) -- and whether it is known.
 func (f *Function) PosAt(pc uint32) (int32, bool) {
-	// Entries are sorted by PC, and functions are small, so a linear scan from
-	// the end beats a binary search in practice.
-	for i := len(f.Lines) - 1; i >= 0; i-- {
-		if f.Lines[i].PC <= pc {
-			return f.Lines[i].Pos, true
-		}
+	if rc := f.RegCompiled(); rc != nil {
+		return rc.PosAt(int(pc))
 	}
 	return 0, false
 }

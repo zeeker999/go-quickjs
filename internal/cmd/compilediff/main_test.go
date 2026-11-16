@@ -139,9 +139,9 @@ func TestRegOutputIsWhole(t *testing.T) {
 		c[len(c)-1] ^= 1 << 32
 		f.Set(reflect.ValueOf(c))
 	})
-	plant("SrcPC", func(f reflect.Value) {
-		c := slices.Clone(rc.SrcPC)
-		c[0]++
+	plant("Lines", func(f reflect.Value) {
+		c := slices.Clone(rc.Lines)
+		c[0].Pos++
 		f.Set(reflect.ValueOf(c))
 	})
 	if write(res) != base {

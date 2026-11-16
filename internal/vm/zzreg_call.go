@@ -123,12 +123,6 @@ func (r *Runtime) regCall(callee, this Value, args []Value) (Value, error) {
 	return v, err
 }
 
-// regSrc is the stack form's instruction of register instruction pc, which
-// the verifier proves is in the code.
-func regSrc(c *regCode, pc int) uint32 {
-	return *(*uint32)(unsafe.Add(unsafe.Pointer(unsafe.SliceData(c.src)), uintptr(pc)*4))
-}
-
 // regCallMiss is a call rhCallW's cache does not answer: a site's first
 // call or a new callee, a body answered without a frame, a frame that keeps
 // its arguments, a this to coerce, or a callee of no register code.
@@ -1340,7 +1334,7 @@ func (r *Runtime) regAddIndex(f *frame, store uint32, obj, key, b Value, update 
 // for it at every dispatch.
 func (r *Runtime) regThrow(f *frame, c *regCode, next int, regs *[1 << 16]Value) error {
 	pc := next - 1
-	f.pc = c.src[pc] + 1
+	f.pc = uint32(pc) + 1
 	return r.throw(regs[regAt(c.code, pc).A()])
 }
 
@@ -1400,7 +1394,7 @@ func (r *Runtime) regDelete(cl *closure, obj, key Value) (Value, error) {
 // next is the pc after the read's, as regThrow's is.
 func (r *Runtime) regThrowDeadZone(f *frame, c *regCode, next int) error {
 	pc := next - 1
-	f.pc = c.src[pc] + 1
+	f.pc = uint32(pc) + 1
 	return r.throwReferenceError("cannot access %q before initialization", f.cl.fn.Locals[regNameIdx(c, pc, regAt(c.code, pc).B())].Name)
 }
 

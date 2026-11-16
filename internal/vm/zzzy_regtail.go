@@ -93,7 +93,7 @@ func (r *Runtime) regTailRest() (Value, error) {
 //
 //go:noinline
 func (r *Runtime) regTailCallW(f *frame, c *regCode, pc int, w bytecode.RInstr, wb int) (error, bool) {
-	f.pc = regSrc(c, pc) + 1
+	f.pc = uint32(pc) + 1
 	if r.regTailInPlace(f, c, w, wb) {
 		return errRegRestart, true
 	}
@@ -475,15 +475,9 @@ func (r *Runtime) regLegacyArgs(i int, f *frame) ([]Value, bool) {
 	}
 	cc := caller.cl.reg
 	argc := -1
-	for pc, s := range cc.src {
-		if s != caller.pc-1 {
-			continue
-		}
+	if pc := int(caller.pc - 1); pc < len(cc.rc.Code) {
 		switch w := regAt(cc.code, pc); w.Op() {
 		case bytecode.RCallW, bytecode.RCallMW, bytecode.RCallWT, bytecode.RCallMWT:
-			if argc >= 0 {
-				return nil, false
-			}
 			argc = int(w.X())
 		}
 	}

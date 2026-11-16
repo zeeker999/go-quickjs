@@ -351,7 +351,7 @@ func (r *Runtime) jitRegForwardMade(ctx *abi.Context, idx int, run jitRegRun, rp
 	}
 	s.goCalls++
 	r.noteRegGoCall(regAt(c.code, rpc), false, target)
-	f.pc = regSrc(c, rpc) + 1
+	f.pc = uint32(rpc) + 1
 	last, shared := s.ssaCtx, s.ssaSharedGen
 	// A copy: a native call's next call writes the context over.
 	i, n := len(r.argStack), len(args)

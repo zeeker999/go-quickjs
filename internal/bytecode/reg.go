@@ -708,7 +708,7 @@ const (
 	// goes on at pc+1; where the bound is not a number, or a backward
 	// jump finds the interrupt budget spent, the step is made and the
 	// partner compares, at pc+1. The step's throws are placed at the
-	// step's position (SrcPC); the comparison's belong to the partner.
+	// step's position (RegCode.Lines); the comparison's belong to the partner.
 	RStepJLt
 	RStepJLe
 	RStepJLtI
@@ -885,11 +885,12 @@ type RegCode struct {
 	// them all, which only RMovFar, RMovToFar and RFarInit
 	// reach.
 	NumRegs int
-	// SrcPC is, for each instruction, the stack form's instruction it was
-	// made from: what a frame's pc holds while the instruction runs, so
-	// that positions, stack traces and the debugger read the stack form's
-	// tables as they always did.
-	SrcPC []uint32
+	// Lines is the source position of the code's instructions, an entry
+	// where it changes, by pc (PosAt), -1 for none. Past the code's last pc are the
+	// positions of the errors an instruction places apart from its own --
+	// a store's, a | 0's, a read's before its call (Aux) -- one pc each,
+	// which a frame's pc holds while it throws one.
+	Lines []SourceLoc
 	// SiteName is the name of each property site an instruction names,
 	// indexed by its cache site.
 	SiteName []uint32
@@ -968,6 +969,25 @@ type RegCode struct {
 	Names     []string
 	Constants []Constant
 	PropSites uint32
+}
+
+// PosAt is the source position of the instruction at pc, or of the error
+// a pc past the code's stands for (Lines), and whether it is known.
+func (rc *RegCode) PosAt(pc int) (int32, bool) {
+	lines := rc.Lines
+	lo, hi := 0, len(lines)
+	for lo < hi {
+		m := int(uint(lo+hi) >> 1)
+		if int(lines[m].PC) <= pc {
+			lo = m + 1
+		} else {
+			hi = m
+		}
+	}
+	if lo == 0 || lines[lo-1].Pos < 0 {
+		return 0, false
+	}
+	return lines[lo-1].Pos, true
 }
 
 // RegLater is a function's register code, compiled when it is first asked

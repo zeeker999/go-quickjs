@@ -79,12 +79,14 @@ func TestRegInt32Forms(t *testing.T) {
 			}
 			switch w.Op() {
 			case bytecode.RAddI32, bytecode.RSubI32, bytecode.RAddII32:
-				// The | 0's stack instruction, by its position, which is
-				// the + or the -'s, the start of the expression they
-				// share: the stack code's bin_imm after the add, at the
-				// add's line entry.
-				if pc >= len(rc.Aux) || rc.Aux[pc] != rc.SrcPC[pc] {
-					t.Errorf("%s: %s placed at %d, its | 0 at %v", c.body, rc.Format(pc), rc.SrcPC[pc], rc.Aux)
+				// The | 0's position, the + or the -'s, the start of
+				// the expression they share, at the pc past the code
+				// its Aux names.
+				own, _ := rc.PosAt(pc)
+				if pc >= len(rc.Aux) || int(rc.Aux[pc]) < len(rc.Code) {
+					t.Errorf("%s: %s, its | 0 at %v", c.body, rc.Format(pc), rc.Aux)
+				} else if or0, _ := rc.PosAt(int(rc.Aux[pc])); or0 != own {
+					t.Errorf("%s: %s placed at %d, its | 0 at %d", c.body, rc.Format(pc), own, or0)
 				}
 			}
 		}

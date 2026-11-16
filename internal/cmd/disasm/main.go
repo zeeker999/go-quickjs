@@ -237,8 +237,8 @@ func (p *printer) code(fn *bytecode.Function, indent string) {
 	} else {
 		fmt.Fprintf(p.w, "%s  register code: %d instructions, %d registers\n", indent, len(rc.Code), rc.NumRegs)
 		for pc := range rc.Code {
-			if p.src && pc < len(rc.SrcPC) {
-				if line := fn.LineAt(rc.SrcPC[pc]); line != last && line > 0 && int(line) <= len(p.lines) {
+			if p.src {
+				if line := fn.LineAt(uint32(pc)); line != last && line > 0 && int(line) <= len(p.lines) {
 					last = line
 					fmt.Fprintf(p.w, "%s        ; %d: %s\n", indent, line, strings.TrimSpace(p.lines[line-1]))
 				}
@@ -250,14 +250,7 @@ func (p *printer) code(fn *bytecode.Function, indent string) {
 		return
 	}
 	fmt.Fprintln(p.w, indent+"  stack form:")
-	last = -1
 	for pc := range fn.Code {
-		if p.src {
-			if line := fn.LineAt(uint32(pc)); line != last && line > 0 && int(line) <= len(p.lines) {
-				last = line
-				fmt.Fprintf(p.w, "%s        ; %d: %s\n", indent, line, strings.TrimSpace(p.lines[line-1]))
-			}
-		}
 		fmt.Fprintf(p.w, "%s  %4d  %s\n", indent, pc, fn.FormatInstr(pc))
 	}
 }

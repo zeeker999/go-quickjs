@@ -127,8 +127,16 @@ func (r *Runtime) leafForward(cl *closure, callee, o *Object, args []Value, newT
 	f.cl = cl
 	f.locals = nil
 	f.base = r.stackTop
-	// The saved pc is past the instruction a frame is at: apply_arguments.
-	f.pc = 5
+	// The saved pc is past the instruction a frame is at: apply_args.
+	f.pc = 0
+	if rc := cl.fn.RegCompiled(); rc != nil {
+		for pc, w := range rc.Code {
+			if w.Op() == bytecode.RApplyArgs {
+				f.pc = uint32(pc) + 1
+				break
+			}
+		}
+	}
 	f.this = Obj(o)
 	f.thisRef = nil
 	f.newTarget = newTarget
