@@ -345,13 +345,10 @@ type gen struct {
 	// lazyArgs says the arguments object is made only on demand: its
 	// local's register is undefined until args_index makes it.
 	lazyArgs bool
-	// leafSites are the stack form's property sites a leaf's register code
-	// has not taken yet (propSite).
-	leafSites map[leafSiteKey][]uint32
-	top       int
-	max       int
-	loops     []*loop
-	label     labelSet
+	top      int
+	max      int
+	loops    []*loop
+	label    labelSet
 	// usingCaps are the registers of the scopes with using declarations
 	// around the code, innermost last, and disposeCaps each scope's, by its
 	// finally clause's statement (usingScope).
@@ -912,65 +909,10 @@ func (g *gen) site16(k siteKey) uint16 {
 	return uint16(s)
 }
 
-// stackSite is the cache site of the stack form's property read in, a
-// get_prop whose A is its name and B its site, for a read of the register
-// form that shares it.
-func (g *gen) stackSite(in bytecode.Instr) uint16 {
-	if g.ownSites {
-		// The stack form's sites move past the register form's.
-		return g.propSite(bytecode.OpGetProp, in.A)
-	}
-	if in.B == 0 || in.B >= uint32(len(g.siteName)) || in.A >= uint32(len(g.fn.Names)) {
-		g.fail("a stack site out of range")
-		return 0
-	}
-	if in.B >= limit16 {
-		// Past 16 bits: a site of the register form's.
-		return g.propSite(bytecode.OpGetProp, in.A)
-	}
-	g.siteName[in.B] = in.A
-	return uint16(in.B)
-}
-
 // propSite is the cache site of a read (get_prop), a method's read
 // (get_prop_this) or a store (set_prop), op, of the name with index name.
-// In a leaf -- a body the frameless evaluators run from the stack form,
-// with the stack form's sites -- it is the next site of the stack form's
-// of that kind and name not yet taken, so that a run of the register code
-// fills the caches those evaluators read: an entry is the shape's answer
-// for the name and kind, whichever site of them holds it. Anywhere else,
-// and past the stack form's sites, it is a site of its own.
 func (g *gen) propSite(op bytecode.Op, name uint32) uint16 {
-	if g.fn.Leaf == bytecode.LeafNone || g.ownSites {
-		return g.site16(siteKey{kind: op.String(), name: name})
-	}
-	if g.leafSites == nil {
-		g.leafSites = map[leafSiteKey][]uint32{}
-		for _, in := range g.fn.Code {
-			switch in.Op {
-			case bytecode.OpGetProp, bytecode.OpGetPropThis, bytecode.OpSetProp:
-				if in.B != 0 && in.B < uint32(len(g.siteName)) && in.A < uint32(len(g.fn.Names)) {
-					k := leafSiteKey{in.Op, g.fn.Names[in.A]}
-					g.leafSites[k] = append(g.leafSites[k], in.B)
-				}
-			}
-		}
-	}
-	k := leafSiteKey{op, g.fn.Names[name]}
-	q := g.leafSites[k]
-	if len(q) == 0 || q[0] >= limit16 {
-		return g.site16(siteKey{kind: op.String(), name: name})
-	}
-	g.leafSites[k] = q[1:]
-	g.siteName[q[0]] = name
-	return uint16(q[0])
-}
-
-// leafSiteKey is a kind of property access and its name, which propSite
-// pairs the two forms' sites by.
-type leafSiteKey struct {
-	op   bytecode.Op
-	name string
+	return g.site16(siteKey{kind: op.String(), name: name})
 }
 
 func (g *gen) nameIdx(name string) uint32 {
@@ -4360,22 +4302,10 @@ func (g *gen) applyArgs(n *ast.Call, m *ast.Member, dst int) int {
 		return g.dest(dst)
 	}
 	w := g.allocN(3)
-	if code := g.fn.Code; g.fn.Leaf == bytecode.LeafForward {
-		// this.k.apply(this, arguments), the whole body: a construction
-		// answers it without a frame (leafForward), from the caches of the
-		// stack form's two reads, which the reads here share so that a run
-		// of the body fills them.
-		g.at(m.Object.Pos())
-		g.emit(bytecode.MakeR(bytecode.RGetProp, 0, r16(w), regThis, g.stackSite(code[1])))
-		g.at(m.Property.Pos())
-		g.emit(bytecode.MakeR(bytecode.RGetProp, 0, r16(w+1), r16(w), g.stackSite(code[2])))
-		g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(w+2), regThis, 0))
-	} else {
-		g.into(m.Object, w)
-		g.at(m.Property.Pos())
-		g.emit(bytecode.MakeR(bytecode.RGetProp, 0, r16(w+1), r16(w), g.propSite(bytecode.OpGetProp, g.nameIdx("apply"))))
-		g.into(n.Args[0], w+2)
-	}
+	g.into(m.Object, w)
+	g.at(m.Property.Pos())
+	g.emit(bytecode.MakeR(bytecode.RGetProp, 0, r16(w+1), r16(w), g.propSite(bytecode.OpGetProp, g.nameIdx("apply"))))
+	g.into(n.Args[0], w+2)
 	d := dst
 	if d < 0 {
 		d = w
@@ -4739,6 +4669,7 @@ func (g *gen) finish() *bytecode.RegCode {
 	}
 	// The scratch's tables as the code grew them, for the next compile.
 	g.s.caps, g.s.siteName = g.caps, g.siteName[:0]
+	leafOf(g.fn, rc)
 	if why := Verify(rc, g.fn); why != "" {
 		Refuse(g.orig, why)
 		return nil

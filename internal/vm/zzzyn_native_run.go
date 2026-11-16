@@ -1070,7 +1070,7 @@ func nativeNew(regs *[1 << 16]Value, w bytecode.RInstr, pc int, ctx *nativeCtx) 
 		ctx.scratch[sThisRef] = uint64(uintptr(unsafe.Pointer(ctx.thisRef)))
 		return 1
 	}
-	if leaf := e.cl.fn.Leaf; leaf != bytecode.LeafNone && leaf != bytecode.LeafPure && leaf != bytecode.LeafForward {
+	if leaf := leafKind(e.cl); leaf != bytecode.LeafNone && leaf != bytecode.LeafPure && leaf != bytecode.LeafForward {
 		if _, done := r.leafCall(e.cl, obj, regs[a+2:a+2+int(w.X())]); !done {
 			return 0
 		}
@@ -1295,7 +1295,7 @@ func nativeReflect(regs *[1 << 16]Value, w bytecode.RInstr, pc int, ctx *nativeC
 		return 0
 	}
 	obj := newOrdinary[struct{}](fd, root, proto, root.roomFor(int(cl.fn.ThisProps)))
-	if leaf := cl.fn.Leaf; fd.ctorKind != ctorDerived && leaf != bytecode.LeafNone && leaf != bytecode.LeafPure && leaf != bytecode.LeafForward {
+	if leaf := leafKind(cl); fd.ctorKind != ctorDerived && leaf != bytecode.LeafNone && leaf != bytecode.LeafPure && leaf != bytecode.LeafForward {
 		if _, done := r.leafCall(cl, obj, args); done {
 			regs[w.B()] = Obj(obj)
 			return 2

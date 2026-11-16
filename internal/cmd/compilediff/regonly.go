@@ -25,6 +25,27 @@ import (
 var stackFields = map[string]bool{
 	"Code": true, "Lines": true, "MaxStack": true, "ParamEnd": true,
 	"PropSites": true, "PrivateSites": true, "Names": true, "Constants": true,
+	// The leaf, which regLeaf writes for both sides.
+	"Leaf": true, "PureCalls": true, "PureTail": true,
+}
+
+// regLeaf writes which leaf fn's body is: its stack form's, where the
+// function has one (Function.Leaf), or its register code's
+// (RegCode.Leaf), and whether a pure one calls; PureTail is a pc of
+// either form, and is left out.
+func (d *writer) regLeaf(fn *bytecode.Function) {
+	var leaf, calls reflect.Value
+	if v := reflect.ValueOf(fn).Elem(); v.FieldByName("Leaf").IsValid() {
+		leaf, calls = v.FieldByName("Leaf"), v.FieldByName("PureCalls")
+	} else if rc := fn.RegCompiled(); rc != nil {
+		v := reflect.ValueOf(rc).Elem()
+		leaf, calls = v.FieldByName("Leaf"), v.FieldByName("PureCalls")
+	}
+	if !leaf.IsValid() {
+		fmt.Fprintln(d.w, "leaf: -")
+		return
+	}
+	fmt.Fprintln(d.w, "leaf:", leaf.Uint(), calls.Bool())
 }
 
 // regFields writes fn's fields as -reg has them.
@@ -37,6 +58,7 @@ func (d *writer) regFields(path string, fn *bytecode.Function) {
 		case stackFields[f.Name]:
 			continue
 		case f.Name == "Reg":
+			d.regLeaf(fn)
 			d.regSymbolic(fn)
 			continue
 		case f.Name == "LiteralKeys":
@@ -216,7 +238,8 @@ func (d *writer) regSymbolic(fn *bytecode.Function) {
 	for i := range v.NumField() {
 		f := regCodeType.Field(i)
 		switch f.Name {
-		case "Code", "SrcPC", "SiteName", "Names", "Constants", "PropSites", "Aux", "FarNames", "Lines":
+		case "Code", "SrcPC", "SiteName", "Names", "Constants", "PropSites", "Aux", "FarNames", "Lines",
+			"Leaf", "PureCalls", "PureTail":
 			continue
 		case "Caps":
 			for k, caps := range rc.Caps {

@@ -149,24 +149,24 @@ func regBuild(fn *bytecode.Function, rc *bytecode.RegCode) *regCode {
 	}
 	if fn.Kind == bytecode.KindDerivedConstructor {
 		c.cellThis = true
-		for _, in := range fn.Code {
-			switch in.Op {
-			case bytecode.OpClosure, bytecode.OpDirectEval, bytecode.OpTailDirectEval, bytecode.OpDebugStmt:
+		for _, w := range rc.Code {
+			switch w.Op() {
+			case bytecode.RClosureW, bytecode.RDirectEval, bytecode.RDebug:
 				c.cellThis = false
 			}
 		}
 	}
 	switch {
 	case c.suspends:
-	case fn.Leaf == bytecode.LeafPure && !fn.PureCalls && regLeafRunnable(rc) && regLeafOps(fn, rc) != nil:
+	case rc.Leaf == bytecode.LeafPure && !rc.PureCalls && regLeafRunnable(rc) && regLeafOps(fn, rc) != nil:
 		// A short straight body of numbers and upvalues is run as its
 		// register code without a frame (regLeafRun).
 		c.leaf, c.leafOps = regLeafCode, regLeafOps(fn, rc)
-	case fn.Leaf == bytecode.LeafPure && !fn.PureCalls && !pureByTree(fn):
+	case rc.Leaf == bytecode.LeafPure && !rc.PureCalls && !pureByTree(rc):
 		// A longer body runs faster as code than in the frameless
 		// evaluator (pureByTree).
 		c.leaf = regLeafPure
-	case fn.Leaf != bytecode.LeafNone && fn.Leaf != bytecode.LeafPure:
+	case rc.Leaf != bytecode.LeafNone && rc.Leaf != bytecode.LeafPure:
 		c.leaf = regLeafThis
 	}
 	if len(rc.Code) > 0 && !c.suspends {

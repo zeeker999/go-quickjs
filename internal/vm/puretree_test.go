@@ -42,7 +42,7 @@ func TestPureByTree(t *testing.T) {
 	for i, want := range []bool{true, true, true, true} {
 		fd := res[i+1].Object().fn()
 		name := []string{"held", "mark", "one", "viaHeld"}[i]
-		if fd.closure.fn.Leaf != bytecode.LeafPure {
+		if fd.closure.fn.RegCompiled().Leaf != bytecode.LeafPure {
 			t.Fatalf("%s is not a pure body", name)
 		}
 		if got := fd.regCall != nil; got != want {

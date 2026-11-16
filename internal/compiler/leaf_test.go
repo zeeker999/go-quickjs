@@ -40,8 +40,8 @@ func TestArrowLeafKinds(t *testing.T) {
 		if arrow == nil {
 			t.Fatalf("%s: no arrow compiled", tc.src)
 		}
-		if arrow.Leaf != tc.want {
-			t.Errorf("%s: leaf %v, want %v", tc.src, arrow.Leaf, tc.want)
+		if leaf := regLeaf(arrow); leaf != tc.want {
+			t.Errorf("%s: leaf %v, want %v", tc.src, leaf, tc.want)
 		}
 	}
 }
@@ -121,8 +121,16 @@ func TestArrowReadingAnInitializedConst(t *testing.T) {
 		if arrow == nil {
 			t.Fatalf("%s: no arrow compiled", tc.src)
 		}
-		if arrow.Leaf != tc.want {
-			t.Errorf("%s: leaf %v, want %v", tc.src, arrow.Leaf, tc.want)
+		if leaf := regLeaf(arrow); leaf != tc.want {
+			t.Errorf("%s: leaf %v, want %v", tc.src, leaf, tc.want)
 		}
 	}
+}
+
+// regLeaf is the leaf fn's register code is, LeafNone where it has none.
+func regLeaf(fn *bytecode.Function) bytecode.LeafKind {
+	if rc := fn.RegCode(); rc != nil {
+		return rc.Leaf
+	}
+	return bytecode.LeafNone
 }

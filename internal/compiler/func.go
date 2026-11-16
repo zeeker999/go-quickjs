@@ -243,16 +243,10 @@ func (c *compiler) compileFunctionBody(fn *ast.FuncLit) {
 	}
 	c.emit(bytecode.OpReturnUndef, 0, 0)
 	c.finish()
-	c.fn.Leaf = leafKind(c.fn)
 	c.fn.ForwardsArguments = c.lazyArguments && !c.opts.Debug && !slices.ContainsFunc(c.fn.Code, func(in bytecode.Instr) bool {
 		// The object made for anything but apply.
 		return in.Op == bytecode.OpLazyArguments || in.Op == bytecode.OpArgumentsLength
 	})
-	if c.opts.Debug {
-		// A leaf is answered without a frame, so a debugger could not stop
-		// in it.
-		c.fn.Leaf = bytecode.LeafNone
-	}
 	// What a call asks of the function every time, asked once here.
 	c.fn.CoerceThis = c.fn.UsesThis && !c.fn.Strict && c.fn.Kind != bytecode.KindArrow
 	c.fn.DirectCall = !c.fn.Generator && !c.fn.Async &&

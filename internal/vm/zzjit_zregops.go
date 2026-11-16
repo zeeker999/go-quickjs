@@ -648,7 +648,7 @@ func (r *Runtime) jitRegSiteMegamorphic(cl *closure, c *regCode, l *jitEntry, rp
 // there.
 func (f *jitRegFeedback) PureBody() bool {
 	fn := f.fb.fn
-	return fn != nil && fn.Leaf == bytecode.LeafPure && !fn.Generator && !fn.Async
+	return fn != nil && f.rc.Leaf == bytecode.LeafPure && !fn.Generator && !fn.Async
 }
 
 // jitRegGenMakeable reports whether register code of cl's may make the

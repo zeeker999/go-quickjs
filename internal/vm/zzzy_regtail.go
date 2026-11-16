@@ -334,16 +334,14 @@ func regPlan(fd *funcData) {
 
 // planCall decides, once after a call that has built its function's
 // register code, whether calls of fd's function enter the code at once
-// (regPlan). A pure body is left undecided while pureCall may still
-// answer its calls, which it tries first, unless pureByTree says they go
-// to its code.
+// (regPlan). A pure body's do too, as those of a closure register code
+// makes always had: a built-in calling it runs the code the JIT learns
+// from. A call from inside another pure body is still evaluated frameless
+// (pureInvoke).
 func planCall(fd *funcData) {
 	cl := fd.closure
 	fn := cl.fn
 	if atomic.LoadPointer(&fn.VMCode) == nil {
-		return
-	}
-	if fn.Leaf == bytecode.LeafPure && cl.pureMiss < pureMissLimit && !pureByTree(fn) {
 		return
 	}
 	fd.planned = true

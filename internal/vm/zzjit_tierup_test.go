@@ -262,8 +262,8 @@ func TestJITFramelessCallsSpendTheBudget(t *testing.T) {
 		})(), V=m.V, plus=m.plus, one=new V(1);
 		function loop(n){let v=new V(0);for(let i=0;i<n;i++)v=v.plus(one);return v.x}`)
 	pcl := r.global.getOwn(r.atoms.intern("plus")).value().Object().fn().closure
-	if pcl.fn.Leaf != bytecode.LeafPure {
-		t.Fatalf("plus is no pure body: %v", pcl.fn.Leaf)
+	if k := pcl.fn.RegCode().Leaf; k != bytecode.LeafPure {
+		t.Fatalf("plus is no pure body: %v", k)
 	}
 	var pe *jitEntry
 	for range 16 {

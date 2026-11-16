@@ -259,6 +259,12 @@ func (r *Runtime) regCallKind(fd *funcData, method bool) (cl *closure, rc *regCo
 	cl = fd.closure
 	if rc = cl.reg; rc == nil {
 		rc = r.regOf(cl)
+		if rc != nil && rc.rc.Leaf != bytecode.LeafNone && !fd.planned {
+			// A leaf's code, compiled at its first call, is entered at
+			// once from then on (planCall), as any other closure's
+			// register code makes.
+			planCall(fd)
+		}
 	}
 	if rc == nil || !rc.wide || rc.suspends || cl.realm != r.Realm || isClassConstructorKind(cl.fn.Kind) || cl.fn.HasDirectEval {
 		return cl, rc, 0, Undefined, false
@@ -628,16 +634,9 @@ func (r *Runtime) regClosure(f *frame, c *regCode, w bytecode.RInstr, wb int) *O
 // regMadeClosure is closure_w's closure o, its function's code planned
 // where it has been built, as makeClosure plans: a function's code is built
 // at its first call, which plans the closure called (planCall), so that one
-// never called is never compiled (bytecode.RegLater). A leaf's is built as
-// it is made: its calls are answered by the stack form's leaf evaluators
-// (pureCall, leafCall), which build nothing, until a plan sends them to its
-// register code (regPlan, regDirect, regLeafRun).
+// never called is never compiled (bytecode.RegLater).
 func regMadeClosure(o *Object) *Object {
 	if fd := o.fn(); fd != nil {
-		if fn := fd.closure.fn; fn.Leaf != bytecode.LeafNone && fn.Reg != nil &&
-			atomic.LoadPointer(&fn.VMCode) == nil {
-			firstReg(fn)
-		}
 		if atomic.LoadPointer(&fd.closure.fn.VMCode) != nil {
 			planCall(fd)
 			// A pure body's too, which planCall leaves undecided for
@@ -1092,7 +1091,7 @@ func (r *Runtime) regConstruct(calls []regCallCache, site uint16, callee Value, 
 		return r.construct(callee, args)
 	}
 	cl := fd.closure
-	if cl.fn.Leaf == bytecode.LeafForward {
+	if leafKind(cl) == bytecode.LeafForward {
 		// What hands its arguments on, the construction answers without a
 		// frame (leafForward); the native handler enters it with one,
 		// whose apply_args it makes too, once its objects' room is
@@ -1139,7 +1138,7 @@ func (r *Runtime) regConstruct(calls []regCallCache, site uint16, callee Value, 
 	if err := r.initInstanceElements(o, this); err != nil {
 		return Undefined, err
 	}
-	if cl.fn.Leaf != bytecode.LeafNone && cl.fn.Leaf != bytecode.LeafPure {
+	if leaf := leafKind(cl); leaf != bytecode.LeafNone && leaf != bytecode.LeafPure {
 		// A body that only stores its parameters in this, without a frame
 		// where leafCall can.
 		if _, done := r.leafCall(cl, obj, args); done {
@@ -1216,6 +1215,12 @@ func (r *Runtime) regCtorEntered(o *Object, fd *funcData) (cl *closure, rc *regC
 	cl = fd.closure
 	if rc = cl.reg; rc == nil {
 		rc = r.regOf(cl)
+		if rc != nil && rc.rc.Leaf != bytecode.LeafNone && !fd.planned {
+			// A leaf's code, compiled at its first call, is entered at
+			// once from then on (planCall), as any other closure's
+			// register code makes.
+			planCall(fd)
+		}
 	}
 	if rc == nil || !rc.wide || rc.suspends || cl.fn.HasDirectEval {
 		return nil, nil, false

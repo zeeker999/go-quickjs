@@ -106,7 +106,7 @@ type lowering struct {
 // makes at an exit there -- for a key past the arguments -- the
 // interpreter reads at the exits after it, its frame written.
 func argumentsOwn(fn *bytecode.Function) bool {
-	if fn.Leaf == bytecode.LeafForward || fn.ForwardsArguments && fn.MakesArguments {
+	if rc := fn.RegCompiled(); rc != nil && rc.Leaf == bytecode.LeafForward || fn.ForwardsArguments && fn.MakesArguments {
 		// A forwarding function's -- f.apply(x, arguments), its object
 		// made for nothing else (bytecode.Function's ForwardsArguments),
 		// which hands the arguments on (apply_arguments, which

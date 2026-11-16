@@ -203,40 +203,42 @@ const (
 	KindStaticBlock
 )
 
-// LeafKind names the few bodies Function.Leaf marks: ones that only read or
+// LeafKind names the few bodies RegCode.Leaf marks: ones that only read or
 // write a property of their `this`, which a call can be answered for
-// without a frame, and a constructor's that only hands its arguments on to a
-// method of its `this`, which a construction can call directly.
+// without a frame; a constructor's that only hands its arguments on to a
+// method of its `this`, which a construction can call directly; and pure
+// bodies, which the VM evaluates without a frame.
 type LeafKind uint8
 
 const (
 	// LeafNone is any other body.
 	LeafNone LeafKind = iota
-	// LeafGetThis is `return this.k`: push_this, get_prop, return.
+	// LeafGetThis is `return this.k`: get_prop of r1, ret.
 	LeafGetThis
-	// LeafGetThisLength is `return this.k.length`: push_this, get_prop,
-	// get_length, return.
+	// LeafGetThisLength is `return this.k.length`: get_prop of r1,
+	// get_length, ret.
 	LeafGetThisLength
-	// LeafGetThisIndex is `return this.k[p]`, p a parameter: push_this,
-	// get_prop, get_local, get_index, return.
+	// LeafGetThisIndex is `return this.k[p]`, p a parameter: get_prop of
+	// r1, get_index by p's register, ret.
 	LeafGetThisIndex
 	// LeafSetThis is `this.k = p` for parameters p, once or more, and
-	// nothing else: a run of push_this, get_local and set_prop, then the
-	// return a function or a class constructor ends with.
+	// nothing else: a run of set_prop of r1 from a parameter's register,
+	// then the return a function or a class constructor ends with.
 	LeafSetThis
 	// LeafForward is `this.k.apply(this, arguments)` and nothing else, a
 	// constructor that hands its arguments on to a method of its object:
-	// push_this, get_prop, get_prop_this of apply, push_this,
-	// apply_arguments, drop, return_undef.
+	// get_prop of r1, get_prop of apply, move of r1, apply_args,
+	// ret_undef.
 	LeafForward
 	// LeafPure is a body that reads -- this, its parameters, constants,
 	// properties and globals -- and computes from what it read, with
 	// operators, comparisons, typeof, branches forward and calls, and
-	// returns: no loop and no local of its own, and at most one store, to a
-	// property, after which nothing it does can fail (see PureTail). The VM
-	// evaluates one without a frame where each read, operator and store
-	// takes its fast path and each call is of such a body too, and gives up,
-	// having changed nothing, where one would not.
+	// returns: no loop and no binding of its own, and at most one store, to
+	// a property or an upvalue, after which nothing it does can fail (see
+	// RegCode.PureTail). The VM evaluates one without a frame where each
+	// read, operator and store takes its fast path and each call is of
+	// such a body too, and gives up, having changed nothing, where one
+	// would not.
 	LeafPure
 )
 
@@ -438,19 +440,6 @@ type Function struct {
 	// var the evaluated code declares belongs to the function that called it,
 	// and there is no slot for a name nobody wrote down.
 	HasDirectEval bool
-	// Leaf is which of the few bodies LeafKind names this function's is, or
-	// LeafNone. The VM answers a call of one itself, without running the
-	// body, where nothing could see the difference.
-	Leaf LeafKind
-	// PureCalls says a LeafPure body calls or constructs: the VM keeps such
-	// a body frameless where it can, since its calls are frameless with it,
-	// while one that calls nothing may be run as its register code.
-	PureCalls bool
-	// PureTail is, for a LeafPure body, where the code begins that has no
-	// instruction a frameless evaluation could give up at. A store is only
-	// in it, so that nothing can give up after one, and so is a call of a
-	// body that stores.
-	PureTail int32
 	// VMCode is the VM's own form of the function, which it builds the first
 	// time the function runs and stores here once, atomically: it holds
 	// nothing of any one runtime's, so every runtime can share it.

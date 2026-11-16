@@ -959,6 +959,19 @@ type RegCode struct {
 	// constructor's super() binds (this_bound), not from register 1: a
 	// derived constructor's, or an arrow's written inside one.
 	ThisRef bool
+	// Leaf is which of the bodies LeafKind names the code is, or LeafNone.
+	// The VM answers a call of one itself, without running the body,
+	// where nothing could see the difference.
+	Leaf LeafKind
+	// PureCalls says a LeafPure body calls or constructs: the VM keeps such
+	// a body frameless where it can, since its calls are frameless with it,
+	// while one that calls nothing may be run as its code.
+	PureCalls bool
+	// PureTail is, for a LeafPure body, where the code begins that has no
+	// instruction a frameless evaluation could give up at. A store is only
+	// at its start, so that nothing can give up after one, and so is a call
+	// of a body that stores.
+	PureTail int32
 	// Names, Constants and PropSites are the function's names, constants
 	// and property sites with those the register code adds, where it was
 	// compiled at the function's first call (RegLater): the Function's own
