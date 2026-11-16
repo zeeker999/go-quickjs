@@ -2523,12 +2523,14 @@ is V8's call frequency where the feedback knows it (`Frequency`): a call
 made less often than `ssa.MinInliningFrequency` (0.05, V8's
 `min_inlining_frequency` as V8 runs: the flag's 0.15 is lowered to 0.05
 wherever Maglev is on, as it is by default) for each invocation of the
-function compiled is not inlined, and is made a native call, unless its
-callee is small: 10 instructions or fewer as the bounds count them
-(`maxInlineSmall`, V8's `max_inlined_bytecode_size_small` of 27 bytes; 8
-register instructions), which V8's Turbolev inlines however seldom the
-call is made, its code about the call's, and which then inlines no more
-than a small callee's worth with its own callees (`smallCallee`); the
+function compiled is not inlined, whatever its callee's size, and is made
+a native call -- by the builder (`inlineSiteAt`, `planCallback` for a
+loop's callback) and by the feedback before it offers the callee (the
+stack form's `jitCallCold`, register code's `regCallCold`), a call inside
+a callee inlined excepted -- as Turbofan's JSInliningHeuristic asks the
+frequency before it forces a small function in, Turbofan being the
+optimizing compiler Node runs (the exemption of a small callee at a cold
+call is Turbolev's, which Node does not run); the
 frequencies are known once the function has run 59 times
 (`jitCountsEnough`); the most frequent come
 first, a call whose frequency is not known taken as made once outside the
