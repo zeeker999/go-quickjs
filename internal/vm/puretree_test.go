@@ -6,11 +6,12 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
 
-// TestPureByTree pins which pure bodies are called as their register code
-// (pureByTree): one of pureTreeCode instructions or more that calls
-// nothing is given its register code's call (regCall); one that calls, or
-// a short one, stays frameless (pureCall), as does every call from inside
-// another pure body.
+// TestPureByTree pins which pure bodies are called as their register code:
+// a closure register code makes is given its code's call at once (regPlan),
+// a pure body's however short, as the register tier gave it before the old
+// tiers went -- the tree tier's choice (pureByTree), which left a short one
+// or one that calls frameless (pureCall), was the tree's alone. A call from
+// inside another pure body is still evaluated frameless (pureInvoke).
 func TestPureByTree(t *testing.T) {
 	t.Parallel()
 	const src = `
@@ -38,14 +39,14 @@ func TestPureByTree(t *testing.T) {
 		t.Errorf("n = %v, want %v", got, 300+149*3)
 	}
 	// Which of them are given their register code's call.
-	for i, want := range []bool{true, true, false, false} {
+	for i, want := range []bool{true, true, true, true} {
 		fd := res[i+1].Object().fn()
 		name := []string{"held", "mark", "one", "viaHeld"}[i]
 		if fd.closure.fn.Leaf != bytecode.LeafPure {
 			t.Fatalf("%s is not a pure body", name)
 		}
 		if got := fd.regCall != nil; got != want {
-			t.Errorf("%s: given its tree's call = %v, want %v", name, got, want)
+			t.Errorf("%s: given its register code's call = %v, want %v", name, got, want)
 		}
 	}
 	r.Close()
