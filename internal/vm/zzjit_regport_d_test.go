@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"weak"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit"
@@ -189,9 +190,22 @@ func jitHintForTest(r *Runtime, cl *closure) *jitEntry {
 		return nil
 	}
 	if regJITForTest() {
-		return r.jit.regLearned[r.jitRegKeyOf(cl)]
+		return r.jit.regLearned[jitRegKeyInRealmForTest(r, cl)]
 	}
 	return r.jit.hint(cl)
+}
+
+// jitRegKeyInRealmForTest is the key of cl's register code in cl's own
+// realm, whichever realm runs now: jitRegKeyOf's in its realm.
+func jitRegKeyInRealmForTest(r *Runtime, cl *closure) jitKey {
+	if cl.realm == nil || cl.realm == r.Realm {
+		return r.jitRegKeyOf(cl)
+	}
+	re := cl.realm
+	if re.jitSelf == (weak.Pointer[Realm]{}) {
+		re.jitSelf = weak.Make(re)
+	}
+	return jitKey{weak.Make(cl.fn), re.jitSelf}
 }
 
 // jitRegKeyOfLifeForTest is the key of the register code whose life (the
