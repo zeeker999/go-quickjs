@@ -2773,12 +2773,14 @@ func TestJITCacheKeepsHotCode(t *testing.T) {
 		}
 		return in
 	}
+	checked := 0
 	for round := 0; round < 6; round++ {
 		entered := uint64(0)
 		if r.jit != nil {
 			entered = r.jit.entered
 		}
 		in := linked()
+		driver := jitRegEntryNamedForTest(r, "round") != nil
 		if _, err := r.Run(call); err != nil {
 			t.Fatal(err)
 		}
@@ -2786,6 +2788,17 @@ func TestJITCacheKeepsHotCode(t *testing.T) {
 		if round < 2 {
 			continue
 		}
+		if !driver && jitRegEntryNamedForTest(r, "round") != nil {
+			// The driver's own register code installed in this run, which
+			// it entered with a call of its chains under way: a call that
+			// run made by Go, as any run does once its function's code
+			// comes. When it comes depends on the room the cold stream
+			// leaves, which the code's size decides: in round 2 on
+			// Windows, earlier on Linux. The rounds after are exact.
+			t.Logf("round %d: the driver compiled in it, not counted", round)
+			continue
+		}
+		checked++
 		if n := r.jit.entered - entered; n != 0 {
 			t.Fatalf("round %d: %d native calls left for Go", round, n)
 		}
@@ -2804,6 +2817,9 @@ func TestJITCacheKeepsHotCode(t *testing.T) {
 				}
 			}
 		}
+	}
+	if checked < 3 {
+		t.Fatalf("%d rounds counted, of the four after the warm-up", checked)
 	}
 	if r.jit.evicted == 0 && r.jit.refusedRoom == 0 {
 		t.Fatal("the cold functions never filled the cache")
