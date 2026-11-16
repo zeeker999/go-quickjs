@@ -197,7 +197,7 @@ func (r *Runtime) jitRegInlined(idx int, f *frame, owner *jitRegEntry, at, wb in
 			if x.callee.IsObject() && x.callee.Object().fn() != nil && x.callee.Object().fn().arrow {
 				r.jitRegPlainReceiver(x.callee, x.cl, x.wb)
 			} else {
-				r.jitRegForwardReceiver(x.cl, x.wb, r.stack[loopSlots+2])
+				r.jitRegForwardReceiver(x.cl, x.wb, r.stack[x.wb+1])
 			}
 			r.jitRegPushLoopFrame(loop, r.stack[loopSlots])
 			loopFrame = true
@@ -209,13 +209,10 @@ func (r *Runtime) jitRegInlined(idx int, f *frame, owner *jitRegEntry, at, wb in
 				// A plain call's receiver, for the frame (jitRegPlainReceiver).
 				r.jitRegPlainReceiver(x.callee, x.cl, x.wb)
 			case bytecode.RApplyArgs:
-				// f.apply(x, arguments)'s x, for the frame
-				// (jitRegForwardReceiver).
-				cwb := wb
-				if k > 0 {
-					cwb = levels[k-1].wb
-				}
-				r.jitRegForwardReceiver(x.cl, x.wb, r.stack[cwb+int(regAt(caller.code, at).B())+2])
+				// f.apply(x, arguments)'s x, which the state gave the
+				// level's register 1, coerced for the frame as the
+				// interpreter's apply coerces it (jitRegForwardReceiver).
+				r.jitRegForwardReceiver(x.cl, x.wb, r.stack[x.wb+1])
 			}
 		}
 		lv := jitRegLevel{cl: x.cl, c: rc, wb: x.wb, construct: x.construct, inline: true}

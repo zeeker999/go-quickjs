@@ -195,7 +195,15 @@ func TestJITRegLoopCallbackFrames(t *testing.T) {
 	function withThis(n) { let s = ''; for (let i = 0; i < n; i++) { try { nums.forEach(throwAt, self) } catch (e) { s += at(e) + ';' } } return s }
 	function strict(n) { let s = ''; for (let i = 0; i < n; i++) { try { nums.forEach(strictAt, 7) } catch (e) { s += at(e) + ';' } } return s }
 	function arrows(n) { let s = ''; for (let i = 0; i < n; i++) { try { nums.forEach((x) => { if (x === 3) throw new Error('a') }) } catch (e) { s += at(e) + ';' } } return s }
-	function typed(n) { let s = ''; for (let i = 0; i < n; i++) { try { u8.forEach(throwAt) } catch (e) { s += at(e) + ';' } } return s }`, []regWrongCase{
+	function typed(n) { let s = ''; for (let i = 0; i < n; i++) { try { u8.forEach(throwAt) } catch (e) { s += at(e) + ';' } } return s }
+	var last = ''
+	function stackOf(x) { if (x === 3) last = at(new Error('h')) }
+	function stackThis(x) { if (x === 3) last = at(new Error('t')) + typeof this }
+	function made(n) { let s = ''; for (let i = 0; i < n; i++) { nums.forEach((x) => { if (x === 3) last = at(new Error('m')) }); s += last + ';' } return s }
+	function taken(n) { let s = ''; for (let i = 0; i < n; i++) { nums.forEach(stackOf); s += last + ';' } return s }
+	function takenThis(n) { let s = ''; for (let i = 0; i < n; i++) { u8.forEach(stackThis, self); s += last + ';' } return s }
+	function inner() { nums.forEach((x) => { if (x === 3) last = at(new Error('i')) }); return last }
+	function outer(n) { let s = ''; for (let i = 0; i < n; i++) s += inner() + ';'; return s }`, []regWrongCase{
 		{"sloppy", []float64{6}, 8, "30"},
 		{"reduced", []float64{6}, 8, "30"},
 		{"throws", []float64{3}, 8, "throwAt,Array.forEach,throws;throwAt,Array.forEach,throws;throwAt,Array.forEach,throws;"},
@@ -203,5 +211,35 @@ func TestJITRegLoopCallbackFrames(t *testing.T) {
 		{"strict", []float64{3}, 8, "Number.strictAt,Array.forEach,strict;Number.strictAt,Array.forEach,strict;Number.strictAt,Array.forEach,strict;"},
 		{"arrows", []float64{3}, 8, "test:10:112,Array.forEach,arrows;test:10:112,Array.forEach,arrows;test:10:112,Array.forEach,arrows;"},
 		{"typed", []float64{3}, 8, "throwAt,Uint8Array.forEach,typed;throwAt,Uint8Array.forEach,typed;throwAt,Uint8Array.forEach,typed;"},
+		{"made", []float64{3}, 8, "test:15:108,Array.forEach,made;test:15:108,Array.forEach,made;test:15:108,Array.forEach,made;"},
+		{"taken", []float64{3}, 8, "stackOf,Array.forEach,taken;stackOf,Array.forEach,taken;stackOf,Array.forEach,taken;"},
+		{"outer", []float64{3}, 8, "test:18:66,Array.forEach,inner;test:18:66,Array.forEach,inner;test:18:66,Array.forEach,inner;"},
+		{"takenThis", []float64{3}, 8, "Object.stackThis,Uint8Array.forEach,takenThisobject;Object.stackThis,Uint8Array.forEach,takenThisobject;Object.stackThis,Uint8Array.forEach,takenThisobject;"},
+	})
+}
+
+// A callee inlined at a method's call, a read's getter or a write's setter
+// is named in a stack trace by its receiver, which every state inside it
+// holds (ssa's frameState forces a register callee's register 1): left
+// out where the callee did not read it, the frame Go made of the level at
+// an exit had been named by what the window held, "Number.leaf" for
+// "Leaf.leaf", "Number.get" for "N.get [as far]" (TestJITTailCallsInlined,
+// TestJITAccessors, TestJITInlinedSmallLoopFrames).
+func TestJITRegInlinedReceiverInStack(t *testing.T) {
+	regWrongCheck(t, `class Leaf { constructor(x) { this.x = x } leaf() { return this.x.y } }
+	function N(o) { this.o = o }
+	Object.defineProperty(N.prototype, 'far', { get() { return this.o.v } })
+	function Box(v) { this.v = v; this.n = 0 }
+	Object.defineProperty(Box.prototype, 'add', { set(k) { this.n += k + this.v.w } })
+	var leaves = [new Leaf({ y: 1 }), new Leaf({ y: 2 }), new Leaf(null)], ns = [new N({ v: 1 }), new N({ v: 2 }), new N(undefined)]
+	var boxes = [new Box({ w: 1 }), new Box({ w: 2 }), new Box(undefined)]
+	function at(e) { return e.stack.split(String.fromCharCode(10)).slice(1, 3).map(l => l.trim().split(' ').slice(1, -1).join(' ')).join() }
+	function down(o) { return o.leaf() }
+	function methods(n) { let s = 0, e = ''; for (let i = 0; i < n; i++) { try { s += down(leaves[i % 3 === 2 && i > n - 3 ? 2 : i % 2]) } catch (x) { e = at(x) } } return s + ':' + e }
+	function getters(n) { let s = 0, e = ''; for (let i = 0; i < n; i++) { try { s += ns[i % 3 === 2 && i > n - 3 ? 2 : i % 2].far } catch (x) { e = at(x) } } return s + ':' + e }
+	function setters(n) { let e = ''; boxes[0].n = 0; for (let i = 0; i < n; i++) { try { boxes[i % 3 === 2 && i > n - 3 ? 2 : i % 2].add = i } catch (x) { e = at(x) } } return boxes[0].n + ':' + e }`, []regWrongCase{
+		{"methods", []float64{30}, 8, "43:Leaf.leaf,down"},
+		{"getters", []float64{30}, 8, "43:N.get [as far],getters"},
+		{"setters", []float64{30}, 8, "225:Box.set [as add],setters"},
 	})
 }

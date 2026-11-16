@@ -1765,6 +1765,12 @@ func (r *Runtime) jitRegGoCallNested(ctx *abi.Context, idx, root int) bool {
 		r.jitFrameBlocks(depthBefore + lazy)
 		r.frameDepth = depthBefore + lazy
 	}
+	// A loop's callback calling Go, its caller the run's frame or a
+	// level whose frame is put off: the built-in's frame below its own,
+	// as at an exit (jitRegLoopCallee) -- a stack trace a callback called
+	// natively took had left "at Array.forEach" out. It goes with the
+	// depth below.
+	r.jitRegLoopCalleeOf(idx-1, caller, at, nil, 0)
 	f := r.jitRegPushLevel(&l, 0)
 	if lazy != 0 {
 		s.lazy = append(s.lazy, jitLazyLevels{root: root, idx: idx, depth: depthBefore, runF: run.f, reg: true, realm: r.Realm})
@@ -2252,43 +2258,49 @@ func (r *Runtime) jitRegUnwind(idx int) (_ Value, _ error, gen bool) {
 	return v, err, n != 0 && levels[0].gen != nil
 }
 
-// jitRegLoopCallee makes, for level k of levels, the native calls under
-// way past the run in context idx, where its caller makes a loop of a
-// built-in's call (abi.Context's Loop) whose callback it is, what the
-// stack form's unwinding makes (jitUnwindNative's jitPushLoopFrame): the
-// built-in's frame below the callback's, which a stack trace shows -- "at
-// Array.forEach" -- and the callback's receiver, the loop's thisArg, in
-// its window's register 1, which its native call writes only for a
-// callee that reads it (jitRegForwardReceiver), an arrow's the one it
-// captured (jitRegPlainReceiver). It reports whether it pushed a frame.
+// jitRegLoopCallee pushes, below the frame of level k of levels, the
+// native calls under way past the run in context idx, where its caller
+// makes a loop of a built-in's call (abi.Context's Loop) whose callback it
+// is, the built-in's frame, as Go's forEach has one while its callback
+// runs and the stack form's unwinding makes it (jitUnwindNative's
+// jitPushLoopFrame): a stack trace shows it, "at Array.forEach", which
+// had been left out. The callback's receiver is its window's register 1,
+// which its native call wrote. It reports whether it pushed a frame.
 func (r *Runtime) jitRegLoopCallee(idx int, levels []jitRegLevel, k int) bool {
 	s := r.jit
-	ctx, p, wb := idx, (*ir.Program)(nil), 0
-	var c *regCode
-	var at int
+	if levels[k].gen != nil {
+		return false
+	}
 	if k == 0 {
 		if idx >= len(s.regRuns) || s.regRuns[idx].e == nil {
 			return false
 		}
+		// The run's own frame, whose loop's slots its native code keeps
+		// in registers during the call.
 		run := &s.regRuns[idx]
 		rpc, _ := jit.CallPC(s.ssaCtxs[idx])
-		c, at, p, wb = run.c, int(rpc), run.e.p, run.wb
-	} else {
-		x := &levels[k-1]
-		ctx, c, at, p, wb = x.ctx, x.c, x.pc, x.e.p, x.wb
+		return r.jitRegLoopCalleeOf(idx, run.c, int(rpc), nil, 0)
 	}
-	loop := s.ssaCtxs[ctx].Loop
-	if loop == 0 || p == nil || c == nil || at >= len(c.rc.Code) || regAt(c.code, at).Op() != bytecode.RCallMW || levels[k].gen != nil {
+	x := &levels[k-1]
+	return r.jitRegLoopCalleeOf(x.ctx, x.c, x.pc, x.e.p, x.wb)
+}
+
+// jitRegLoopCalleeOf pushes the frame of the built-in whose loop register
+// code c makes at register pc at, in context ctx, if it makes one there
+// (jitRegLoopCallee): its receiver the loop's array, from the loop's slots
+// of the code p, its window at wb, where the slots are written (p not
+// nil), and else the prototype of the loop's kind, which a stack trace
+// names the frame by all the same. It reports whether it pushed one.
+func (r *Runtime) jitRegLoopCalleeOf(ctx int, c *regCode, at int, p *ir.Program, wb int) bool {
+	loop := r.jit.ssaCtxs[ctx].Loop
+	if loop == 0 || c == nil || at >= len(c.rc.Code) || regAt(c.code, at).Op() != bytecode.RCallMW {
 		return false
 	}
-	slots := jitRegSlotIndex(p, wb, p.Locals+int(loop&0xffffffff)-1)
-	l := &levels[k]
-	if callee := r.stack[slots+1]; callee.IsObject() && callee.Object().fn() != nil && callee.Object().fn().arrow {
-		r.jitRegPlainReceiver(callee, l.cl, l.wb)
-	} else {
-		r.jitRegForwardReceiver(l.cl, l.wb, r.stack[slots+2])
+	arr := Undefined
+	if p != nil {
+		arr = r.stack[jitRegSlotIndex(p, wb, p.Locals+int(loop&0xffffffff)-1)]
 	}
-	r.jitRegPushLoopFrame(loop, r.stack[slots])
+	r.jitRegPushLoopFrame(loop, arr)
 	return true
 }
 
