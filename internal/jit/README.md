@@ -2959,7 +2959,13 @@ A function's state (`regLearned`, a `jitEntry`) counts too, as the stack
 form's entry's `measure` counts what it learned: the entry and what it
 learned, its pools' objects among it (`regAccount`, `regCounted`), counted
 as it grows where its code joins a callee's callers (`regJoinCallers`), as a
-compile caches its code, and at every look of the cache's. It is made in the
+compile caches its code, and at every look of the cache's. A compile is
+placed only in room for its code and for what it had the state hold besides
+-- the pools of the literals, closures and constructions it makes, filled as
+it was built -- as the stack form's install asks room for its entry's
+`learnedBytes` with the code (`jitRegPlace`, `jitInstall`); and the state is
+held busy meanwhile, no victim of the room its own compile makes
+(`regLifeSpare`), as the stack form's `roomFor` holds its entry. It is made in the
 room for it (`regLearnedOf`), as the stack form's entry is (`jitWarmFor`);
 where there is none it is kept all the same, uncounted, and counted once its
 function's compile asks for its room with the code's (`jitRegRoomAhead`) or

@@ -385,6 +385,15 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 		return nil
 	}
 	e := &jitRegEntry{key: key, life: life, used: s.epoch()}
+	// Its state kept while the compile fills and counts it, as the stack
+	// form's compile holds its entry (roomFor's busy): the room made for
+	// the code would otherwise let go of the state of the very function
+	// it is made for (regLifeSpare), whose build then filled a state the
+	// cache no longer counted -- top-level code's 206 KB of closure pools
+	// on arm64, counted only later, past the budget -- and a function short
+	// of room let go of its state at every attempt and was never compiled.
+	life.busy++
+	defer func() { life.busy-- }()
 	s.budget = r.jitBudget()
 	if !s.jitRegRoomAhead(cl, e.life, s.jitRegReplaced(key, osrAt)) {
 		// None, all the cache holds young or in use, and it is not
@@ -669,8 +678,20 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 	p := e.p
 	// The contexts' room for its spill slots, which they keep (spillsFor).
 	need, spill := jit.CodeFootprint(mc), s.spillRoom(mc)
+	// And what the compile had its function's state hold besides -- the
+	// pools of the literals, closures and constructions it makes, filled
+	// as it was built -- which regAccount counts once it is placed, as
+	// the stack form's install asks room for its entry's learnedBytes
+	// with the code (jitInstall). Asked for the code alone, top-level code
+	// declaring forty functions, its closures' pools 206 KB, was placed
+	// with 106 KB of code at a budget of 256 KB, which the two then held
+	// past while it ran, neither one the cache's to reclaim.
+	grown := 0
+	if l := e.life; l != nil && l.regCounted {
+		grown = max(jitEntryFixed+l.learnedBytes()-l.bytes, 0)
+	}
 	s.budget = r.jitBudget()
-	if !s.regRoomFor(old, need+spill) {
+	if !s.regRoomFor(old, need+spill+grown) {
 		// No room, all the cache holds young or in use: not compiled again
 		// for want of it until the cache has let some code go
 		// (generation), as the stack form's compile is deferred; and, the
@@ -679,7 +700,7 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 		// asks first (jitReoptimize).
 		e.life.deferred, e.life.generation = true, s.generation
 		if old != nil {
-			e.life.reoptRoom = max(need+spill-s.regReplaced(old), 1)
+			e.life.reoptRoom = max(need+spill+grown-s.regReplaced(old), 1)
 		}
 		// Nor its programs, which the compile asks for again: they would
 		// take the room it is remembered in, as the stack form's compile
@@ -950,7 +971,7 @@ func (s *jitState) regLifeSpare(key jitKey, l *jitEntry, called map[*bytecode.Fu
 	if e := s.regCache[key]; e != nil && (e.code != nil || s.regInUseOf(e, called)) {
 		return false
 	}
-	if s.regPendingJobs[key] != nil {
+	if l.busy != 0 || s.regPendingJobs[key] != nil {
 		return false
 	}
 	for _, e := range s.regRetired {
