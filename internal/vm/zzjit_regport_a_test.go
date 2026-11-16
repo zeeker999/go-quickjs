@@ -3,10 +3,14 @@
 package vm
 
 import (
+	"slices"
 	"testing"
+	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit"
+	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
+	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
 
 // jitRunFirstForTest runs the script fn in r, as Run does, its functions
@@ -157,4 +161,160 @@ func jitCodeBytesForTest(r *Runtime) int64 {
 		}
 	}
 	return n
+}
+
+// jitLinkCallsForTest is how many calls native callers made of cl's
+// function's code through its link: the link of the stack form's entry the
+// cache holds for its function, or the register form's (regLinks).
+func jitLinkCallsForTest(r *Runtime, cl *closure) uint64 {
+	if r.jit == nil {
+		return 0
+	}
+	if cl.reg != nil && r.regOn() {
+		if k := r.jit.regLinks[r.jitRegKeyOf(cl)]; k != nil {
+			return k.in
+		}
+		return 0
+	}
+	if e := r.jit.cache[r.jitKeyOf(cl.fn)]; e != nil && e.link != nil {
+		return e.link.in
+	}
+	return 0
+}
+
+// jitBuildForTest is what a function's last compile built (jitSSAOptimized):
+// the closures it inlined (ssa.Func's Inlined), and whether it calls
+// Array.prototype.push and pop natively (ssa.CallSite's Push and Pop),
+// which register code's state does not keep as the stack form's entry
+// does (ssaInlined, nativeCalls' push and pop).
+type jitBuildForTest struct {
+	inlined   []uintptr
+	push, pop bool
+}
+
+// jitBuildsForTest has the test record each function's last compile's
+// build, by its function, in the map it returns. It sets the process's
+// SSA hook: a test that calls it is not parallel.
+func jitBuildsForTest(t *testing.T) map[*bytecode.Function]jitBuildForTest {
+	t.Helper()
+	builds := map[*bytecode.Function]jitBuildForTest{}
+	jitSSAOptimized = func(fn *bytecode.Function, f *ssa.Func) {
+		b := jitBuildForTest{inlined: slices.Clone(f.Inlined)}
+		for _, blk := range f.Blocks {
+			for _, v := range blk.Values {
+				for _, c := range v.Calls() {
+					b.push = b.push || c.Push
+					b.pop = b.pop || c.Pop
+				}
+			}
+		}
+		builds[fn] = b
+	}
+	t.Cleanup(func() { jitSSAOptimized = nil })
+	return builds
+}
+
+// jitRegHeldCountsEachKindForTest is TestJITHeldCountsEachKind's check of
+// what r's JIT holds where its code is the register form's: each kind it
+// holds counted -- the code in its cache, with its on-stack replacement's
+// (regHeld), and, as the stack form's entry counts them in its measure,
+// what each function learned (learnedBytes), the pools of its literals'
+// and constructions' objects among it; the lowerings, the stack form's
+// and the register form's (lowerBytes); the contexts and the links native
+// callers call through, the register form's (regLinks) among them
+// (sharedBytes) -- and no more than the budget held.
+func jitRegHeldCountsEachKindForTest(t *testing.T, r *Runtime) {
+	t.Helper()
+	s := r.jit
+	code, learned, pools := 0, 0, 0
+	for key, e := range s.regCache {
+		if e.code == nil {
+			continue
+		}
+		if e.bytes < e.code.Footprint() {
+			t.Fatalf("an entry's code: %d bytes held, %d counted", e.code.Footprint(), e.bytes)
+		}
+		code += e.bytes
+		if e.osr != nil {
+			code += e.osr.bytes
+		}
+		l := s.regLearned[key]
+		if l == nil {
+			continue
+		}
+		learned += l.learnedBytes()
+		// Each pool, with its objects: the literals' and the
+		// constructions'.
+		held := 0
+		for _, x := range l.literals {
+			if x.pool.Count > 0 {
+				pools++
+				held += int(unsafe.Sizeof(*x.pool)) + int(x.pool.Size)*int(objectSize)
+			}
+		}
+		for _, x := range append(slices.Clone(l.inlines), l.nativeCalls...) {
+			if x.pool != nil && x.pool.Count > 0 {
+				pools++
+				held += int(unsafe.Sizeof(*x.pool)) + int(x.pool.Size)*int(objectSize)
+			}
+		}
+		if l.learnedBytes() < held {
+			t.Fatalf("pools of %d bytes counted at %d", held, l.learnedBytes())
+		}
+	}
+	if code+learned > s.regHeld || pools == 0 {
+		t.Errorf("register code holds %d bytes of code and %d learned, counted %d; %d pools", code, learned, s.regHeld, pools)
+	}
+	lowered := 0
+	lowering := func(l *jitLowering) {
+		n := jitLoweringFixed + jitCapBytes(l.hints.StringAdds) + jitCapBytes(l.hints.ElementReads)
+		for _, p := range l.progs {
+			if p != nil {
+				n += p.Footprint()
+				if p.Footprint() < len(p.Code)*int(unsafe.Sizeof(ir.Instruction{})) {
+					t.Fatal("a program's instructions uncounted")
+				}
+			}
+		}
+		if l.bytes != n {
+			t.Fatalf("a lowering holds %d, counted %d", n, l.bytes)
+		}
+		lowered += n
+	}
+	for _, l := range s.lowered {
+		lowering(l)
+	}
+	for _, l := range s.regLowered {
+		lowering(l)
+	}
+	if lowered != s.lowerBytes || lowered == 0 {
+		t.Fatalf("lowerings hold %d, counted %d", lowered, s.lowerBytes)
+	}
+	if len(s.ssaCtxs) == 0 || len(s.regLinks) == 0 {
+		t.Fatalf("%d contexts, %d links", len(s.ssaCtxs), len(s.regLinks))
+	}
+	shared := s.ctxCounted()*jitContextBytes + (len(s.links)+len(s.regLinks))*jitLinkFixed + jitCapBytes(s.hints)
+	if s.sharedBytes() < shared || s.held() != s.entryBytes+s.lowerBytes+s.sharedBytes()+s.regHeld {
+		t.Errorf("shared %d counted, at least %d held", s.sharedBytes(), shared)
+	}
+	if r.jitHeldBytes() > int64(r.jitBudget()) {
+		t.Fatalf("%d bytes held, past the budget's %d", r.jitHeldBytes(), r.jitBudget())
+	}
+}
+
+// jitFunctionCodeForTest is jitClosureCodeForTest by cl's function: the
+// stack form's entry the cache holds for it (jitKeyOf), whatever cl's
+// hint names -- a native callee's closure need not know it -- or its
+// register code's state.
+func jitFunctionCodeForTest(r *Runtime, cl *closure) *jitEntry {
+	if e := jitClosureRegForTest(r, cl); e != nil {
+		return e.life
+	}
+	if r.jit == nil || cl.reg != nil && r.regOn() {
+		return nil
+	}
+	if e := r.jit.cache[r.jitKeyOf(cl.fn)]; e != nil && e.ssa != nil {
+		return e
+	}
+	return nil
 }

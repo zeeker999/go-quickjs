@@ -980,7 +980,7 @@ func TestJITSSACallExits(t *testing.T) {
 	for _, rt := range []*Runtime{want, r} {
 		rt.global.setOwnRaw(rt.atoms.intern("g"), rt.NewFunction("g", 1,
 			func(_ *Runtime, _ Value, args []Value) (Value, error) { return args[0], nil }), propDefault)
-		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+		if _, err := jitRunFirstSourceForTest(t, rt, setup); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -989,7 +989,7 @@ func TestJITSSACallExits(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		before, goCalls := r.JITStats(), r.jit.goCalls
+		before, goCalls := r.JITStats(), r.jitState().goCalls
 		gv, err := r.Run(compileForTest(t, round.src))
 		if err != nil {
 			t.Fatal(err)
@@ -1969,7 +1969,7 @@ func TestJITSSAProfitabilityOfCallsOfGo(t *testing.T) {
 	}
 	entry := func(name string) *jitEntry {
 		cl := r.global.getOwn(r.atoms.intern(name)).value().Object().fn().closure
-		return jitClosureCodeForTest(r, cl)
+		return jitFunctionCodeForTest(r, cl)
 	}
 	if e := entry("builtins"); e == nil || !e.entrySlow || e.ssaStats.entries >= jitSSAProbe {
 		t.Fatalf("builtins kept running natively: %+v", e)
@@ -2742,11 +2742,28 @@ func TestJITCacheKeepsHotCode(t *testing.T) {
 		t.Fatal(err)
 	}
 	call := compileForTest(t, `round(10,20)`)
+	closure := func(name string) *closure {
+		return r.global.getOwn(r.atoms.intern(name)).value().Object().fn().closure
+	}
+	// The calls native callers made of each chain's mid and leaf through
+	// their links: where they run register code, a native call of a
+	// callee whose code the cache dropped is a call of Go (regLinkOf),
+	// not the stack form's exit (abi.ExitEnter, entered), and is not made
+	// through the link. A round runs ten phases, each calling each top
+	// once: 2,000 calls of its mid, two of its leaf each.
+	linked := func() []uint64 {
+		var in []uint64
+		for c := 0; c < chains; c++ {
+			in = append(in, jitLinkCallsForTest(r, closure(fmt.Sprintf("mid_%d", c))), jitLinkCallsForTest(r, closure(fmt.Sprintf("leaf_%d", c))))
+		}
+		return in
+	}
 	for round := 0; round < 6; round++ {
 		entered := uint64(0)
 		if r.jit != nil {
 			entered = r.jit.entered
 		}
+		in := linked()
 		if _, err := r.Run(call); err != nil {
 			t.Fatal(err)
 		}
@@ -2757,11 +2774,17 @@ func TestJITCacheKeepsHotCode(t *testing.T) {
 		if n := r.jit.entered - entered; n != 0 {
 			t.Fatalf("round %d: %d native calls left for Go", round, n)
 		}
+		if jitRegCodeForTest(r, "mid_0") {
+			for i, n := range linked() {
+				if want := uint64(2000 * (1 + i%2)); n-in[i] != want {
+					t.Fatalf("round %d: %s_%d called natively %d times, not %d", round, []string{"mid", "leaf"}[i%2], i/2, n-in[i], want)
+				}
+			}
+		}
 		for c := 0; c < chains; c++ {
 			for _, name := range []string{"top_%d", "mid_%d", "leaf_%d"} {
 				name = fmt.Sprintf(name, c)
-				fn := r.global.getOwn(r.atoms.intern(name)).value().Object().fn().closure.fn
-				if e := r.jit.cache[r.jitKeyOf(fn)]; e == nil || e.ssa == nil {
+				if e := jitFunctionCodeForTest(r, closure(name)); e == nil {
 					t.Fatalf("round %d: %s was dropped: %+v", round, name, e)
 				}
 			}
@@ -3142,6 +3165,10 @@ func TestJITHeldCountsEachKind(t *testing.T) {
 	s := r.jit
 	s.agedAt = 0
 	s.age(s.epoch())
+	if jitRegCodeForTest(r, "mk") {
+		jitRegHeldCountsEachKindForTest(t, r)
+		return
+	}
 	entries, pools := 0, 0
 	for _, e := range s.cache {
 		entries += e.measure()
@@ -3241,6 +3268,23 @@ func TestJITMemoryLimitKeepsEighth(t *testing.T) {
 			if held := r.jitHeldBytes(); held > budget {
 				t.Fatalf("%+v round %d: %d bytes held, past %d", cfg, round, held, budget)
 			}
+			if jitRegCodeForTest(r, "top_0") {
+				// Register code keeps no hint slots: what it keeps by
+				// function is its code (regCache), its links (regLinks),
+				// its lowerings (regLowered) and what it learned
+				// (regLearned).
+				calls := 0
+				for _, e := range s.regCache {
+					if e.keep != nil {
+						calls += len(e.keep.links)
+					}
+				}
+				t.Logf("%+v round %d: %d entries, %d links, %d calling through links, %d lowerings, %d learned", cfg, round, len(s.regCache), len(s.regLinks), calls, len(s.regLowered), len(s.regLearned))
+				if len(s.regLinks) > len(s.regCache)+calls {
+					t.Fatalf("%+v round %d: %d links for %d entries calling through %d", cfg, round, len(s.regLinks), len(s.regCache), calls)
+				}
+				continue
+			}
 			if used := len(s.hints) - 1 - len(s.hintFree); used != len(s.cache) {
 				t.Fatalf("%+v round %d: %d hint slots in use, %d entries", cfg, round, used, len(s.cache))
 			}
@@ -3256,8 +3300,8 @@ func TestJITMemoryLimitKeepsEighth(t *testing.T) {
 			t.Fatalf("%+v: the stream never filled the budget", cfg)
 		}
 		for c := 0; c < 30; c++ {
-			fn := r.global.getOwn(r.atoms.intern(fmt.Sprintf("top_%d", c))).value().Object().fn().closure.fn
-			if e := r.jit.cache[r.jitKeyOf(fn)]; e == nil || e.ssa == nil {
+			cl := r.global.getOwn(r.atoms.intern(fmt.Sprintf("top_%d", c))).value().Object().fn().closure
+			if e := jitFunctionCodeForTest(r, cl); e == nil {
 				t.Fatalf("%+v: hot top_%d was dropped", cfg, c)
 			}
 		}
@@ -3283,6 +3327,45 @@ func TestJITCallersCountedAsTheyJoin(t *testing.T) {
 		t.Fatal(err)
 	}
 	s, callers := r.jit, 0
+	if jitRegCodeForTest(r, "mid_0") {
+		// Register code's native callers join its function's learned
+		// state (regCallers, regJoinCallers), which what the JIT holds
+		// counts as the stack form's entry's measure counts its
+		// nativeCallers (learnedBytes); each calls it through its link
+		// (its code's keep's links).
+		learned := 0
+		for key, l := range s.regLearned {
+			callers += len(l.regCallers)
+			if e := s.regCache[key]; e != nil && e.code != nil {
+				learned += l.learnedBytes()
+			}
+			for _, c := range l.regCallers {
+				ce := s.regCache[c]
+				if ce == nil || ce.code == nil || ce.keep == nil {
+					continue
+				}
+				if k := s.regLinks[key]; k == nil || !slices.Contains(ce.keep.links, k) {
+					t.Fatal("a native caller whose code does not call the entry through its link")
+				}
+			}
+		}
+		if callers == 0 {
+			t.Fatal("no native callers: the chains were not called natively")
+		}
+		code := 0
+		for _, e := range s.regCache {
+			if e.code != nil {
+				code += e.bytes
+				if e.osr != nil {
+					code += e.osr.bytes
+				}
+			}
+		}
+		if code+learned > s.regHeld {
+			t.Fatalf("register code holds %d bytes of code and %d learned, its native callers among it, counted %d", code, learned, s.regHeld)
+		}
+		return
+	}
 	for _, e := range s.cache {
 		callers += len(e.nativeCallers)
 		if e.hint != 0 && e.bytes != e.measure() {
@@ -3413,12 +3496,12 @@ func TestJITBudgetAllocations(t *testing.T) {
 func TestJITClosureRemembersRefusal(t *testing.T) {
 	t.Parallel()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	v, err := r.Run(compileForTest(t, `function f(n) { var s=0; for(var i=0;i<n;i++) with({}) s+=i; return s } f(3); f`))
+	v, err := jitRunFirstSourceForTest(t, r, `function f(n) { var s=0; for(var i=0;i<n;i++) with({}) s+=i; return s } f(3); f`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cl := v.Object().fn().closure
-	if !cl.jitRefused {
+	if !jitClosureRefusedForTest(r, cl) {
 		t.Fatal("unsupported function did not remember its refusal")
 	}
 	r.releaseJIT()
@@ -5200,7 +5283,7 @@ func TestJITSSAKeepsWhileMarking(t *testing.T) {
 		}
 	}
 	cl := r.global.getOwn(r.atoms.intern("rev")).value().Object().fn().closure
-	if e := jitClosureCodeForTest(r, cl); e == nil || calls == 0 {
+	if e := jitFunctionCodeForTest(r, cl); e == nil || calls == 0 {
 		t.Fatalf("rev did not run natively, calling Go (%d calls): %+v", calls, e)
 	}
 }
@@ -5234,7 +5317,7 @@ func TestJITSSAWideConstructionsWhileMarking(t *testing.T) {
 		}
 	}
 	cl := r.global.getOwn(r.atoms.intern("lit")).value().Object().fn().closure
-	if e := jitClosureCodeForTest(r, cl); e == nil || e.entrySlow || len(e.nativeCalls) == 0 || r.jit.hosts != hosts {
+	if e := jitFunctionCodeForTest(r, cl); e == nil || e.entrySlow || len(e.nativeCalls) == 0 || r.jit.hosts != hosts {
 		t.Fatalf("lit's constructions while the collector marked: %d exits in its last rounds: %+v", r.jit.hosts-hosts, e)
 	}
 }
@@ -5301,7 +5384,10 @@ func jitCollectorHeldForTest(t *testing.T) {
 // longer inlined but made natively, to either function, as V8's feedback
 // goes polymorphic (jitInlinedCalls). Each answer is the interpreter's.
 func TestJITSSAInline(t *testing.T) {
-	t.Parallel()
+	if !regJITForTest() {
+		// Under the register JIT it sets the process's SSA hook.
+		t.Parallel()
+	}
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
@@ -5330,12 +5416,23 @@ func TestJITSSAInline(t *testing.T) {
 		cl := r.global.getOwn(r.atoms.intern(name)).value().Object().fn().closure
 		return jitClosureCodeForTest(r, cl)
 	}
+	// What count's last compile inlined (ssa.Func's Inlined), which
+	// register code's entry does not keep as the stack form's does.
+	var inlined []uintptr
+	if r.regOn() {
+		jitSSAOptimized = func(fn *bytecode.Function, f *ssa.Func) {
+			if fn.Name == "count" {
+				inlined = slices.Clone(f.Inlined)
+			}
+		}
+		t.Cleanup(func() { jitSSAOptimized = nil })
+	}
 	for i, src := range rounds {
 		wv, err := want.Run(compileForTest(t, src))
 		if err != nil {
 			t.Fatal(err)
 		}
-		hosts := r.jit.hosts
+		hosts := r.jitState().hosts
 		gv, err := r.Run(compileForTest(t, src))
 		if err != nil {
 			t.Fatal(err)
@@ -5352,6 +5449,28 @@ func TestJITSSAInline(t *testing.T) {
 	}
 	// isHeld, replaced, is called natively instead; plus stays inlined.
 	e := entry("count")
+	if jitRegCodeForTest(r, "count") {
+		// Register code's call of isHeld, having met both functions, is
+		// polymorphic, which its compile does not inline (no notInline
+		// mark, which the stack form's leaves at an inlined call that
+		// left): the compile inlines plus alone, and calls the new isHeld
+		// natively.
+		method := func(name string) uintptr {
+			v, err := r.Run(compileForTest(t, `T.prototype.`+name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return uintptr(unsafe.Pointer(v.Object().fn().closure))
+		}
+		isHeld, plus := method("isHeld"), method("plus")
+		if e == nil || len(e.inlines) != 2 || !slices.Equal(inlined, []uintptr{plus}) ||
+			!slices.ContainsFunc(e.nativeCalls, func(x jitInline) bool {
+				return x.pc == e.inlines[0].pc && uintptr(unsafe.Pointer(x.cl)) == isHeld
+			}) || len(e.failed) != 0 {
+			t.Fatalf("count was not inlined, then compiled again calling isHeld natively: inlines %#x (isHeld %#x, plus %#x); %+v", inlined, isHeld, plus, e)
+		}
+		return
+	}
 	if e == nil || len(e.inlines) != 2 || len(e.notInline) != 1 || e.notInline[0] != e.inlines[0].pc ||
 		!slices.ContainsFunc(e.nativeCalls, func(x jitInline) bool { return x.pc == e.inlines[0].pc }) || len(e.failed) != 0 {
 		t.Fatalf("count was not inlined, then compiled again calling isHeld natively: %+v", e)
@@ -5481,6 +5600,17 @@ func TestJITSSANestedInline(t *testing.T) {
 	}
 	cl := r.global.getOwn(r.atoms.intern("run")).value().Object().fn().closure
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	// What run's last compile inlined (ssa.Func's Inlined), which register
+	// code's entry does not keep as the stack form's does (ssaInlined).
+	var inlined []uintptr
+	if r.regOn() {
+		jitSSAOptimized = func(fn *bytecode.Function, f *ssa.Func) {
+			if fn.Name == "run" {
+				inlined = slices.Clone(f.Inlined)
+			}
+		}
+		t.Cleanup(func() { jitSSAOptimized = nil })
+	}
 	for i, src := range rounds {
 		wv, err := want.Run(compileForTest(t, src))
 		if err != nil {
@@ -5491,7 +5621,8 @@ func TestJITSSANestedInline(t *testing.T) {
 		if e != nil {
 			hosts = e.ssaStats.hosts
 		}
-		unwound := r.jit.unwound
+		unwound := r.jitState().unwound
+		outerIn := jitLinkCallsForTest(r, method("outer"))
 		gv, err := r.Run(compileForTest(t, src))
 		if err != nil {
 			t.Fatal(err)
@@ -5503,6 +5634,12 @@ func TestJITSSANestedInline(t *testing.T) {
 		case 3:
 			e = jitClosureCodeForTest(r, cl)
 			for _, name := range []string{"outer", "hold", "mark"} {
+				if e != nil && jitRegCodeForTest(r, "run") {
+					if !slices.Contains(inlined, uintptr(unsafe.Pointer(method(name)))) {
+						t.Fatalf("run's code does not inline %s: %#x", name, inlined)
+					}
+					continue
+				}
 				if e == nil || !slices.Contains(e.ssaInlined, method(name)) {
 					t.Fatalf("run's code does not inline %s", name)
 				}
@@ -5515,7 +5652,16 @@ func TestJITSSANestedInline(t *testing.T) {
 				t.Fatalf("an exit inside mark made %d frames, not three", r.jit.unwound-unwound)
 			}
 		case 5:
-			// Left too often, outer is called natively instead, not by Go.
+			// Left too often, outer is called natively instead, not by Go:
+			// the stack form's code marks the call (callSites); register
+			// code's last compile does not inline outer, and calls it
+			// through its link.
+			if jitRegCodeForTest(r, "run") {
+				if slices.Contains(inlined, uintptr(unsafe.Pointer(method("outer")))) || jitLinkCallsForTest(r, method("outer")) == outerIn {
+					t.Fatalf("run's call to outer: inlines %#x, outer called natively %d times", inlined, jitLinkCallsForTest(r, method("outer"))-outerIn)
+				}
+				break
+			}
 			if e := jitClosureCodeForTest(r, cl); e == nil || !slices.Contains(e.callSites, jitCallNative) || slices.Contains(e.callSites, jitCallDone) {
 				t.Fatalf("run's call to outer: %v", e.callSites)
 			}
@@ -5577,7 +5723,7 @@ func TestJITSSANativeConstruct(t *testing.T) {
 		if e := entry("run"); e != nil {
 			hosts, entries = e.ssaStats.hosts, e.ssaStats.entries
 		}
-		reoptimized := r.jit.reoptimized
+		reoptimized := r.jitState().reoptimized
 		gv, err := r.Run(compileForTest(t, src))
 		if err != nil {
 			t.Fatal(err)
@@ -5649,7 +5795,7 @@ func TestJITSSANativeArrayConstruct(t *testing.T) {
 		if e := jitClosureCodeForTest(r, cl); e != nil {
 			hosts, entries = e.ssaStats.hosts, e.ssaStats.entries
 		}
-		reoptimized := r.jit.reoptimized
+		reoptimized := r.jitState().reoptimized
 		gv, err := r.Run(compileForTest(t, src))
 		if err != nil {
 			t.Fatal(err)
@@ -5706,7 +5852,7 @@ func TestJITSSANativeCallThroughCall(t *testing.T) {
 	runtime.GC()
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	entry := func(name string) *jitEntry {
-		return r.jit.cache[r.jitKeyOf(r.global.getOwn(r.atoms.intern(name)).value().Object().fn().closure.fn)]
+		return jitFunctionCodeForTest(r, r.global.getOwn(r.atoms.intern(name)).value().Object().fn().closure)
 	}
 	checked := false
 	for i, src := range rounds {
@@ -5718,7 +5864,7 @@ func TestJITSSANativeCallThroughCall(t *testing.T) {
 		if e := entry("viaRun"); e != nil {
 			hosts, entries = e.ssaStats.hosts, e.ssaStats.entries
 		}
-		reoptimized := r.jit.reoptimized
+		reoptimized := r.jitState().reoptimized
 		gv, err := r.Run(compileForTest(t, src))
 		if err != nil {
 			t.Fatal(err)
@@ -5773,6 +5919,10 @@ func TestJITSSANativePop(t *testing.T) {
 	runtime.GC()
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	cl := r.global.getOwn(r.atoms.intern("drain")).value().Object().fn().closure
+	var builds map[*bytecode.Function]jitBuildForTest
+	if r.regOn() {
+		builds = jitBuildsForTest(t)
+	}
 	checked := false
 	for i, src := range rounds {
 		wv, err := want.Run(compileForTest(t, src))
@@ -5783,7 +5933,7 @@ func TestJITSSANativePop(t *testing.T) {
 		if e := jitClosureCodeForTest(r, cl); e != nil {
 			hosts, entries = e.ssaStats.hosts, e.ssaStats.entries
 		}
-		reoptimized := r.jit.reoptimized
+		reoptimized := r.jitState().reoptimized
 		gv, err := r.Run(compileForTest(t, src))
 		if err != nil {
 			t.Fatal(err)
@@ -5793,7 +5943,11 @@ func TestJITSSANativePop(t *testing.T) {
 		}
 		if i >= 3 && i <= 4 && r.jit.reoptimized == reoptimized {
 			e := jitClosureCodeForTest(r, cl)
-			if e == nil || !slices.ContainsFunc(e.nativeCalls, func(x jitInline) bool { return x.pop }) {
+			// Its pop native: the stack form's code learned it (nativeCalls'
+			// pop); register code's compile makes it from its call's cache
+			// (regBuiltinSite, ssa.CallSite's Pop).
+			if e == nil || !slices.ContainsFunc(e.nativeCalls, func(x jitInline) bool { return x.pop }) &&
+				!(jitRegCodeForTest(r, "drain") && builds[cl.fn].pop) {
 				t.Fatal("drain does not pop natively")
 			}
 			// It leaves after its loop, for the array and join of its
@@ -5858,6 +6012,10 @@ func TestJITSSANativePush(t *testing.T) {
 	}
 	runtime.GC()
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	var builds map[*bytecode.Function]jitBuildForTest
+	if r.regOn() {
+		builds = jitBuildsForTest(t)
+	}
 	run := func(name, src string) {
 		t.Helper()
 		wv, err := want.Run(compileForTest(t, src))
@@ -5879,8 +6037,13 @@ func TestJITSSANativePush(t *testing.T) {
 		for range 8 {
 			run(c.name, warm)
 		}
-		e := jitClosureCodeForTest(r, r.global.getOwn(r.atoms.intern(c.fn)).value().Object().fn().closure)
-		if e == nil || !slices.ContainsFunc(e.nativeCalls, func(x jitInline) bool { return x.push }) {
+		cl := r.global.getOwn(r.atoms.intern(c.fn)).value().Object().fn().closure
+		e := jitClosureCodeForTest(r, cl)
+		// Its push native: the stack form's code learned it (nativeCalls'
+		// push); register code's compile makes it from its call's cache
+		// (regBuiltinSite, ssa.CallSite's Push).
+		if e == nil || !slices.ContainsFunc(e.nativeCalls, func(x jitInline) bool { return x.push }) &&
+			!(jitRegCodeForTest(r, c.fn) && builds[cl.fn].push) {
 			t.Fatalf("%s: %s does not push natively", c.name, c.fn)
 		}
 		hosts, entries, reoptimized := e.ssaStats.hosts, e.ssaStats.entries, r.jit.reoptimized
@@ -6177,7 +6340,15 @@ func TestJITSSASharedContextsFollowDepth(t *testing.T) {
 		t.Fatalf("the interpreter did not run out of depth: %s", wv.String().Go())
 	}
 	cl := r.global.getOwn(r.atoms.intern("rec")).value().Object().fn().closure
-	if e := jitClosureCodeForTest(r, cl); e == nil || !slices.Contains(e.callSites, jitCallNative) {
+	if jitRegCodeForTest(r, "rec") {
+		// The stack form's code marks its call native (callSites);
+		// register code's calls of itself are through its link.
+		if e := jitFunctionCodeForTest(r, cl); e == nil || jitLinkCallsForTest(r, cl) == 0 {
+			t.Fatalf("rec does not call itself natively: %+v", e)
+		}
+		return
+	}
+	if e := jitFunctionCodeForTest(r, cl); e == nil || !slices.Contains(e.callSites, jitCallNative) {
 		t.Fatal("rec does not call itself natively")
 	}
 }
@@ -6212,7 +6383,7 @@ func TestJITSSACallsSettleLate(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		g := r.jit.cache[r.jitKeyOf(r.global.getOwn(r.atoms.intern("g")).value().Object().fn().closure.fn)]
+		g := jitFunctionCodeForTest(r, r.global.getOwn(r.atoms.intern("g")).value().Object().fn().closure)
 		if g != nil {
 			hosts = g.ssaStats.hosts
 		}
@@ -6330,7 +6501,7 @@ func TestJITSSAStoreOverLiveCell(t *testing.T) {
 	entry := func(name string) *jitEntry {
 		// By its function: a native callee's closure need not know it.
 		cl := r.global.getOwn(r.atoms.intern(name)).value().Object().fn().closure
-		return jitClosureCodeForTest(r, cl)
+		return jitFunctionCodeForTest(r, cl)
 	}
 	for i := 0; i < 4; i++ {
 		wv, err := want.Run(compileForTest(t, src))
@@ -6452,8 +6623,8 @@ func TestJITSSANativeCallsGoOn(t *testing.T) {
 		}
 	}
 	cl := r.global.getOwn(r.atoms.intern("zero")).value().Object().fn().closure
-	e := jitClosureCodeForTest(r, cl)
-	if e == nil || e.link.in == 0 {
+	e := jitFunctionCodeForTest(r, cl)
+	if e == nil || jitLinkCallsForTest(r, cl) == 0 {
 		t.Fatalf("zero was never called natively: %+v", e)
 	}
 	// tick's getter read, inlined in zero, leaves native code; its cache
@@ -6512,7 +6683,7 @@ func TestJITSSANativeCallResumes(t *testing.T) {
 		if i == 8 {
 			jitMarkingForTest(t)
 		}
-		resumed := r.jit.resumed
+		resumed := r.jitState().resumed
 		gv, err := r.Run(compileForTest(t, src))
 		if err != nil {
 			t.Fatal(err)
