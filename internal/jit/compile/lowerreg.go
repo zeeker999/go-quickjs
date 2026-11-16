@@ -2240,13 +2240,10 @@ func RegAccess(rc *bytecode.RegCode, pc int) (reads, writes []int, all bool) {
 		return append([]int{b}, span(c, int(rc.Aux[pc]))...), []int{a}, false
 	case bytecode.RCopyDataProps, bytecode.RSetProtoOf, bytecode.RArrayPush, bytecode.RArraySpread, bytecode.RNewClass,
 		bytecode.RSetHomeObject, bytecode.RDefineMethod, bytecode.RSetFieldInit,
-		// A class's accessor's definition, and a function named after its
-		// key, made by Go on their operands as the stack form's
-		// (frameDefinition), not a host exit. A literal's accessor
-		// (define_getter, define_setter) is left to its exit: made so in a
-		// loop whose iteration's binding a closure captures, the binding
-		// read again after the call (ssa's reloadAfterCall) was found
-		// stale, as after define_method's.
+		// An accessor's half, a literal's or a class's, and a function
+		// named after its key, made by Go on their operands as the stack
+		// form's (jitDefinition, frameDefinition), not a host exit.
+		bytecode.RDefineGetter, bytecode.RDefineSetter,
 		bytecode.RClassGetter, bytecode.RClassSetter, bytecode.RSetFuncName:
 		return []int{a, b}, nil, false
 	case bytecode.RDefineIndex, bytecode.RDefineGetterIndex, bytecode.RDefineSetterIndex, bytecode.RClassGetterIndex,

@@ -2130,10 +2130,11 @@ no level's frame made for a native callee's (`jitRegPlainWhole`):
 the stack form's operations (`jitRegFrameless`, `jitOpFrameless`, which
 learns the layouts' copies) -- an object pattern's rest, a computed key
 converted or defined, a literal's `__proto__`; a method's home object set,
-a method defined and a class's field initializer given, of the closure's
-names, as the stack form's `jitGoHostPlain` makes them -- and a for...in's cursor,
-a for...of's cursor of an array and a loop's step over an array where it
-reads its dense storage or is done (`ssa.CallSite`'s `ForIn`, `ForOf`,
+a method defined, a literal's or a class's getter or setter defined, a
+class's field initializer given and a function named after its key, of
+the closure's names, as the stack form's `jitGoHostPlain` makes them --
+and a for...in's cursor, a for...of's cursor of an array and a loop's
+step over an array where it reads its dense storage or is done (`ssa.CallSite`'s `ForIn`, `ForOf`,
 `Step`: `jitGoCallPlain`'s `jitForInPlain`, `jitForOfPlain`,
 `jitStepPlain`); and on the frame otherwise. A class linked to its parent
 (`new_class`) and an object spread that runs a getter Go makes on the
@@ -2163,11 +2164,18 @@ it has no code of (`jitRegWhole`): the registers it reads are given the
 values the code passed, its result, the register it writes, goes to the
 call's keep cell, and what it wrote in the frame is put back -- the code
 keeps values in the frame's registers as it found them -- but a captured
-register of the run's own frame, where its cell holds it. On a native
-callee's frame its level's frames are made first, as for any call of Go
-that runs script (`jitRegGoCallNested`). What does not go on at the next
-instruction -- a throw, a handler of the frame's that took one, the
-runtime stopped, the code found invalid -- the exit at the call finishes
+register of the run's own frame, where its cell holds it. In code whose
+captured registers are in cells of their own, those cells are opened on
+the window's registers first, each holding what it holds
+(`jitRegReopenCells`), as Go has them before it runs the frame at an
+exit: a cell native code gave a register at a scope's end (`cellsClose`)
+is open on no register, which still holds what it held when native code
+entered -- read there, every later turn's let of a loop was the turn's
+the code entered at. On a native callee's frame its level's frames are
+made first, as for any call of Go that runs script
+(`jitRegGoCallNested`). What does not go on at the next instruction -- a
+throw, a handler of the frame's that took one, the runtime stopped, the
+code found invalid -- the exit at the call finishes
 (`regPending`, `regFinishWhole`): the register the instruction wrote, or
 the handler's, written over the exit's records, the instruction never run
 again. Which instructions are whole Hosts the registers each reads and

@@ -456,11 +456,12 @@ func (f *jitRegFeedback) CellsPool() (uintptr, []int32, bool) {
 // RegAccess), in their order, the stack form's operands'; its result goes
 // to the call's keep cell, which the code reads where the instruction
 // writes a register. A class's or a literal's member made -- a method's
-// home object set, a method defined, a class's field initializer given --
-// it makes of cl's names, c its register code, as the stack form's
-// jitGoHostPlain makes them (jitDefinition's cases). It reports whether it
-// made it; what it does not make, Go makes on the frame (jitRegOpMade,
-// jitRegWhole).
+// home object set, a method defined, a literal's or a class's getter or
+// setter defined, a class's field initializer given, a function named
+// after its key -- it makes of cl's names, c its register code, as the
+// stack form's jitGoHostPlain makes them (jitDefinition's cases). It
+// reports whether it made it; what it does not make, Go makes on the
+// frame (jitRegOpMade, jitRegWhole).
 func (r *Runtime) jitRegFrameless(ctx *abi.Context, cl *closure, c *regCode, rpc int, op bytecode.ROp) bool {
 	var in bytecode.Instr
 	n := int(ctx.GoOp >> abi.GoOpArgcShift & 0xff)
