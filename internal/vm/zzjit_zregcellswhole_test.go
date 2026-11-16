@@ -15,7 +15,7 @@ import (
 // frame (jitRegWhole) or makes on its operands: a literal's prototype
 // (set_proto_of), field, method, getter, setter, computed key and name,
 // spread; an array's spread; a class; a spread whose getter assigns the
-// binding.
+// binding; a generator's yields; a throw; a template and an in.
 const regCellsWholeSrc = `
 function protoNull(n) {
 	var s = 0, fs = [];
@@ -176,7 +176,49 @@ function forOf(n) {
 	return s + ":" + fs[n - 1]() + ":" + fs[n >> 1]();
 }
 
-function main(n) { return protoNull(n) + ";" + protoObj(n) + ";" + method(n) + ";" + getter(n) + ";" + setter(n) + ";" + accessors(n) + ";" + computed(n) + ";" + spread(n) + ";" + arrSpread(n) + ";" + classes(n) + ";" + assigned(n) + ";" + spreadGetter(n) + ";" + blocks(n) + ";" + forOf(n) }
+function* gen(n) {
+	for (let i = 0; i < n; i++) {
+		const f = () => i;
+		const o = {__proto__: null, a: i};
+		yield o.a + f();
+		yield i;
+	}
+}
+function gens(n) {
+	var s = 0, k = 0;
+	for (const v of gen(n)) { s += v * (k & 1 ? 1 : 3); k++ }
+	return s + ":" + k;
+}
+function thrower(i) { if (i % 7 == 3) throw i; return i }
+function throws(n) {
+	var s = 0, fs = [];
+	for (let i = 0; i < n; i++) {
+		const f = () => i;
+		const o = {__proto__: null, a: i};
+		try {
+			if (i % 5 == 2) throw o.a + 1000;
+			s += thrower(i);
+		} catch (e) {
+			s += e * 2;
+		}
+		fs.push(f);
+	}
+	return s + ":" + fs[n - 1]() + ":" + fs[n >> 1]();
+}
+var keys = {k3: 1, 5: 2};
+function strs(n) {
+	var s = "", c = 0, fs = [];
+	for (let i = 0; i < n; i++) {
+		const f = () => i;
+		const o = {__proto__: null, a: i};
+		s = ` + "`${i}-${o.a}`" + `;
+		if (i in keys) c += 100;
+		c += s.length + o.a;
+		fs.push(f);
+	}
+	return c + ":" + s + ":" + fs[n - 1]() + ":" + fs[n >> 1]();
+}
+function main(n) { return protoNull(n) + ";" + protoObj(n) + ";" + method(n) + ";" + getter(n) + ";" + setter(n) + ";" + accessors(n) + ";" + computed(n) + ";" + spread(n) + ";" + arrSpread(n) + ";" + classes(n) + ";" + assigned(n) + ";" + spreadGetter(n) + ";" + blocks(n) + ";" + forOf(n) + ";" + gens(n) + ";" + throws(n) + ";" + strs(n) }
 `
 
 // TestJITRegCellsWhole checks that an instruction Go runs whole on the
@@ -221,8 +263,14 @@ func TestJITRegCellsWhole(t *testing.T) {
 		{"blocks", []float64{7}, 0, "224:25:13"},
 		{"forOf", []float64{300}, 2, "269100:897:450"},
 		{"forOf", []float64{7}, 0, "126:18:9"},
+		{"gens", []float64{300}, 2, "313950:600"},
+		{"gens", []float64{7}, 0, "147:14"},
+		{"throws", []float64{300}, 2, "178857:299:150"},
+		{"throws", []float64{7}, 0, "2026:6:3"},
+		{"strs", []float64{300}, 2, "46830:299-299:299:150"},
+		{"strs", []float64{7}, 0, "142:6-6:6:3"},
 	})
-	const want = "179400:299:150;181500:299:150;538200:2990:1500;313950:1495:150;134850:300:150;224250:299:150;180300:299:150;90600:299:150;91800:299:150;134850:300:151;90300:300:151;1034850:1299:1150;449100:1197:601;269100:897:450"
+	const want = "179400:299:150;181500:299:150;538200:2990:1500;313950:1495:150;134850:300:150;224250:299:150;180300:299:150;90600:299:150;91800:299:150;134850:300:151;90300:300:151;1034850:1299:1150;449100:1197:601;269100:897:450;313950:600;178857:299:150;46830:299-299:299:150"
 	for _, marking := range []bool{false, true} {
 		t.Run(fmt.Sprintf("tiered/marking=%v", marking), func(t *testing.T) {
 			if marking {
