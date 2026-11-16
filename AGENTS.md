@@ -332,6 +332,33 @@ whose arguments are evaluated at once, but wrapped in a closure for
 one such cleanup ran without a collection, which kept the crash above out of
 CI for as long as it was there.
 
+Some tests fail when they share the machine with other test processes, and
+such a failure says nothing about the change. A failure is load if the test
+passes alone at the same commit and at the base, and its message is about
+time or about code that is missing, not a wrong answer. There are three
+kinds:
+
+- Tests that compare elapsed times or have a deadline:
+  `TestJITCompileLinear/time`, `TestRegExpLeafFailsAgainWithFrame`,
+  `TestNativeLoopsAreInterruptible`, and the JIT's cancellation tests under
+  qemu. Run them as a step of their own (`-run '^Name$' -count=3`), not
+  beside other heavy tests.
+- Tests that look at the JIT's cache after a run. The time-based flush lets
+  code go after about a second of program time without use, which a slow
+  build (checkptr, qemu) reaches. Such a test holds the clocks
+  (`t.Cleanup(JITHoldClocks())`) and is not parallel.
+- Tests that set a process-wide switch (`jitSSAOptimized`, `mir.Timing`,
+  `JITCompileRepeat`, `regNativeOn`, the clocks). They change what every
+  other runtime in the process does, so a parallel one makes other tests
+  fail at random: `jitSSAOptimized` keeps compiles out of the background.
+  They are never top-level parallel.
+
+Under qemu, a test that runs its own binary as a child
+(`TestStoreRefShades`, `TestRegNativeInDroppedRealm`) fails with
+"exec format error", because the child is not started through qemu. Run
+its child form directly: set the environment variable that marks the
+child, and the `GODEBUG` the parent would give it.
+
 For Intl changes, also run the exact golden tests:
 
 ```sh
