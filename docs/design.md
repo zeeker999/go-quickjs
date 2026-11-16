@@ -13,8 +13,9 @@ type check is a shift or a mask and a compare. The invariant this rests on is
 that a genuine NaN must never collide with a tag, so every number is
 normalized on the way in.
 
-**The interpreter allocates nothing per call.** One contiguous slice backs both
-locals and operands; a frame is a window into it. Neither that slice nor the
+**The interpreter allocates nothing per call.** One contiguous slice backs
+every frame's registers (or, in the stack interpreter, its locals and
+operands); a frame is a window into it. Neither that slice nor the
 frame stack is ever grown, which is what makes it safe for a closure to hold a
 pointer into a live frame and for the interpreter to hold a `*frame` across
 nested calls. Exhausting either is the stack limit, reported as the same
@@ -67,7 +68,19 @@ past the store. Each is compiled without that, and a comparison a branch tests
 directly becomes one instruction rather than two. A counted loop of the kind
 every program contains lost a fifth of its instructions to this.
 
-**Functions can run as trees of Go closures.** The interpreter pays for every
+**Functions run as register code.** Each function is compiled from its syntax
+tree to instructions that name registers, three-address code with no operand
+stack, run by an interpreter whose handlers are machine code generated for
+amd64 and arm64, each ending in its own dispatch, and Go functions elsewhere;
+the JIT compiles the same instructions on the same frames. In Go a dispatch
+costs several times what it does in a C or generated interpreter, so the
+design spends its effort on fewer dispatches and cheaper ones. See
+[the register interpreter](register-interpreter.md). The two paragraphs that
+follow describe the tiers it replaced, which still run on other
+architectures, in runtimes with the JIT until its register path is the
+default, and everywhere with `QJS_REG=0`.
+
+**Functions can run as trees of Go closures.** The stack interpreter pays for every
 instruction it dispatches, and in Go that is most of what an arithmetic loop
 costs. A function with few calls is built instead, from its bytecode, into
 blocks of expression trees: each node is a Go closure that computes its value
@@ -83,7 +96,9 @@ function with anything the tier does not build -- an iterator, a generator,
 an eval -- runs in the interpreter, and every other function as a tree,
 however many calls it makes. `QJS_NOTREE` turns the tier off.
 
-**An exception is a Go panic, caught once.** A node that throws panics, and
+**In the tree tier, an exception is a Go panic, caught once.** (Register
+code returns its exceptions as errors and finds handlers in a table.) A node
+that throws panics, and
 the panic carries the exception out through every tree it passes until a
 function with a handler, or the function the interpreter called, recovers
 it. A function with a try statement is run under one recover, set up as it

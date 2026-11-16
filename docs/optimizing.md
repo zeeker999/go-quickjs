@@ -81,8 +81,10 @@ about the code, the rest about where it and its data are.
   of `-gcflags=<pkg>=-m` between the two builds. Keep a growth path (the
   call that grows a table) out of an inlined fast path: split it into an
   out-of-line "make room" and an inlined store.
-- **The hot functions.** `hotdiff` and `go tool nm` on the seven of
-  AGENTS.md: their sizes and addresses must match the base. A
+- **The hot functions.** `hotdiff` and `go tool nm` on the old tiers'
+  seven of AGENTS.md, and on the register interpreter's `runReg`,
+  `rhCallW` and `regEnterW` (`hotdiff -funcs`): their sizes and addresses
+  must match the base. A
   displacement that changes in an instruction of the same length is
   fine. A call that appears where code was inlined is not: `runFD` called
   `newObject` once `newObject` stopped inlining, and every instruction
@@ -119,17 +121,18 @@ about the code, the rest about where it and its data are.
   by an odd multiple of 32 relative to its group has its 64-byte
   alignment flipped at every placement. Compare the test's hot functions'
   addresses mod 64 on both sides before calling it a cost.
-- **The interpreter loops' layout inside them.** A pad moves a loop
-  whole; a change to one case moves every case laid out after it
-  against the others and against the dispatch. The placements vary that
-  too: never-taken tests in the first case, executeAt's `OpNop` (three
-  times the placement's number) and runReg's `RNop` (`regInner`, 0 to 7
-  calls of a two-test filler, a permutation over the eight), and in
-  runReg's last case, after which its shared tails are laid out
-  (`regTail`, another permutation), written only into the placement
-  builds: the cases move against the dispatch and the tails against the
-  cases. A test slower at some of those inner layouts and level at others
-  is placement.
+- **The stack interpreter's layout inside it.** A pad moves a loop
+  whole; a change to one case of `executeAt`'s switch moves every case
+  laid out after it against the others and against the dispatch. The
+  placements vary that too: never-taken tests in its first case,
+  `OpNop` (three times the placement's number), written only into the
+  placement builds. A test slower at some of those inner layouts and
+  level at others is placement. The register interpreter's loop has no
+  cases to move: its handlers are functions laid out one after another,
+  and the native handlers a block in `handlerOps`' order, which the
+  placements do not vary; a handler added moves those after it in its
+  file or the block, which is why new ones are appended
+  (docs/register-interpreter.md, "Code layout").
 - **Native code's layout inside a function.** Moving a whole native
   function by lines changes little; moving code within its lines, or
   changing distances inside it, does. The JIT's placements move code by
@@ -206,7 +209,7 @@ byte stores, 7 bytes of code each, so that it fills any whole number of
 | Lever | The pad | Moves | Pins |
 |---|---|---|---|
 | A D R V B S T J Z | `layoutPadX`, a function in a file sorted where the gap opens | every function after it in file order, then the closures and the generics | `joinSize` (the built-ins), `descriptorObject` (`define.go` to the tree's builder), `buildTreeSkipping` (the tree's builder and slow paths, `arithSlow`), `executeAt`, `callObject`, `runTree`, `callTree`, `logicalJumps` or with the JIT `jitLeafGo`, and the closures at `binaryNode.func1` |
-| Q W | `layoutPadX`, the same, in the register interpreter's files | every function after it to the next position | the register interpreter's loop, `runReg` (Q), and the calls after it from `regCallW` (W), its handlers after them |
+| Q W | `layoutPadX`, the same, in the register interpreter's files | every function after it to the next position | the register interpreter's loop, `runReg` (Q), and the call path after it, `rhCallW` (W), its handlers after them |
 | GV | a generic `layoutPadV` calls | the generics plain functions meet first, from `vm.go` back | `rmwStmtHook` and the tree's generic nodes after it: `strAppend`, `upvalueAdd`, `litNodeOf`, switch, typeof, the regexp leaves |
 | MA MV MS | a generic that a method at the position calls | the generics methods meet first, from that file back | the method values (`upvalueAdd.node-fm` ...), `dataViewLeaves` and the DataView leaves, `polyReread` and object creation's |
 | CZ | a closure in a generic the last file calls | the closures of generics | `strAppendNode.func1` and the generic tree nodes' closures |
@@ -268,11 +271,12 @@ What each lever cannot move:
 
 The register interpreter is a small loop over a table of handlers, a
 function an operation (docs/register-interpreter.md, "The loop"): Q pins
-the loop, `runReg`, and W the call path after it, `regCallW`. A handler
+the loop, `runReg`, and W the call path after it, `rhCallW`. A handler
 is a function of its own, so an edit to one moves no other's code but
 those after it in its file; there is no switch whose cases a lock would
-hold. The golden file of the switch's hot cases and the levers P and K,
-inside the old loop's block, are gone with the switch.
+hold, and so no golden file of case offsets and no lever inside the
+loop. The native handlers' block is not anchored: it is laid out in
+`handlerOps`' order, new handlers last, and arm64's is not tuned at all.
 
 The pads are never called and their variables never read: one init calls
 them behind a variable that is never true, which keeps the linker from

@@ -30,7 +30,11 @@ The main areas are:
   handlers on amd64 and arm64, and on the Go handler table elsewhere and
   with `QJS_NONATIVE=1`; test with both. The JIT compiles register code.
   The front end still makes each function's stack form, which the register
-  backend reads, and nothing runs.
+  backend reads and the leaf evaluators (`pureCall`, `leafCall`) still run.
+- `internal/compiler/regcomp`: the register backend, which compiles a
+  function's AST to register code over what the stack compiler records of
+  its scopes; `internal/vm/internal/nativegen` generates the register
+  interpreter's native handlers.
 - `internal/regdiff`: tests only, the register interpreter's differential
   tests, over cases of their own and the corpora `internal/v8bench` holds
   for the benchmark runners.
@@ -57,19 +61,38 @@ concurrently.
   bytes, so adding, moving or renaming code there -- even code a benchmark
   never runs -- can move the V8 suite by 5 to 10%. Do not rename or reorder
   its files or move code between them without comparing builds with
-  `internal/cmd/v8bench/placements` (see Validation); the `zz*.go` files
-  sort last on purpose, so that what is added there moves nothing before
-  it.
+  `internal/cmd/v8bench/placements` (see Validation); the JIT's
+  `zzjit_*.go` and the register interpreter's `zzreg_*.go` and
+  `zzzy*_*.go` sort last, in that order, on purpose, so that what is added
+  in a later group moves nothing of an earlier one.
+- The register interpreter's hot code is its loop, `runReg`, its call path,
+  `rhCallW`, `regEnterW`, `regCallSlow` and `regRunFD`, the native
+  dispatcher's Go side, `nativeLoop`, and the native handlers' block.
+  `runReg` is a fixed loop over a table of handlers, the same for every
+  operation (`TestRegLoopIsSmall`): an operation is a handler of its own,
+  never a case added to it. A Go handler added to `zzreg_table.go` moves
+  every handler after it, so a new operation's handlers go in a file that
+  sorts after it (`zzreg_zztable_*.go`) and replace their table entries in
+  its `init`; its value is appended before `bytecode.ROpCount`, never
+  inserted, and its native handler is appended to nativegen's
+  `handlerOps`, with any path its handler takes rarely laid after the last
+  handler, so that no handler before it moves. A new operation lands with
+  its regcomp pattern, its Go handler and slow function, its amd64 and
+  arm64 native handlers and its JIT lowering (`compile.LowerReg`) in one
+  change, so that it opens no refusal. What changes nothing of an
+  instruction's dispatch is a mark or a flag of an operation that exists,
+  not a new one (docs/register-interpreter.md, "Opcode values").
+  `internal/cmd/hotdiff` shows a change leaves the hot code, the native
+  handlers' block included, alone.
 - What decides the speed is how much of the hot path AMD Zen 2's op cache
   holds: 64 sets of 8 entries, each set taking the code at one offset in
   every 4 KB. Hot code that a change moves onto the same sets -- even by
   moving it, its instructions unchanged -- is decoded again on every pass,
   and a loop can run a quarter slower. So keep the interpreter's hot
-  functions (`runReg`, `rhCallW`, `regRunFD`, `callObject`) as they are,
-  and the native handlers, which `internal/vm/internal/nativegen`
-  generates, the same: an instruction the interpreter must run is a handler
-  of its own in both emitters and the Go table, and a slow path a call out
-  of line.
+  functions (above, and `callObject`) as they are, and the native
+  handlers, which `internal/vm/internal/nativegen` generates, the same: an
+  instruction the interpreter must run is a handler of its own in both
+  emitters and the Go table, and a slow path a call out of line.
 - The layout lock keeps the hot code where it measured best whatever a
   change moves around it: generated pads, dead code and data, put the
   anchors of `internal/vm/layoutlock.txt` -- the built-ins, the call path,
@@ -241,12 +264,14 @@ git diff --check
 ```
 
 The long checks run once, on the final code: the full suite with and without
-the JIT's tag, test262's modes and the timing across suites. Until the old
-tiers are removed, a change to what they share with the register
-interpreter runs the suite with `QJS_REG=0` as well, and on an architecture without
-native handlers (386, say) with `QJS_REG=1`; where the register
-interpreter is on, the conformance runner fails on any function that falls
-back to the old tiers (`vm.RegFallbacks`, `QJS_REGFALLTRACE` names them). While a change
+the JIT's tag, test262's modes and the timing across suites. A change to
+the register interpreter or its JIT path also runs `internal/regdiff`,
+plain and with `-tags quickjs_jit`, with `QUICKJS_V8_DIR` naming the V8
+suite, whose answers it checks against golden answers
+(`internal/regdiff/testdata`); on amd64 or arm64 the suite with
+`QJS_NONATIVE=1`, which runs the Go handler table; and the 386 build and
+`TestLengthsPastAnInt32` there, where the Go table alone runs.
+While a change
 is iterated, test the packages it touches and time only the benchmarks it is
 for, at two placements (`compare -k 2 -suite List`, `-micro -suite
 bigint64_fnv1a`); `placements build -k N` makes only the placements a `-k N`
@@ -417,8 +442,8 @@ go run -tags quickjs_jit ./internal/cmd/v8bench -jit -bench octane -dir /tmp/oct
 `microbench_extra.js`, of what it has none of -- generators, async
 functions, try statements, iterators, using declarations, closures
 made and called anew, calls in tail position, method calls with a frame
-and without, loops of a few simple instructions, which time the
-interpreter's dispatch, private class members, Math.random, the in operator, a delete of an object's last property,
+and without, loops of a few simple instructions, which time the register
+interpreter's dispatch (the Go table's with `QJS_NONATIVE=1`), private class members, Math.random, the in operator, a delete of an object's last property,
 object and array spread, object rest, computed keys and spread calls,
 Array.prototype.forEach, reduce, map, filter and some, and their callbacks
 varied -- made once or anew, a function expression or an arrow, reading
@@ -457,8 +482,10 @@ go run ./internal/cmd/v8bench -mode micro -n 1 -suite empty_loop,func_call
 To compare two builds, use `internal/cmd/v8bench/placements`: one build of
 each side compares where the linker put package vm's hot code as much as
 the code. `build` makes eight builds of the working tree, each placing
-`runReg`, the call path and the native handlers differently in
-a balanced design, and checks every one with `go tool nm`; `compare` runs two
+`callObject`, the JIT's leaf calls, `runReg`, `rhCallW`, `nativeLoop`
+and the assembly -- the native handlers and the JIT's leaf stubs --
+differently in a balanced design, and checks every one with `go tool
+nm`; `-tags quickjs_jit` builds them with the JIT. `compare` runs two
 labels' placements in turn and reports each side's mean. Build both sides in
 the same checkout, and leave the machine idle while they run.
 
@@ -490,7 +517,7 @@ then the tests 3% or more slower at every placement. A micro-benchmark
 moves with code placement more than a suite does; one slower at some
 placements and level at others is placement.
 
-With `-jit`, each placement also moves the JIT's code: where its first
+With `-jit`, of builds made with `-tags quickjs_jit`, each placement also moves the JIT's code: where its first
 code goes in its arena (`V8BENCH_JITPAD`), where its later chunks and
 functions go (`V8BENCH_JITSEED`), both by whole 64-byte lines, and how far
 into its line each function's code starts (`V8BENCH_JITLINE`, 0 to 56 bytes
@@ -569,6 +596,12 @@ runs as.
 ```sh
 go run ./internal/cmd/disasm -func global_read bench.js
 ```
+
+`internal/cmd/regcount` counts, over directories of code, the register
+code's patterns the fused instructions take and those they leave -- a
+step before a compare-and-branch, `x * k`, `(x ± y) | 0` -- the evidence
+an operation's value is spent on; `internal/cmd/regrefusals` counts the
+register backend's refusals by reason.
 
 `internal/cmd/compilediff` compares what the front end makes at two
 revisions, for every `.js` file of the directories it is given, as a script,
