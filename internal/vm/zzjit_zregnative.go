@@ -1005,7 +1005,7 @@ func regForget(l *jitEntry) {
 	l.jitLearned = &jitLearned{reg: o.reg, regLink: o.regLink,
 		failed: o.failed, failedEntries: o.failedEntries, bigints: o.bigints, bigwide: o.bigwide, resumed: o.resumed,
 		typedReads: o.typedReads, stringReads: o.stringReads, keyedReads: o.keyedReads, keyedWrites: o.keyedWrites,
-		regHints: o.regHints, calls: o.calls}
+		regHints: o.regHints}
 }
 
 // dropReg closes e's code, or, while a run or a native call is in it, has
@@ -2401,8 +2401,6 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 	s.goCalls++
 	f.pc = regSrc(c, rpc) + 1
 	last, shared := s.ssaCtx, s.ssaSharedGen
-	goCallDepth := s.goCallDepth
-	s.goCallDepth = r.frameDepth + 1
 	var v Value
 	var err error
 	if op == bytecode.RNewW {
@@ -2445,7 +2443,6 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 			v, err = r.regTailRest()
 		}
 	}
-	s.goCallDepth = goCallDepth
 	jitClearArgs(r.stack, top, end)
 	r.stackTop = top
 	s.ssaCtx = last
@@ -2602,8 +2599,6 @@ func (r *Runtime) jitRegStepMade(ctx *abi.Context, idx int, run jitRegRun, rpc i
 	s.goCalls++
 	f.pc = regSrc(c, rpc) + 1
 	last, shared := s.ssaCtx, s.ssaSharedGen
-	goCallDepth := s.goCallDepth
-	s.goCallDepth = r.frameDepth + 1
 	var v Value
 	var more bool
 	var err error
@@ -2618,7 +2613,6 @@ func (r *Runtime) jitRegStepMade(ctx *abi.Context, idx int, run jitRegRun, rpc i
 	} else {
 		v, more, err = r.regStepNext(st)
 	}
-	s.goCallDepth = goCallDepth
 	s.ssaCtx = last
 	if s.ssaSharedGen != shared {
 		r.jitShareContexts(idx, f)
@@ -2759,8 +2753,6 @@ func (r *Runtime) jitRegStepCallMade(ctx *abi.Context, idx int, run jitRegRun, r
 	s.goCalls++
 	f.pc = regSrc(c, rpc) + 1
 	last, shared := s.ssaCtx, s.ssaSharedGen
-	goCallDepth := s.goCallDepth
-	s.goCallDepth = r.frameDepth + 1
 	var v Value
 	var err error
 	if st == nil {
@@ -2774,7 +2766,6 @@ func (r *Runtime) jitRegStepCallMade(ctx *abi.Context, idx int, run jitRegRun, r
 	} else {
 		v, err = r.jitRegStepAnswer(st, jitGoArg(ctx, 1), nil)
 	}
-	s.goCallDepth = goCallDepth
 	s.ssaCtx = last
 	if s.ssaSharedGen != shared {
 		r.jitShareContexts(idx, f)
@@ -2948,10 +2939,7 @@ func (r *Runtime) jitRegWhole(ctx *abi.Context, idx int, run jitRegRun, rpc int)
 	s.goCalls++
 	r.noteRegGoCall(regAt(c.code, rpc), true, Value{})
 	last, shared := s.ssaCtx, s.ssaSharedGen
-	goCallDepth := s.goCallDepth
-	s.goCallDepth = r.frameDepth + 1
 	next, _, err := r.regWhole(f, c, wb, rpc)
-	s.goCallDepth = goCallDepth
 	s.ssaCtx = last
 	if s.ssaSharedGen != shared {
 		r.jitShareContexts(idx, f)
@@ -3012,15 +3000,12 @@ func (r *Runtime) jitRegOpMade(ctx *abi.Context, idx int, run jitRegRun, rpc int
 	s.goCalls++
 	r.noteRegGoCall(w, true, Value{})
 	last, shared := s.ssaCtx, s.ssaSharedGen
-	goCallDepth := s.goCallDepth
-	s.goCallDepth = r.frameDepth + 1
 	var err error
 	if w.Op() == bytecode.RNewClass {
 		err = r.linkClass(a, b)
 	} else if a.IsObject() && !b.IsNullish() {
 		err = r.copyDataProps(a.Object(), b)
 	}
-	s.goCallDepth = goCallDepth
 	s.ssaCtx = last
 	if s.ssaSharedGen != shared {
 		r.jitShareContexts(idx, f)
@@ -3141,8 +3126,6 @@ func (r *Runtime) jitRegIterMade(ctx *abi.Context, idx int, run jitRegRun, rpc i
 	f, c := run.f, run.c
 	f.pc = regSrc(c, rpc) + 1
 	last, shared := s.ssaCtx, s.ssaSharedGen
-	goCallDepth := s.goCallDepth
-	s.goCallDepth = r.frameDepth + 1
 	s.goCalls++
 	r.noteRegGoCall(w, false, Value{})
 	var v Value
@@ -3152,7 +3135,6 @@ func (r *Runtime) jitRegIterMade(ctx *abi.Context, idx int, run jitRegRun, rpc i
 	} else {
 		v, err = r.iterStep(jitGoArg(ctx, 0))
 	}
-	s.goCallDepth = goCallDepth
 	s.ssaCtx = last
 	if s.ssaSharedGen != shared {
 		r.jitShareContexts(idx, f)

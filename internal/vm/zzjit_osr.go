@@ -110,12 +110,6 @@ type jitLearned struct {
 	// optimized, one that met more than one function is polymorphic, made
 	// natively to each, not inlined for the one it met last (jitRegCallSeen).
 	settling []jitInline
-	// calls are what the existing tiers counted of the function's calls,
-	// and of its invocations, since it was first given an entry
-	// (jitCallCounts): its code, and the entries made for it after this
-	// one, keep them (jitRegCompileFor, jitGhost); nil until it is invoked
-	// with this entry.
-	calls *jitCallCounts
 }
 
 // A function's code has no entry at a loop where escape analysis carries

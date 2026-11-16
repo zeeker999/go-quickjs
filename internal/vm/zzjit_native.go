@@ -455,10 +455,6 @@ type jitCodeFields struct {
 	jitResumeSkip   uint8
 	jitGenericCalls uint8
 	jitHint         [4]byte
-	// jitCounting says the existing tiers count the calls of the
-	// function's frames of the template's closures, which they have since
-	// one of its invocations they counted (jitCountRun, jitCountCallAt).
-	jitCounting bool
 	// jitRegHot counts the samples of the function's runs the register
 	// tier took, jitRegDeopts its code's deoptimizations,
 	// and jitRegRefused says it is not compiled from its register code;
@@ -903,10 +899,6 @@ type jitState struct {
 	// appends made in place.
 	builders []jitBuilder
 	appended uint64
-	// goCallDepth is the depth of the frame of the callee of a call Go
-	// makes for native code (jitGoCall, jitRegGoCallNested), while it makes
-	// it: native code's call, not the interpreter's (jitHotWork).
-	goCallDepth int
 	// arena holds the code of every entry: a few mappings, however many
 	// functions the runtime compiles.
 	arena *jit.Arena
@@ -1204,7 +1196,7 @@ func jitCapBytes[T any](s []T) int {
 func (e *jitEntry) learnedBytes() int {
 	n := jitCapBytes(e.failed) + jitCapBytes(e.failedEntries) + jitCapBytes(e.resumed) + jitCapBytes(e.bigints) + jitCapBytes(e.bigwide) + jitCapBytes(e.literals) + jitCapBytes(e.poly) + jitCapBytes(e.typedReads) +
 		jitCapBytes(e.stringReads) + jitCapBytes(e.keyedReads) + jitCapBytes(e.keyedWrites) + jitCapBytes(e.strSites) + jitCapBytes(e.bigSites) + jitCapBytes(e.numSites) + jitCapBytes(e.boolSites) + jitCapBytes(e.nativeCalls) + jitCapBytes(e.inlines) + jitCapBytes(e.notInline) +
-		jitCapBytes(e.regCallers) + jitCapBytes(e.callSites) + jitCapBytes(e.settling) + e.calls.bytes()
+		jitCapBytes(e.regCallers) + jitCapBytes(e.callSites) + jitCapBytes(e.settling)
 	for i := range e.poly {
 		p := &e.poly[i]
 		n += jitCapBytes(p.cases) + jitCapBytes(p.reads) + jitCapBytes(p.adds) + jitCapBytes(p.missed)

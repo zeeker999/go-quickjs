@@ -353,15 +353,12 @@ func (r *Runtime) jitRegForwardMade(ctx *abi.Context, idx int, run jitRegRun, rp
 	r.noteRegGoCall(regAt(c.code, rpc), false, target)
 	f.pc = regSrc(c, rpc) + 1
 	last, shared := s.ssaCtx, s.ssaSharedGen
-	goCallDepth := s.goCallDepth
-	s.goCallDepth = r.frameDepth + 1
 	// A copy: a native call's next call writes the context over.
 	i, n := len(r.argStack), len(args)
 	r.argStack = append(r.argStack, args...)
 	v, err := r.applyCall(target, this, r.argStack[i:i+n:i+n])
 	clear(r.argStack[i:])
 	r.argStack = r.argStack[:i]
-	s.goCallDepth = goCallDepth
 	s.ssaCtx = last
 	if s.ssaSharedGen != shared {
 		r.jitShareContexts(idx, f)

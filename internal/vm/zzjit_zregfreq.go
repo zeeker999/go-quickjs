@@ -3,13 +3,17 @@
 package vm
 
 import (
+	"math"
+
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
+	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
 
-// Call frequency for register code, as V8's feedback has it and the stack
-// form's tiers count it (zzjit_frequency.go): how often a call site calls
-// for each run of its function. The feedback dispatcher counts it
+// Call frequency for register code, as V8's feedback has it, which V8's
+// inliner orders its candidates by and cuts them at
+// (ssa.FrequencyFeedback): how often a call site calls for each run of its
+// function. The feedback dispatcher counts it
 // (internal/vm/internal/nativegen, feedback.go), the dispatcher of a
 // runtime that runs the JIT, into its function's closure's code's
 // jitRegCounts -- slot 0 its runs, ended by a return the interpreter
@@ -19,6 +23,16 @@ import (
 // its returns, as V8's optimized code counts none. A run on-stack
 // replacement takes into native code ends at a return of the
 // interpreter's (jitRegLoop), and counts.
+
+// jitCountsEnough is how many of a function's runs are counted before its
+// frequencies are known (Frequency): the fewest in which a call made at
+// V8's minimum frequency (ssa.MinInliningFrequency, 0.05) is made at least
+// once 19 times in 20, 59 runs, so that a call counted none of the times is
+// cold. A function compiled after fewer -- by on-stack replacement at a
+// long loop, its first runs, or for a native caller -- has its calls
+// ordered as before they were counted (ssa's inlineOrder). V8's optimizing
+// compiler reads its feedback after its tier-up budget, rarely so few.
+var jitCountsEnough = uint32(math.Ceil(math.Log(0.05) / math.Log(1-ssa.MinInliningFrequency)))
 
 // jitRegCountsMake makes cc's counts for its register code's calls sites
 // sites calls, where the runtime runs the JIT: from its call sites' first
