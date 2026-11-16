@@ -122,9 +122,9 @@ func TestRegOutputIsWhole(t *testing.T) {
 			switch f.Kind() {
 			case reflect.Slice:
 				f.Set(reflect.Append(f, reflect.New(f.Type().Elem()).Elem()))
-			case reflect.Int:
+			case reflect.Int, reflect.Int32:
 				f.SetInt(f.Int() + 1)
-			case reflect.Uint32:
+			case reflect.Uint8, reflect.Uint32:
 				f.SetUint(f.Uint() + 1)
 			case reflect.Bool:
 				f.SetBool(!f.Bool())

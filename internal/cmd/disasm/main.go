@@ -180,8 +180,8 @@ func (p *printer) header(fn *bytecode.Function, indent string) {
 	if fn.ForwardsArguments {
 		traits = append(traits, "forwards arguments")
 	}
-	if l := leaves[fn.Leaf]; l != "" {
-		traits = append(traits, "leaf "+l)
+	if rc := fn.RegCode(); rc != nil && leaves[rc.Leaf] != "" {
+		traits = append(traits, "leaf "+leaves[rc.Leaf])
 	}
 	at := ""
 	if fn.Script != nil {

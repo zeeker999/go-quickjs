@@ -1207,15 +1207,10 @@ func (r *Runtime) jitFillLiteral(l *jitLiteral) {
 	src := (*jitPoolSource)(pool.Source)
 	if src != nil && src.sharedOf != nil {
 		// A literal of constants: its arrays as the interpreter makes them,
-		// each whole (sharedLiteralArray).
+		// each whole (sharedShare).
 		for i := range int(pool.Size) {
-			var a *Object
-			if src.sharedReg {
-				ic := &src.sharedOf.ic[src.sharedPC]
-				a = sharedShare(r, ic, ic.p1)
-			} else {
-				a = sharedLiteralArray(r, src.sharedOf, int(src.sharedPC))
-			}
+			ic := &src.sharedOf.ic[src.sharedPC]
+			a := sharedShare(r, ic, ic.p1)
 			r.ensureShape(a)
 			pool.Objects[i] = unsafe.Pointer(a)
 		}
@@ -3964,16 +3959,14 @@ type jitPoolSource struct {
 	root *shape
 	n    int
 	// array marks an array literal's pool; results, a call of next's pool
-	// of result objects (jitFillResults); sharedPC, with sharedOf, an
-	// array literal of constants whose arrays share them, made whole
-	// (sharedLiteralArray) -- or, with sharedReg, register code's
-	// new_array_k's, sharedPC its site's index in sharedOf's caches
-	// (jitRegSharedLiteral). The four share a word.
-	array     bool
-	results   bool
-	sharedReg bool
-	sharedPC  int32
-	lit       *bytecode.Constant
+	// of result objects (jitFillResults); sharedPC, with sharedOf, register
+	// code's new_array_k of constants whose arrays share them, made whole,
+	// sharedPC its site's index in sharedOf's caches (jitRegSharedLiteral).
+	// The three share a word.
+	array    bool
+	results  bool
+	sharedPC int32
+	lit      *bytecode.Constant
 	// A closure's (jitFillClosures): its template, the function it is made
 	// in and that function's closures' environment.
 	tmpl Value
