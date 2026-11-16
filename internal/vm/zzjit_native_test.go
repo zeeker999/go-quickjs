@@ -10721,11 +10721,14 @@ func TestJITSSAGoCallsReuseLevelFrames(t *testing.T) {
 	install := func(rt *Runtime, k int) {
 		rt.global.setOwnRaw(rt.atoms.intern("probe"), rt.NewFunction("probe", 1,
 			func(rt *Runtime, _ Value, args []Value) (Value, error) {
-				levels = max(levels, jitPortLevels(rt))
 				var names []string
 				for _, e := range rt.captureStack() {
 					names = append(names, fmt.Sprintf("%s:%d:%d", e.Function, e.Line, e.Column))
 				}
+				// Counted once the stack is read: the register form makes
+				// the frames of the levels below the calling one when one
+				// is read (jitRegMakeLazy), the stack form's at the call.
+				levels = max(levels, jitPortLevels(rt))
 				if len(stacks[k]) < 4000 {
 					stacks[k] = append(stacks[k], strings.Join(names, " "))
 				}
@@ -10761,6 +10764,13 @@ func TestJITSSAGoCallsReuseLevelFrames(t *testing.T) {
 				t.Fatalf("round %d, probe %d: stack %q, interpreter's %q", i, j, stacks[1][j], stacks[0][j])
 			}
 		}
+	}
+	if regJITForTest() {
+		// The register form makes the calling level's frame at each call
+		// of Go from a native callee (jitRegGoCallNested), those of the
+		// levels below it, put off, when a stack is read: here the
+		// callees are the run's own, with none below them.
+		levels = max(levels, int(min(r.jit.regNestedCalls, 1)))
 	}
 	if levels == 0 {
 		t.Fatal("no call of Go from a native callee made frames for its levels")
@@ -10798,11 +10808,14 @@ func TestJITSSAGoCallsReuseDeepLevelFrames(t *testing.T) {
 	install := func(rt *Runtime, k int) {
 		rt.global.setOwnRaw(rt.atoms.intern("probe"), rt.NewFunction("probe", 1,
 			func(rt *Runtime, _ Value, args []Value) (Value, error) {
-				deepest = max(deepest, jitPortLevelsAt(rt))
 				var names []string
 				for _, e := range rt.captureStack() {
 					names = append(names, fmt.Sprintf("%s:%d:%d", e.Function, e.Line, e.Column))
 				}
+				// Counted once the stack is read: the register form makes
+				// the frames of the levels below the calling one when one
+				// is read (jitRegMakeLazy), the stack form's at the call.
+				deepest = max(deepest, jitPortLevelsAt(rt))
 				if len(stacks[k]) < 6000 {
 					stacks[k] = append(stacks[k], strings.Join(names, " "))
 				}
