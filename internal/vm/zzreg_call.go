@@ -542,6 +542,11 @@ func regMadeClosure(o *Object) *Object {
 		}
 		if atomic.LoadPointer(&fd.closure.fn.VMCode) != nil {
 			planCall(fd)
+			// A pure body's too, which planCall leaves undecided for
+			// pureCall: a closure register code makes enters its code at
+			// once (regPlan), whose callers -- a built-in's callback above
+			// all -- then run the code the JIT learns from and compiles.
+			regPlan(fd)
 		}
 	}
 	return o
