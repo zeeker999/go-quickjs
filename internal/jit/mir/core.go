@@ -2237,7 +2237,14 @@ func (c *core) allocate() error {
 				if sp = sp && w < aCost[i]; sp {
 					ac = float64(w)
 				}
-				if d := float64(ac*vr) - float64(vc*ar); d < 0 || d == 0 && e > victim.end {
+				// Of those alike, a split first, whose register goes with
+				// nothing loaded back -- no use but frame states' is
+				// ahead of it -- then the one ending last: ending last,
+				// a value the turn still read twice had been spilled
+				// whole beside one only frame states read, at the same
+				// cost for the length each gave up (a BigInt's
+				// xorshift, register code's, its number unboxed).
+				if d := float64(ac*vr) - float64(vc*ar); d < 0 || d == 0 && (sp && !split || sp == split && e > victim.end) {
 					victim, vi, vc, vr, split = active[i], i, ac, ar, sp
 				}
 			}

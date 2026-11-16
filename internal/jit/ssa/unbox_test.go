@@ -321,11 +321,10 @@ func TestShadowsMadeOnce(t *testing.T) {
 // Optimize unboxes phis at the start of a round, so that the boxes it
 // makes cancel in the same round's walk: a function is mostly done in two
 // rounds, the second finding nothing, not three. A loop of register code
-// tests at its foot, its test copied before it, so the number it carries
-// out meets the way around it in a phi after it, whose box the header's
-// phi uses too: that phi is unboxed a round after the header's, once the
-// box is its alone (unboxPhis' merged), and eight of the corpus's ten
-// loops take three rounds. The corpus takes 30 rounds.
+// tests at its foot, and the number it carries out meets the way around
+// it in a phi whose box the loop header's phi uses too: unboxed in the
+// same round as the header's (unboxPhis' merged). The corpus takes 24
+// rounds.
 func TestOptimizeRounds(t *testing.T) {
 	rounds := 0
 	for _, src := range jsCorpus {
@@ -333,7 +332,7 @@ func TestOptimizeRounds(t *testing.T) {
 		Optimize(f)
 		rounds += f.rounds
 	}
-	if rounds > 30 {
+	if rounds > 2*len(jsCorpus)+2 {
 		t.Errorf("%d rounds for %d functions", rounds, len(jsCorpus))
 	}
 }

@@ -141,7 +141,7 @@ func TestMirPhisCoalesced(t *testing.T) {
 	// had taken the total to 156, 130 into headers): 159, 133, 9.
 	// Register code's programs (the compile package's LowerReg), two
 	// lowerings of each function where the stack form had three, and
-	// loops that test at their foot, their test copied before them: 110,
+	// loops that test at their foot, their test copied before them: 106,
 	// 70, 12. The keep corpus spills its 8 as before; the loop of
 	// x=-0,y=NaN,z=Infinity none, where it had spilled 1; and
 	// array_for_of 2 in each lowering, where it had none: its inner loop
@@ -149,7 +149,7 @@ func TestMirPhisCoalesced(t *testing.T) {
 	// of Go, across which its values -- the array, the cursor, the
 	// cursor's call's cell and the constants' source among them, all
 	// phis there -- outlive the call, in more registers than are free.
-	if total > 110 || loops > 70 || spills > 12 {
-		t.Errorf("%d edge moves, %d into loop headers, %d values spilled: want at most 110, 70, 12", total, loops, spills)
+	if total > 108 || loops > 70 || spills > 12 {
+		t.Errorf("%d edge moves, %d into loop headers, %d values spilled: want at most 108, 70, 12", total, loops, spills)
 	}
 }

@@ -1134,11 +1134,12 @@ any use, where the phi merges nothing but numbers and unboxing it speculates
 nothing, as V8's representation selection takes a phi of Float64 inputs --
 its box made where a use outside the loop needs it, or by an exit
 (`unboxPhis`, `sinkLoopBoxes`). A phi of boxes of float64s, numeric
-constants and entry slots a guard unboxes already, each box used by the phi
-alone, is a float64 with no other evidence: its box is made once where it
-is, not on each way to it -- a register loop ends where the copy of its
-test ends too, and a sum it carries past its end had been boxed at every
-turn for that phi.
+constants and entry slots a guard unboxes already, each box used by phis
+of numbers alone, it among them, is a float64 with no other evidence: its
+box is made once where it is, not on each way to it -- a register loop ends
+where the copy of its test ends too, and a sum it carries past its end had
+been boxed at every turn for that phi. The box the loop header's phi takes
+at its back edge is that phi's too, so both are unboxed in one round.
 
 **Integers.** The slot IR computes every number as a double, a bitwise
 operator's ToInt32 of its operands and the conversion of its result back
@@ -1813,7 +1814,8 @@ a value carried round a loop keeps one. Where no register is free, the scan
 spills the interval whose cost in a slot is least for what spilling it frees
 -- the rest of it, from the new interval's start, each position weighed as
 its block -- as LLVM's linear scan weighed intervals by their uses'
-frequency over their length; of those alike, the one that ends last. A
+frequency over their length; of those alike, one it splits (below), which
+loads nothing back, and then the one that ends last. A
 budget loop's register goes first, its loop then counting in memory. A phi's
 edge move to a slot its phi or argument already holds, and may share, costs
 nothing, and so is taken off the cost of that value in a slot (`inSlot`):
