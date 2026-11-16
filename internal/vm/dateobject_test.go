@@ -3,7 +3,7 @@ package vm
 import "testing"
 
 // TestDateObjects pins Date objects made with their date in the same
-// allocation, on both tiers: each form of the constructor, a copy that is
+// allocation: each form of the constructor, a copy that is
 // then changed apart from its original, a subclass, a prototype from
 // Reflect.construct, coercion, an invalid date, and the function called
 // rather than constructed. The answers are Node's, in any time zone.

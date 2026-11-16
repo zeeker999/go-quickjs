@@ -4,7 +4,7 @@ import "testing"
 
 // TestBigIntResultRooms pins sums, differences and products whose digits are
 // kept in the BigInt's own allocation, sized 4, 8 or 16 words, or on their
-// own past that, on both tiers: operands either side of each size's edge,
+// own past that: operands either side of each size's edge,
 // negative ones, and microbench's sum of squares. The answers are Node's.
 func TestBigIntResultRooms(t *testing.T) {
 	t.Parallel()

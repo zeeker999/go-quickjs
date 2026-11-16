@@ -48,15 +48,15 @@ type generator struct {
 	this   Value
 	callee *Object
 
-	// vals is the arguments, nargs of them, and then the locals: see args
-	// and locals. It is heap-allocated so that upvalues captured by closures
-	// created inside the generator survive suspension.
+	// vals is the frame's window, the code's registers, and then the
+	// arguments the code keeps, nargs of them (newRegGenerator). It is
+	// heap-allocated so that what the frame holds survives suspension.
 	vals  []Value
 	pc    uint32
 	nargs uint32
-	// saved is what the last suspension left besides its place -- the
-	// operands, the handlers in force, the captures -- or nil where it has
-	// never left any (see keep).
+	// saved is what a suspension of the stack form's frames left besides
+	// its place (see keep): nil, as nothing calls keep, though native code
+	// still reads it (abi's GenSaved).
 	saved *genSaved
 	// rare is what only some generators need, or nil.
 	rare *genRare
@@ -78,7 +78,8 @@ type generator struct {
 	// loop over it, which no loop has taken yet (see genAlloc).
 	room bool
 	// reg marks a generator whose body runs as register code, its vals
-	// the frame's window and its pc a register pc (zzreg_zgen.go).
+	// the frame's window and its pc a register pc (zzreg_zgen.go): every
+	// generator newGenerator makes.
 	reg bool
 	// awaitJob marks an async function its await's job is resuming, from
 	// the job queue itself (resumeAwait): an await of a settled value

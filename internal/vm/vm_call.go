@@ -5,8 +5,8 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/jsnum"
 )
 
-// Calls and frames: what a call from the interpreter's loop, from a tree or
-// from a built-in goes through to run a function, and the frames it makes.
+// Calls and frames: what a call from the interpreter's loop or from a
+// built-in goes through to run a function, and the frames it makes.
 // Kept with the rest of the hot path; see the package comment.
 
 // call invokes a callable value.
@@ -149,17 +149,16 @@ func (r *Runtime) pushNativeFrame(o *Object, this Value, args []Value, newTarget
 }
 
 // callDirect is call for the engine's own calls of what is most often a
-// compiled function: the interpreter's and the tree tier's call
-// instructions, f.call(...), a bound function's target, a getter or setter
-// a property cache remembers, and the callbacks built-ins call once per
-// element: sort's, forEach's, map's and the other array methods', the
-// iterator helpers', Map's and Set's forEach, groupBy's, Array.from's and
-// %TypedArray%.from's mapping, replace's function, JSON's replacer and
-// reviver. What call would find out
+// compiled function: the interpreter's call instructions, f.call(...), a
+// bound function's target, a getter or setter a property cache remembers,
+// and the callbacks built-ins call once per element: sort's, forEach's,
+// map's and the other array methods', the iterator helpers', Map's and Set's
+// forEach, groupBy's, Array.from's and %TypedArray%.from's mapping,
+// replace's function, JSON's replacer and reviver. What call would find out
 // through callObject and callClosure, it asks in one place, in this order:
 //
-//   - a function planTreeCall has given a tree is called on it, by
-//     callTree;
+//   - a function regPlan has given its register code is called on it, by
+//     regDirect;
 //   - a Math function given numbers is applied here, without a frame;
 //   - Function.prototype.call is made by callThrough;
 //   - a compiled function of this realm that runs when called -- not a
@@ -167,13 +166,14 @@ func (r *Runtime) pushNativeFrame(o *Object, this Value, args []Value, newTarget
 //     which a call refuses, not bound -- is run directly: a pure body by
 //     pureCall, and a leaf that reads or writes its this by leafCall,
 //     without a frame where they can, and otherwise by runFD, after which
-//     planTreeCall decides about it;
+//     planCall decides about it;
 //   - a built-in of this realm is called in a native frame.
 //
 // Anything else is called as call calls it.
 //
-// callRest, which a tree's call node asks once it has made the first test
-// itself, repeats every case after it: a change to one is a change to both.
+// callRest, which the register interpreter's calls ask once they have made
+// the first test themselves, repeats every case after it: a change to one
+// is a change to both.
 func (r *Runtime) callDirect(callee, this Value, args []Value) (Value, error) {
 	if callee.IsObject() {
 		o := callee.Object()
@@ -294,8 +294,8 @@ func (r *Runtime) callThrough(call *Object, f Value, args []Value) (Value, error
 // applyCall is target.apply(this, arguments) by the built-in apply, given
 // the arguments themselves: apply's frame is pushed, as the built-in would
 // have it, and target called with them -- as a call from the interpreter's
-// loop is made, by callDirect, so that a function called this way is given
-// its tree's call (planTreeCall) like any other.
+// loop is made, by callDirect, so that a function called this way is
+// planned (planCall) like any other.
 func (r *Runtime) applyCall(target, this Value, args []Value) (Value, error) {
 	// apply's own arguments are what its frame records, which is all they
 	// are for: they are kept on the runtime's argument stack rather than

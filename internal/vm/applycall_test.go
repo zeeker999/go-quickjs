@@ -8,9 +8,7 @@ import (
 // constructor that is only this.initialize.apply(this, arguments), which
 // leafForward answers -- calling the target as a call from the loop does:
 // the result, this, the arguments, a primitive this boxed for a sloppy
-// target, a class constructor refused, an exception's stack, and, in the
-// tree tier, the target given its tree's call (planTreeCall), which r.call
-// never gave it.
+// target, a class constructor refused, and an exception's stack.
 func TestApplyArgumentsCallsDirectly(t *testing.T) {
 	t.Parallel()
 	const src = `
@@ -55,8 +53,7 @@ func TestApplyArgumentsCallsDirectly(t *testing.T) {
 // on the prototype, an own method, Function.prototype.apply patched and
 // restored, a method with an apply of its own, a bound method, a proxy as
 // the prototype, the prototype replaced, and a throw's stack through the
-// forwarder. The answers are Node's; the stack interpreter, the tree tier
-// and register code each give them.
+// forwarder. The answers are Node's.
 func TestForwarderMethodsByShape(t *testing.T) {
 	const src = `
 		var Class = { create: function() { return function() { this.initialize.apply(this, arguments); }; } };

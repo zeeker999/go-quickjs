@@ -5,8 +5,7 @@ import "testing"
 // A negative int32 literal an operator takes is an immediate (the
 // compiler's fuse): x + -8 of a number, a string and an object, x - -8, a
 // shift by -1, which shifts by 31, and x >>> -30, by 2, with x === -1 and
-// x < -1 beside them; -0 stays -0. The answers are the interpreter's and
-// the trees' alike, and Node's.
+// x < -1 beside them; -0 stays -0. The answers are Node's.
 func TestNegativeIntLiteral(t *testing.T) {
 	t.Parallel()
 	src := `

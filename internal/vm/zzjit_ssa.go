@@ -214,11 +214,11 @@ var jitEncoding = abi.Encoding{
 }
 
 // jitMaxDeopts is how many eager deoptimizations a function's code makes,
-// each invalidating it (jitInvalidate), before the function is compiled no
-// more and runs in the existing tiers for good, as V8 gives up optimizing
+// each invalidating it (jitRegInvalidate), before the function is compiled
+// no more and runs in the interpreter for good, as V8 gives up optimizing
 // a function that keeps deoptimizing. Each compile meanwhile waits for the
-// existing tiers' budget, and for its caches' feedback to have settled
-// (jitTierUp): a function whose feedback has settled deoptimizes no more,
+// interpreter's budget, and for its caches' feedback to have settled
+// (jitRegWarmUp): a function whose feedback has settled deoptimizes no more,
 // and one meeting new shapes in phases -- a compiler's walking a syntax
 // tree of new kinds of node -- deoptimizes about once a phase.
 const jitMaxDeopts = 64
@@ -240,7 +240,7 @@ type jitPolySite struct {
 	accessors []jitAccessorCase
 	// mega marks a read that met what no case holds, which the
 	// megamorphic cache has (ssa.PropertySite's Megamorphic), or a site
-	// that met what the code cannot use (jitDeoptSeen); missed are the
+	// that met what the code cannot use (jitRegDeoptSeen); missed are the
 	// receivers' shapes the site deoptimized for, each with the compile of
 	// the code that did (jitEntry's ssaSerial).
 	mega   bool
@@ -407,8 +407,7 @@ func (r *Runtime) jitPolySeenOp(e *jitEntry, pc int, op jitPropOp) {
 		if c := op.c; (c.shape == nil || c.shape == noShape) && c.fills == 0 && r.proto.str != nil && r.proto.str.findOwn(op.key) >= 0 {
 			// An object's method, at a read the code took for a string's
 			// (jitFeedback's StringProperty), its cache knowing nothing: a
-			// loop the tree tier ran before it was compiled, a function
-			// run once, leaves no read in the interpreter's cache. The
+			// function run once leaves no read in the interpreter's cache. The
 			// cache takes the receiver, as the interpreter's read would
 			// have, and the code is compiled again for its shape; it had
 			// left there at every entry, and was judged slow for it.
@@ -606,8 +605,8 @@ func (r *Runtime) jitDeoptSeenOp(e *jitEntry, pc int, op jitPropOp, serial uint3
 		// up is megamorphic.
 		return
 	}
-	// The site's cache learns the receiver's shape here, as the tree
-	// tier's read would teach it (ownScan, cachedGet): the interpreter,
+	// The site's cache learns the receiver's shape here, as a cached read
+	// would teach it (ownScan, cachedGet): the interpreter,
 	// which makes the read after, reads an object's small table without
 	// it (plainOwn).
 	if c.holder(o) == nil {
@@ -982,7 +981,7 @@ type jitDeepSeen struct {
 // object whose prototype chain is deeper than a cache holds, which the
 // cache cannot remember -- a constructor's this.x = v in a class two levels
 // below another, as DeltaBlue's constraints' are -- for code compiled for
-// the site to make it natively from the first (jitSeenFeedback). Before,
+// the site to make it natively from the first (jitRegSeenFeedback). Before,
 // native code learned such additions one exit and one compile at a time:
 // a constructor's at each of its sites in turn, for each of its receivers'
 // shapes.
@@ -1043,10 +1042,9 @@ func (r *Runtime) jitSeenSite(e *jitEntry, pc int, cache *propCache, write bool,
 		return
 	}
 	seen, now := cache.seenOf(), cache.shape
-	// What the site remembers besides its entry (poly), which every
-	// tier's reads and writes fill -- the tree's scans of an object's
-	// own table too, which note nothing in seen -- and what it met
-	// before that (seen), in that order. A chain's cell is no entry the
+	// What the site remembers besides its entry (poly), which the
+	// interpreter's reads and writes fill, and what it met before that
+	// (seen), in that order. A chain's cell is no entry the
 	// code is compiled for (megamorphic). Taken where they are: copied
 	// into a list of their own, they had been most of what a register
 	// compile's asks of its inlined callees allocated.
@@ -1147,7 +1145,7 @@ type jitLiteral struct {
 }
 
 // jitLiteralRoom bounds the room learned from one array result. Larger
-// buffers inherit the tree tier's confirmed length (jitLiteralArrayRoom).
+// buffers inherit the interpreter's confirmed length (jitLiteralArrayRoom).
 const jitLiteralRoom = 64
 
 // jitObjectLiteral is the object literal at pc of cl's code, of either
@@ -1232,7 +1230,7 @@ func (r *Runtime) jitFillLiteral(l *jitLiteral) {
 	n := l.n
 	src := (*jitPoolSource)(pool.Source)
 	if src != nil && src.sharedOf != nil {
-		// A literal of constants: its arrays as the tree tier makes them,
+		// A literal of constants: its arrays as the interpreter makes them,
 		// each whole (sharedLiteralArray).
 		for i := range int(pool.Size) {
 			var a *Object
@@ -1309,17 +1307,17 @@ func (r *Runtime) jitFillClosures(pool *abi.ObjectPool, tmpl Value, fn *bytecode
 // of the reasons jitReoptimize takes: what it learned at its exits to make
 // natively -- a speculation that failed, a shape, a call to inline, a
 // callee that inlines more -- or that it leaves too often called natively.
-// Code whose guard failed is invalidated (jitInvalidate) and compiled
-// again on the existing tiers' budget (jitTierUp); code that learned
+// Code whose guard failed is invalidated (jitRegInvalidate) and compiled
+// again on the interpreter's budget (jitRegWarmUp); code that learned
 // runs on, and is compiled again once it has spent a budget itself
-// (jitLearnedDue).
+// (jitRegLearnedDue).
 func (e *jitEntry) reoptPending() bool {
 	return e.reopt || e.inlineReopt || e.polyReopt || e.upgradeReopt || e.unwindReopt || e.resumeReopt
 }
 
 // jitLearnedMark is jitFeedbackMark of cl's caches with what e's code has
 // learned at its exits counted in: a change of either delays the compile
-// for it (jitLearnedDue), as V8's NotifyICChanged does.
+// for it (jitRegLearnedDue), as V8's NotifyICChanged does.
 func jitLearnedMark(cl *closure, e *jitEntry) uint64 {
 	return jitFeedbackMark(cl) + uint64(jitLearnedCount(e))*0x9e3779b97f4a7c15
 }
@@ -1404,7 +1402,7 @@ var jitKeepLimit int
 // are: prepared on the runtime's goroutine (jitPrepare), which builds the
 // function from what the runtime knows; worked (work), the optimization
 // and the backend, which read and write the job and nothing of the
-// runtime's; installed on the runtime's goroutine again (jitInstall),
+// runtime's; installed on the runtime's goroutine again (jitRegInstall),
 // which takes what the work found into the feedback and places the code.
 type jitJob struct {
 	fn *bytecode.Function
@@ -1446,19 +1444,20 @@ type jitJob struct {
 	allocErr *mir.AllocationError
 	// held marks a compile held for its callees' (jitHold), which is no
 	// job's yet and will be another's: holdRound is how many times it has
-	// been, nativeCallee marks a compile for native callers (jitNativeCallee),
-	// and frameAt is what a frame waits at for it (jitFrameAt).
+	// been, nativeCallee marks a compile for native callers
+	// (jitRegNativeCallee), and frameAt is what a frame waits at for it
+	// (jitRegFrameAt).
 	held, nativeCallee bool
 	holdRound          int
 	frameAt            int
-	// What a compile in the background (jitSubmit) needs besides: its
+	// What a compile in the background (jitRegSubmit) needs besides: its
 	// state, which the worker and the runtime's goroutine hand it over by,
 	// and done, closed once the worker is finished with it; how many
 	// checks it has waited (jitDrain); what installs it on the runtime's
 	// goroutine, reporting false to be asked again at a later check
 	// (jitCompiled, jitReoptimized); and, for a compile again, the
 	// entry's deoptimizations when it was built and whether it has
-	// decided calls (jitReoptimize's learned).
+	// decided calls (jitRegReoptimize's learned).
 	state   atomic.Int32
 	done    chan struct{}
 	checks  int
@@ -1567,7 +1566,7 @@ type jitFeedback struct {
 	pools      []*abi.ObjectPool
 	// made are the templates of the closures the code may not make, the
 	// loops' callbacks inlined where their callers make them (ForEachSite's
-	// Made), which an exit's frame names in their places (jitMaterialize);
+	// Made), which an exit's frame names in their places (jitRegMaterialize);
 	// callbacks and unmade how many the code inlines, and does not make
 	// (ssa.Func's Callbacks and Unmade).
 	made              []*closure
@@ -1778,7 +1777,7 @@ type jitInline struct {
 	// String.prototype's substring, slice, substr or charAt (jitSubstrings).
 	push, pop, charCode, fromChar, substring bool
 	// forEach marks a call of Array.prototype.forEach, or another of
-	// jitLoops, on an array (jitForEaches), cb the closure of the callback
+	// jitLoops, on an array (jitRegForEachSeen), cb the closure of the callback
 	// it was given and cbObj its function object.
 	forEach bool
 	cb      *closure
@@ -1796,7 +1795,7 @@ type jitInline struct {
 	// native code made without a frame (jitLeafSeen).
 	parseInt, indexOf, bigString, leaf bool
 	// byCode marks a function the call met two objects of, closures its
-	// maker makes anew at each call: called by its code (jitSameCode).
+	// maker makes anew at each call: called by its code (jitRegSameCode).
 	byCode bool
 	// forward marks a forwarding call's function, f of an
 	// apply_arguments, f.apply(x, arguments) (ssa.CallSite's Forward):
@@ -1808,14 +1807,14 @@ type jitInline struct {
 	// last compiled for (jitForwardMethod).
 	fwd *Object
 	// parent, for a construction with a class whose constructor is the
-	// one a class without one has (jitDerivedBase), is the class it
+	// one a class without one has (jitRegDerivedBase), is the class it
 	// extends, whose constructor cl is: the call checks obj's prototype is
 	// still it (ssa.CallSite's Parent).
 	parent *Object
 	// active, for a super() native code makes, is the class whose
 	// constructor's super() it is, whose prototype obj is: the parent,
 	// which cl's code -- obj's, or, obj a class with no constructor of its
-	// own, parent's -- constructs with (jitSuperTarget).
+	// own, parent's -- constructs with (jitRegSuperTarget).
 	active *Object
 }
 
@@ -1834,7 +1833,7 @@ const (
 )
 
 // What jitCallSeen knows of a call (jitEntry.callSites), past its count: that
-// it waits for its callee, too long to inline, to be compiled (jitCallSeen),
+// it waits for its callee, too long to inline, to be compiled (jitRegCallSeen),
 // that it is made natively, that it is neither that nor inlined, or that it
 // is inlined.
 const (
@@ -2242,7 +2241,7 @@ func jitHostCall(ctx *abi.Context) bool {
 				// call of Go, say, which an exit would have counted: its
 				// loop leaves at the header (abi.ExitPoll), where the
 				// stretch's work is counted toward the code's budget
-				// (jitLearnedDue) and the code compiled again once it is
+				// (jitRegLearnedDue) and the code compiled again once it is
 				// spent, as V8's back edges spend its interrupt budget.
 				// Never leaving, a loop that ran a whole invocation natively
 				// -- each of microbench's tests -- counted none of its work,
@@ -2308,15 +2307,15 @@ type jitGoRun struct {
 	e    *jitEntry
 	code *jit.SSACode
 	// inlined are the closures code inlines (jitEntry's ssaInlined), whose
-	// frames Go makes at an exit inside one (jitUnwindNative): e's lists
+	// frames Go makes at an exit inside one (jitRegUnwind): e's lists
 	// are another code's once e is compiled again while the run goes on
-	// (jitReoptimize), and code's, closed once its native code has left,
+	// (jitRegReoptimize), and code's, closed once its native code has left,
 	// keep nothing.
 	inlined []*closure
 	pinned  bool
 	// pinnedAt is where its pins start in goPinned: its own code, then
 	// that of the native callees whose calls of Go it is suspended in
-	// (jitGoCallNested), all released when its native code leaves. serial
+	// (jitRegGoCallNested), all released when its native code leaves. serial
 	// names those pins: no other run's, nor this run's after they are
 	// released, have it (jitState's pinSerial).
 	pinnedAt int
@@ -2346,7 +2345,7 @@ func (r *Runtime) jitGoUnpin(idx int) {
 // jitGoPending is a call Go made from native code and left native code
 // after (jitGoCall): at its exit, Go puts its result, or throws. ctx is the
 // level of the code that made it: a run's own, or a native callee's
-// (jitGoCallNested), which Go finishes at its exit (jitFinishExit).
+// (jitRegGoCallNested), which Go finishes at its exit (jitRegLeft).
 type jitGoPending struct {
 	set bool
 	pc  int
@@ -2385,8 +2384,8 @@ func (s *jitState) closeSSA(code *jit.SSACode, keep any) error {
 }
 
 // jitGoCall makes, for native code, the call at its exit PC, from the
-// operands it passed (ssa.GoCall), as an exit there would have Go make it
-// (jitCallAt): the operands past the VM's stack's top, which the call
+// operands it passed (ssa.GoCall), as an exit there would have Go make it:
+// the operands past the VM's stack's top, which the call
 // leaves above them -- not in the frame's own operand slots, where native
 // code may read a value it never loaded -- its result in the call's keep
 // cell. Native code goes on, as V8's goes on
@@ -2427,7 +2426,7 @@ func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
 
 // jitGoPropertyAt reports whether a call of Go, in, may be made at pc of
 // fn: a property's read or write only where fn's instruction there is one
-// (jitPropertyMade), which reads it; any other call anywhere.
+// (jitRegPropertyMade), which reads it; any other call anywhere.
 func jitGoPropertyAt(fn *bytecode.Function, pc int, in bytecode.Instr) bool {
 	switch in.Op {
 	case bytecode.OpSetProp:
@@ -2461,7 +2460,7 @@ func (r *Runtime) jitRunFrame(ctx *abi.Context) *frame {
 // captured of those locals, which its context keeps (calleeOpen) -- none
 // once its context's Open says so, as a native call clears it. Its code
 // closes them as it returns, and Go gives them to the frame it makes of
-// the callee if it finishes it (jitUnwindNative). Or nil.
+// the callee if it finishes it (jitRegUnwind). Or nil.
 func (r *Runtime) jitCalleeFrame(ctx *abi.Context) *frame {
 	s := r.jit
 	cl := (*closure)(ctx.Closure)
@@ -2511,7 +2510,7 @@ func jitCellsOf(ctx *abi.Context, fn *bytecode.Function) []*upvalue {
 // closed, holding its parameter's argument or undefined, as the frame's
 // slot is at the call: what a closure captures, and native code reads and
 // assigns, from then on, and what Go puts in the frame it makes if the
-// callee leaves native code (jitReopenCells).
+// callee leaves native code (jitRegReopenCells).
 func (r *Runtime) jitMakeCells(ctx *abi.Context) bool {
 	if f := r.jitRunFrame(ctx); f != nil {
 		fn := f.cl.fn
@@ -2716,10 +2715,9 @@ func jitCalleeMakes(f *frame, c Value) bool {
 }
 
 // jitEntryOf is the entry of cl's function: the one cl's hint names, or,
-// missing that, the cache's, which cl's hint then names, as an entry from
-// Go would have it (tryJITAt). A call of Go from a native callee finds
-// each level's so, at every call: by the cache's weak key, a tenth of
-// RegExp's time went to finding them.
+// missing that, the cache's, which cl's hint then names. A call of Go from a
+// native callee finds each level's so, at every call: by the cache's weak
+// key, a tenth of RegExp's time went to finding them.
 func (r *Runtime) jitEntryOf(cl *closure) *jitEntry {
 	s := r.jit
 	if e := s.hint(cl); e != nil {
@@ -2733,7 +2731,7 @@ func (r *Runtime) jitEntryOf(cl *closure) *jitEntry {
 }
 
 // jitLevels is the frames the last call of Go from a native callee made
-// for its levels (jitGoCallNested), which the next call from the same
+// for its levels (jitRegGoCallNested), which the next call from the same
 // levels, or from those of them it shares, takes as they are, but for
 // their PCs: in the run whose pins serial names (0 for none), from context
 // root on, n of them, above depth. Nothing else makes a frame there while
@@ -2763,7 +2761,7 @@ type jitLevelFrame struct {
 }
 
 // jitGoMark is where the last call of Go a native callee made returned
-// (jitGoCallNested): in which run's pins (serial), the back-edge counter
+// (jitRegGoCallNested): in which run's pins (serial), the back-edge counter
 // then, net of the polls' budgets, and its entry's hint -- which names it
 // without keeping it -- and PC. hint 0 is none yet.
 type jitGoMark struct {
@@ -3237,7 +3235,7 @@ func jitGoCallInstr(op uint64) (bytecode.Instr, int) {
 		return bytecode.Instr{Op: bytecode.OpIterRest}, 1
 	case abi.GoCallGet:
 		// A property's read, of the object, which the instruction at the
-		// call's PC says (jitPropertyMade).
+		// call's PC says (jitRegPropertyMade).
 		return bytecode.Instr{Op: bytecode.OpGetProp, A: uint32(op >> abi.GoOpIndexShift)}, 1
 	case abi.GoCallSet:
 		// A property's write, of the object and the value.
@@ -3511,7 +3509,7 @@ func (r *Runtime) jitTableRead(o *Object, a Atom) (Value, bool) {
 // a key may make evaluate a deferred module, by a key that is no object,
 // whose conversion would call its toString or Symbol.toPrimitive. Any
 // other -- a right operand that is no object, which throws, included -- it
-// refuses (ok false), and Go makes it after an exit (jitHost).
+// refuses (ok false), and Go makes it after an exit.
 func (r *Runtime) jitHas(key, obj Value) (has, ok bool) {
 	if !obj.IsObject() || key.IsObject() {
 		return false, false
@@ -3522,7 +3520,7 @@ func (r *Runtime) jitHas(key, obj Value) (has, ok bool) {
 		// says none, matches no entry native code's probe of hasCache
 		// reads (mir's keyedHas reads the layout's prototype): asked again
 		// by a key hasCache has, it is given a layout of its own holding
-		// its prototype, as the tree's in node gives it (hasCached), which
+		// its prototype, as the interpreter's in gives it (hasCached), which
 		// the entry hasNote then makes for it matches. Without this a loop
 		// asking of such an object called here at every turn.
 		if has, ok := hasCached(r, key, o); ok {
@@ -3554,8 +3552,8 @@ func (r *Runtime) jitHas(key, obj Value) (has, ok bool) {
 	return has, err == nil
 }
 
-// jitDelete is delete obj[key], as the interpreter makes it (executeAt's
-// delete_prop: toPropertyName, keyFor, deleteProp), where making it runs
+// jitDelete is delete obj[key], as the interpreter makes it (regDelete:
+// toPropertyName, keyFor, deleteProp), where making it runs
 // nothing and throws nothing (ssa.GoDelete): an object that is no proxy,
 // whose deleteProperty trap would run, no module namespace, which a key
 // may make evaluate a deferred module, and none whose own properties a
@@ -3567,7 +3565,7 @@ func (r *Runtime) jitHas(key, obj Value) (has, ok bool) {
 // deletion changes it; an array's element becomes a hole, its length
 // unchanged; a property absent is gone already. Any other -- a base that
 // is no object, which throws or converts, included -- it refuses (ok
-// false), and Go makes it after an exit (jitHost). So does a property
+// false), and Go makes it after an exit. So does a property
 // strict code cannot delete, which throws: deleted as sloppy code deletes
 // it, a property that cannot be deleted stays, nothing changed, and the
 // interpreter's deletion throws after the exit.
@@ -3640,7 +3638,7 @@ const jitGlobalEpochs = 64
 const jitLoopDone = ^uint64(0)
 
 // jitMade is a closure Go made at an exit in place of its template, on the
-// frame of the code that did not make it (jitMaterialize).
+// frame of the code that did not make it (jitRegMaterialize).
 type jitMade struct {
 	f *frame
 	t *closure
@@ -3658,10 +3656,9 @@ const jitLoopLocals = 8
 // sort's own, which it clears.
 const jitSortLocals = 9
 
-// jitLoopFinishAt is jitLoopFinish of the loop whose slots begin at at in
-// the VM's stack, f's pc past its call fpc meanwhile: the stack form's
-// frame's operands' past its base, a register frame's past its window and
-// scratch slots (jitRegLoopFinish).
+// jitLoopFinishAt finishes the loop whose slots begin at at in the VM's
+// stack, f's pc past its call fpc meanwhile: past the register frame's
+// window and scratch slots (jitRegLoopFinish).
 func (r *Runtime) jitLoopFinishAt(f *frame, at int, fpc uint32, loop uint64, after bool, v Value, err error) (Value, error) {
 	slots := r.stack[at : at+jitLoopLocals]
 	arr, cb, this, k, n, out, elem, res := slots[0], slots[1], slots[2], slots[3], slots[4], slots[5], slots[6], slots[7]
@@ -3677,7 +3674,7 @@ func (r *Runtime) jitLoopFinishAt(f *frame, at int, fpc uint32, loop uint64, aft
 		// A sort's exit, anywhere in it: Go sorts the array again from the
 		// first, as the built-in sorts it. Nothing the code did shows --
 		// its comparator does nothing a call made again could tell apart
-		// (jitSortComparator), and the array is as it was until the copy
+		// (jitRegSortComparator), and the array is as it was until the copy
 		// the code sorted is written back, which it is in one call of Go
 		// after the last comparison (ssa's sortCall).
 		if fe == nil || !arr.IsObject() {
@@ -3864,7 +3861,7 @@ func (r *Runtime) jitNewTypedResult(form int, recv, n Value) (Value, bool) {
 	// The species its type's own constructor, which makes a view of a
 	// buffer of its own, as one of the type is made here: with no frame,
 	// which would be written over a native callee's level's, still to be
-	// made (jitGoCallNested).
+	// made (jitRegGoCallNested).
 	made := func(length int) (*Object, *typedArrayData, bool) {
 		o := newObject(r.typedArrayProtoFor(t.kind), ClassTypedArray)
 		nt, err := r.allocTypedArrayChecked(o, t.kind, int64(length))
@@ -4126,9 +4123,9 @@ func jitBigString(recv Value, args []Value) (Value, bool) {
 // jitArrayRoom is the room a pooled array of `new Array(n)` is given for a
 // length n (abi.ObjectPool's Room): the least of the sizes newArrayStorage
 // makes an array's elements in its own allocation that n fits, as the
-// existing tiers would make it; past them, the least power of two n fits
-// (abi.PoolSmallRoom), its elements a slice of their own, as the existing
-// tiers make them; or 0 past abi.PoolRoomLimit, the longest n the Array
+// interpreter would make it; past them, the least power of two n fits
+// (abi.PoolSmallRoom), its elements a slice of their own, as the
+// interpreter makes them; or 0 past abi.PoolRoomLimit, the longest n the Array
 // constructor makes dense, an n Go makes.
 func jitArrayRoom(n float64) int {
 	for _, room := range [...]int{4, 6, 8, 10, 12, abi.PoolSmallRoom} {
@@ -4173,7 +4170,7 @@ func (r *Runtime) jitFillPool(pool *abi.ObjectPool, o *Object) {
 		// which native code compares receivers' with: a method read on one
 		// it made, a.push, would leave for Go to give it. `new Array(n)`'s
 		// has room for pool.Room elements, holes, in its own allocation, as
-		// the existing tiers make one (newArrayObject), its length 0 until
+		// the interpreter makes one (newArrayObject), its length 0 until
 		// native code makes it n.
 		room := int(pool.Room)
 		if room > abi.PoolSmallRoom {
@@ -4417,7 +4414,7 @@ func (r *Runtime) jitRefillPoolsOf(e *jitEntry, pc int, o *Object) (refilled boo
 
 // jitInliningFrequency is, in hundredths, how many calls of a callee too
 // long to inline each invocation of the caller deciding its call must have
-// made for it to be compiled for that caller at once (jitCalledOften):
+// made for it to be compiled for that caller at once (jitRegCalledOften):
 // V8's min_inlining_frequency as V8 runs, 0.05 (ssa.MinInliningFrequency).
 const jitInliningFrequency = 5
 
@@ -4463,9 +4460,9 @@ type jitLowering struct {
 }
 
 // jitLowerKind is how a program is lowered: for a function's own code
-// (jitcompile.LowerSSA), for a callee inlined (LowerSSAInline), for a
-// forwarding constructor inlined (LowerSSAForward), for a function with no
-// loop shown to be hot (LowerSSAHot).
+// (jitcompile.LowerReg), for a callee inlined (LowerRegInline), for a
+// forwarding constructor inlined (LowerRegForwardWith), for a function
+// with no loop shown to be hot (LowerRegHot).
 type jitLowerKind uint8
 
 const (
@@ -4494,7 +4491,7 @@ func (s *jitState) lowering(fn *bytecode.Function) *jitLowering {
 }
 
 // relower drops l's programs, which are lowered again with its hints as
-// they are asked for (jitLower): what was compiled from them holds them.
+// they are asked for (jitRegLower): what was compiled from them holds them.
 func (s *jitState) relower(l *jitLowering) {
 	for k := range l.progs {
 		if l.done[k] {
@@ -4508,10 +4505,10 @@ func (s *jitState) relower(l *jitLowering) {
 	l.serial++
 }
 
-// jitBigIntNote is jitBigIntSeen's learning, of either form's code: in, the
-// instruction whose guard failed or which is generic, at key -- the stack
-// form's site, the register form's register pc -- in e, its operands
-// read by operand, treeBig and treeWide what the tree tier saw of it.
+// jitBigIntNote is jitRegBigIntSeen's learning: in, the instruction whose
+// guard failed or which is generic, at key, its register pc, in e, its
+// operands read by operand, treeBig and treeWide what the interpreter saw
+// of it (bigSeenMarks).
 func jitBigIntNote(e *jitEntry, key int32, in ir.Instruction, operand func(ir.Operand) Value, treeBig, treeWide bool) bool {
 	generic := slices.Contains(e.failed, key)
 	native := false
@@ -4545,7 +4542,7 @@ func jitBigIntNote(e *jitEntry, key int32, in ir.Instruction, operand func(ir.Op
 	}
 	learned := slices.Contains(e.bigints, key)
 	if learned || treeBig {
-		// Its speculation, learned or the tree tier's, failed: made as one
+		// Its speculation, learned or the interpreter's, failed: made as one
 		// of BigInts from 0 to 2^64-1 where they are, once.
 		if !native || slices.Contains(e.bigwide, key) || treeWide || !jitBigUnsigned(a) || !jitBigUnsigned(b) {
 			return false
@@ -4608,7 +4605,7 @@ func jitBigIntNote(e *jitEntry, key int32, in ir.Instruction, operand func(ir.Op
 
 // jitBigRelease gives back what of a, b and the third operand, old, the
 // call of Go that made v of them may give back (ssa.CallSite's Release),
-// as the tree tier's bigRelease does for its operators.
+// through bigRelease.
 func (r *Runtime) jitBigRelease(ctx *abi.Context, v, a, b Value) {
 	rel := uint8(ctx.GoOp >> abi.GoOpKindShift)
 	if rel == 0 {
@@ -4640,8 +4637,8 @@ func jitBigUnsigned(v Value) bool {
 }
 
 // globalSite is Global's site of a read of the global name, a write or a
-// strict assignment's check, its cache site's index, or -1 for none: the
-// stack form's instruction's or register code's (jitRegFeedback).
+// strict assignment's check, its cache site's index, or -1 for none:
+// register code's (jitRegFeedback).
 func (fb *jitFeedback) globalSite(name Atom, siteIdx int, write, check bool) (ssa.GlobalSite, bool) {
 	env := fb.cl.scope()
 	if env == nil {
@@ -4883,9 +4880,8 @@ func (fb *jitFeedback) lexGlobal(name Atom, env *Object, write bool) (ssa.Global
 	return site, true
 }
 
-// stringPropertyOf is StringProperty's, of either form's code: the method
-// read at pc, its cache c, of key; big says another tier saw it meet a
-// BigInt.
+// stringPropertyOf is StringProperty's: the method read at pc, its cache
+// c, of key; big says the interpreter saw it meet a BigInt.
 func (fb *jitFeedback) stringPropertyOf(pc int, c *propCache, key Atom, big bool) (ssa.PropertySite, bool) {
 	e := fb.e
 	if c.shape != nil && c.shape != noShape || slices.ContainsFunc(e.poly, func(p jitPolySite) bool { return int(p.pc) == pc }) {
@@ -4928,7 +4924,7 @@ func (fb *jitFeedback) stringPropertyOf(pc int, c *propCache, key Atom, big bool
 }
 
 // writeCases are what the write at pc met at objects of shapes other than
-// site's (jitPolyWriteSeen): an own property it wrote, or a transition it
+// site's (jitPolyWriteSeenOp): an own property it wrote, or a transition it
 // added the property along (fb.add), which the code tries in turn.
 func (fb *jitFeedback) writeCases(pc int, site ssa.PropertySite) ([]ssa.PropertyCase, []*ssa.PropertyAdd) {
 	var cases []ssa.PropertyCase
@@ -4990,7 +4986,7 @@ func (fb *jitFeedback) deepAdd(d jitDeepAdd) *ssa.PropertyAdd {
 	return a
 }
 
-// cases are the shapes other than first the read at pc met (jitPolySeen),
+// cases are the shapes other than first the read at pc met (jitPolySeenOp),
 // as ssa.PropertyCase has them: the code keeps them and their holders.
 func (fb *jitFeedback) cases(pc int, first uintptr) []ssa.PropertyCase {
 	var cases []ssa.PropertyCase
@@ -5204,23 +5200,23 @@ type jitSSAStats struct {
 	// goCalls counts the calls native code had Go make (jitGoCall).
 	goCalls uint64
 	// calleeGoCalls counts those it made as a native callee
-	// (jitGoCallNested), and calleeWork the work it did natively before
-	// each, as jitSSAProfit estimates a stretch's (jitCalleeProfit), since
+	// (jitRegGoCallNested), and calleeWork the work it did natively before
+	// each, as jitSSAProfit estimates a stretch's (jitRegCalleeProfit), since
 	// its calls in (jitLink's in) were last counted from 0.
 	calleeGoCalls, calleeWork uint64
-	// runGoCalls counts those it made in runs begun at a loop that Go
-	// makes for good, and runWork the work it did natively before each
-	// (jitRunGoProfit); osrStretches the
-	// stretches begun at a loop by on-stack replacement, and osrWork the
-	// work they did (jitSSAProfit) -- each since Go last began entering the
-	// code again (jitRetrySlow).
+	// runGoCalls counts those it made in runs begun at a loop that Go makes
+	// for good, and runWork the work it did natively before each
+	// (jitRegRunGoProfit); osrStretches the stretches begun at a loop by
+	// on-stack replacement, and osrWork the work they did
+	// (jitRegStretchWork) -- each since Go last began entering the code
+	// again (jitRegRetrySlow).
 	runGoCalls, runWork   uint64
 	osrStretches, osrWork uint64
 	// judged is how many stretches, calls of Go included, there had been
-	// when jitSSAProfit last judged the code.
+	// when jitRegStretchWork last judged the code.
 	judged uint64
 	// workBase and stretchBase are work and the stretches when Go last
-	// began entering the code again (jitRetrySlow): it is judged by what
+	// began entering the code again (jitRegRetrySlow): it is judged by what
 	// it has done since.
 	workBase, stretchBase uint64
 	// guardsAt counts failed guards by their site (abi.Context.ExitSite:
@@ -5230,19 +5226,20 @@ type jitSSAStats struct {
 }
 
 // jitSSAProbe is how many native stretches a function runs between looks
-// at whether its native code pays (jitSSAProfit), and jitSSAMinWork the
-// work a stretch must do, on average, for it to: an entry, and the exit or
-// return that ends the stretch, cost what the tree tier takes for about
-// that many instructions (the V8 suite's medians of five: 10 left Richards'
-// task methods, called from the tree tier and calling out again, native at
-// a loss; 20 is best overall, 1,374.8 ms against 1,413.6).
+// at whether its native code pays (jitRegStretchWork), and jitSSAMinWork
+// the work a stretch must do, on average, for it to: an entry, and the exit
+// or return that ends the stretch, cost what the interpreter takes for
+// about that many instructions (the V8 suite's medians of five, measured
+// with an earlier interpreter: 10 left Richards' task methods, called from
+// the interpreter and calling out again, native at a loss; 20 was best
+// overall, 1,374.8 ms against 1,413.6).
 const (
 	jitSSAProbe   = 64
 	jitSSAMinWork = 20
 )
 
 // errGoOnNatively ends the interpreter's run of a frame Go goes on in
-// natively, at a loop's header (jitGoOn).
+// natively, at a loop's header (jitRegGoOn).
 var errGoOnNatively = errors.New("jit: go on natively")
 
 // jitShared is what every context native code runs in shares with the one
@@ -5349,7 +5346,7 @@ const jitContexts = 4
 // take: one for each frame the VM allows (Config.MaxCallDepth), as each
 // level is a frame of the VM's to the depth limit (abi.Bounds'
 // LevelLimit), and one past the deepest, which a run Go begins there
-// needs (runSSA). A call past the limit is Go's, which throws the
+// needs (jitRegStretch). A call past the limit is Go's, which throws the
 // interpreter's RangeError.
 func (r *Runtime) jitContextsMost() int { return r.maxFrames + 2 }
 
@@ -5552,7 +5549,7 @@ type jitNativeLevel struct {
 	returnTo uintptr
 	code     *jit.SSACode
 	// owner, for an inlined callee's level, is the entry whose code
-	// inlined it, the code its exit left (jitFinishExit), and ownerCl a
+	// inlined it, the code its exit left, and ownerCl a
 	// closure of its function's.
 	owner   *jitEntry
 	ownerCl *closure
@@ -5567,7 +5564,7 @@ type jitNativeLevel struct {
 	slotsFrom, slotsTo int
 	// gen, for a generator a loop's step resumed natively (jitGenLevel),
 	// is the generator, and cursor the step's cursor; fill marks a
-	// destructuring's step, whose done is undefined (jitGenDone).
+	// destructuring's step, whose done is undefined (jitRegGenDone).
 	gen    *generator
 	cursor *iterState
 	fill   bool
@@ -5613,7 +5610,7 @@ func jitDerivedFrame(f *frame, c *abi.Context) {
 // (ssa.CallSite's Super), its parent finished by Go: its result if an
 // object, else the instance, as superCall binds it -- a second super()
 // native code does not make (mir's superGuards), and the class has no
-// fields for it to give (jitSuperTarget). The binding is the result.
+// fields for it to give (jitRegSuperTarget). The binding is the result.
 func jitSuperBound(f *frame, v Value) Value {
 	if f.thisRef == nil {
 		return v
@@ -5630,7 +5627,7 @@ func jitSuperBound(f *frame, v Value) Value {
 // context's This), where Go has not: as the interpreter's super() binds
 // the frame's binding, which a closure Go makes on f, an arrow, shares.
 // Native code made such a super() only where no arrow is made before it
-// (jitArrowBeforeSuper): none shares the binding unbound.
+// (jitRegArrowBeforeSuper): none shares the binding unbound.
 func jitBindThis(f *frame, ctx *abi.Context) {
 	if f.thisRef == nil || f.thisRef.init || f.cl.fn.Kind != bytecode.KindDerivedConstructor {
 		return
@@ -5665,7 +5662,7 @@ func jitTargets(e *jitEntry) iter.Seq2[int, *jitInline] {
 // jitUnwindProbe is how many times native code called natively leaves
 // between looks at whether it leaves too often, and jitUnwindShare the
 // share of its calls it may leave from, as one in so many: Go then finishes
-// every native call outside it (jitUnwindNative), which costs more than Go
+// every native call outside it (jitRegUnwind), which costs more than Go
 // making the call.
 const (
 	jitUnwindProbe = 64
@@ -5677,7 +5674,7 @@ const (
 // compiled again for (reoptPending), calls its exits learned
 // (inlinePending), or a call it has left native
 // code at but not yet decided, which the compile would decide if the
-// existing tiers have met its target (jitSeedCalls).
+// interpreter has met its target.
 func jitLearning(e *jitEntry) bool {
 	if e.reoptPending() || e.inlinePending {
 		return true
@@ -5692,7 +5689,7 @@ func jitLearning(e *jitEntry) bool {
 
 // jitUnwindReopts is how many times code that leaves too often when called
 // natively is compiled again for it before native callers stop calling it
-// (jitUnwound).
+// (jitRegUnwound).
 const jitUnwindReopts = 3
 
 // jitNativeRetry is how many calls Go makes to code native callers no

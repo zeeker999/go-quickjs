@@ -25,7 +25,7 @@ import (
 // finishes the generator and returns the step's done. So a
 // loop over a generator steps it with neither an exit nor a call of Go,
 // where each step had been a call of Go from native code, which resumed
-// the generator's tree, or its code from Go.
+// the generator's code from Go.
 //
 // Anything else leaves native code as a native callee does, and Go makes
 // the generator's frame from its context, as the step's resumption would

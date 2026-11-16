@@ -56,8 +56,8 @@ const regLexThisSetup = `
 // regCalledRounds are the rounds a register test of calledSetup, givenSetup
 // or regLexThisSetup runs: warm ones, then ones whose exits are inside the
 // inlined closures.
-// Their loops run ten times the stack form's tests' turns, which the
-// register tier's samples need to find them hot -- a driver's loop a
+// Their loops run ten times as many turns as calledSetup's tests did,
+// which the interpreter's samples need to find them hot -- a driver's loop a
 // hundred times, its back edges what samples it: the interpreter's back
 // edges are counted across the runtime, and those of loops native code
 // runs are not, so the more of the other rounds run natively the later a

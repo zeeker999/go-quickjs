@@ -12,7 +12,7 @@ import (
 // invocations that do nothing -- is entered by Go again after
 // jitNativeRetry calls the existing tiers made of it, and judged by what it
 // does from then on (jitRetrySlow): a loop that runs long stays native.
-// Judged once, for good, it had stayed in the tree tier.
+// Judged once, for good, it had stayed in the interpreter.
 func TestJITSlowCodeJudgedAgain(t *testing.T) {
 	t.Parallel()
 	if !jitSSABackend {

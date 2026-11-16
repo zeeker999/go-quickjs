@@ -13,8 +13,7 @@ import (
 // regLearnSrc reads and writes properties of objects of two shapes: a
 // function compiled for the first deoptimizes at the second, and what its
 // code learned at its exits (jitRegDeoptSeen) has its next compile take
-// both, as the stack form's code does. Go calls the functions, so that
-// no caller's code inlines them.
+// both. Go calls the functions, so that no caller's code inlines them.
 const regLearnSrc = `
 function A(x) { this.x = x; this.y = 1 }
 function B(x) { this.w = 0; this.x = x; this.y = 2 }
@@ -116,10 +115,10 @@ func TestJITRegLeaf(t *testing.T) {
 		name string
 		want int
 	}{{"leaves", 4}, {"rx", 2}} {
-		// rx's exec, its array kept in a local the interpreter may make
-		// it again in (RMarkReuse), and its test, marked dead -- only its
-		// truth is read -- both leaves, as the stack form's code calls
-		// them: the leaf makes the array anew, and the whole answer.
+		// rx's exec, its array kept in a local the interpreter may make it
+		// again in (RMarkReuse), and its test, marked dead -- only its
+		// truth is read -- both leaves: the leaf makes the array anew, and
+		// the whole answer.
 		v, _ := r.GetProp(Obj(r.Global()), r.Intern(c.name))
 		cl := v.Object().fn().closure
 		e := r.jitRegFor(cl, cl.reg)
@@ -371,11 +370,11 @@ func TestJITRegKinds(t *testing.T) {
 
 // regReplaceSrc replaces by RegExps held in bindings, as the V8 suite's
 // RegExp does: a captured binding's global RegExp and a global's, a string
-// template and an empty one, one call's result unused -- leaves, as the
-// stack form's code calls them (jitReplaceLeafSeen) -- a literal's, which
-// the call makes natively from the literal's pool and the leaf gives back
-// (RMarkLitArg, jitLeafForm's giveArg), and a function's replacement, which
-// the leaf's check refuses each call of, Go then making it.
+// template and an empty one, one call's result unused -- leaves -- a
+// literal's, which the call makes natively from the literal's pool and the
+// leaf gives back (RMarkLitArg, jitLeafForm's giveArg), and a function's
+// replacement, which the leaf's check refuses each call of, Go then making
+// it.
 const regReplaceSrc = `
 var g = /[aeiou]/;
 var replaces = (function () {
@@ -440,12 +439,12 @@ func TestJITRegReplaceLeaf(t *testing.T) {
 
 // regSharedSrc makes array literals of constants, whose arrays share them
 // until one is written (new_array_k): read, written, grown, and kept, in a
-// loop, as the stack form's code makes them natively from a pool of the
-// arrays Go makes (ssa's LiteralSite's Shared). Its calls of Go fill every
-// register native code may keep with junk (jitClobberCallsForTest): a
-// literal whose pool Go fills is made again from its start, and its
-// elements -- a string's words in registers -- had been read after the
-// call as Go's code left them, a crash where Go 1.24's had used them.
+// loop, made natively from a pool of the arrays Go makes (ssa's
+// LiteralSite's Shared). Its calls of Go fill every register native code
+// may keep with junk (jitClobberCallsForTest): a literal whose pool Go
+// fills is made again from its start, and its elements -- a string's words
+// in registers -- had been read after the call as Go's code left them, a
+// crash where Go 1.24's had used them.
 const regSharedSrc = `
 var kept = [];
 function shared(n) {

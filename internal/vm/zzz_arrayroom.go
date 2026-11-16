@@ -57,7 +57,7 @@ type arrayRoom struct {
 	// came to, not what a callback's growing array had reached.
 	acrossTurns bool
 	// pc is the literal's instruction, which names the site to native code:
-	// the tree's ordinal does not, and an inlined callee has its own.
+	// the site's ordinal does not, and an inlined callee has its own.
 	pc int32
 }
 
@@ -120,8 +120,9 @@ func arraySamplesLetGo[_ any](r *Runtime) {
 	jitLiteralArraysLetGo[struct{}](r)
 }
 
-// arrayEmptyNode is an empty literal in the tree tier: its site's index in
-// closureCode.arrays, the build's count of them, and its instruction.
+// arrayEmptyNode is an empty literal, as regNewArrayE makes it: its site's
+// index in closureCode.arrays, the register compiler's count of them, and
+// its instruction.
 type arrayEmptyNode[_ any] struct {
 	site int
 	pc   int32

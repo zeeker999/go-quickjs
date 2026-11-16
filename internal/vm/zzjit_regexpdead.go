@@ -4,7 +4,7 @@ package vm
 
 // Native code's calls of exec, and of a string's replace, whose result
 // nothing reads but, at most, whether it is truthy (see
-// zzz_regexpdead.go) tell the function so, as the tree tier's do: a leaf's
+// zzz_regexpdead.go) tell the function so, as the interpreter's do: a leaf's
 // call of exec (ssa.GoLeaf) by its description, which the SSA builder
 // marks from the instruction after the call (ssa.CallSite's Unused,
 // abi.GoCallState's), its form's function telling the leaf just before it

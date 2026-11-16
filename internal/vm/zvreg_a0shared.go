@@ -59,8 +59,9 @@ var unshareElems func(o *Object)
 // sharedLiteralSite reports whether the array literal at pc of cl's
 // function shares its constants: a literal of constants (OpNewArray's B)
 // that has not given sharing up, its storage made here from the constants
-// the code pushes before it where the tree tier has not made it -- native
-// code may be compiled for a literal only the interpreter has run. Native
+// the code pushes before it where the interpreter has not made it --
+// native code may be compiled for a literal before the interpreter has
+// run it. Native
 // code is compiled to take such a literal's arrays as Go makes them
 // (sharedLiteralArray).
 var sharedLiteralSite func(r *Runtime, cl *closure, pc int) bool
@@ -82,7 +83,7 @@ func (o *Object) ownElems() {
 // The helpers of the closures below, package variables rather than the
 // init's locals: an init closure that captures one of its init's locals is
 // laid out apart from the init closures, before them all, and would move
-// every tree node's closure.
+// every closure of the package's.
 
 // sharedCount is a shared storage's count word, before its first element.
 var sharedCount func(e []Value) *Value

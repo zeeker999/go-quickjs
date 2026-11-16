@@ -100,7 +100,7 @@ var jitGenMakeCases = []struct {
 // step resumes its generator natively. So too while the collector marks
 // (jitMarkingForTest), its pointer words stored through the write barrier:
 // a making or a cursor left to Go while it marked had the loop judged
-// slow, left to the tree tier, which makes no native step.
+// slow, left to the interpreter, which makes no native step.
 func TestJITGenMakeCallsNoGo(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")

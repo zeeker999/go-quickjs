@@ -74,8 +74,8 @@ table() + ' ' + others() + ' ' + run(500) + ' ' + run(2000)
 const replaceFlatTestWant = "2637138712 3380 TypeError TypeError3 aa sub:aab bbb00 acac3 RangeError 3570225015 202452282"
 
 // A string's replace by a template without a $, both ASCII, is made in one
-// pass (zzz_regexpreplace.go): each answer is Node's, in the tree tier and
-// in the interpreter, with the collector idle and running.
+// pass (zzz_regexpreplace.go): each answer is Node's, with the collector
+// idle and running.
 func TestRegExpReplaceFlat(t *testing.T) {
 	for _, tree := range []bool{true} {
 		for _, idle := range []bool{true, false} {

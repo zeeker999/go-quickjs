@@ -4,9 +4,8 @@ import (
 	"testing"
 )
 
-// regRunBoth runs src with the register tier off and on, each from a
-// compile of its own, and checks both give want and that at least built
-// functions ran as register code.
+// regRunBoth runs src from a compile of its own, and checks it gives want
+// and that at least built functions ran as register code.
 func regRunBoth(t *testing.T, src, want string, built int64) {
 	t.Helper()
 	for _, reg := range []bool{true} {

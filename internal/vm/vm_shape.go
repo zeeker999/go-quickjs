@@ -1130,7 +1130,7 @@ func (o *Object) layoutChanged() {
 // last was, and p1, the environment itself once a fill has found it there
 // (see noteGlobalSlot): every closure that shares a site's caches shares its
 // environment, and a table position once given to a name holds that name or
-// a tombstone for good, so the tree tier reads the slot without asking the
+// a tombstone for good, so the interpreter reads the slot without asking the
 // closure for its scope or comparing the key.
 type propCache struct {
 	shape  *shape

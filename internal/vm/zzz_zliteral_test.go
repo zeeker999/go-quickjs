@@ -1,7 +1,7 @@
 package vm
 
-// literalTestSrc makes object literals of every kind of field the tree
-// tier's literal node takes or leaves to define_field (zzz_literal.go):
+// literalTestSrc makes object literals of every kind of field a literal
+// made at once (new_object_lit) takes or leaves to define_field:
 // constants, locals, upvalues, this, arguments, calls whose order shows,
 // a value that throws midway, a key that repeats, a spread, accessors,
 // __proto__, index keys, nested literals, more fields than a table scans,
@@ -11,7 +11,7 @@ package vm
 // does not call, and a yield among the values. Four rounds: the first
 // defines the fields, the second learns the shape, the rest make the
 // objects with it. Each function has a local of its own, so that it is
-// run on its tree rather than by pureCall.
+// run as register code rather than by pureCall.
 const literalTestSrc = `
 const log = []
 function side(x) { log.push(x); return x }

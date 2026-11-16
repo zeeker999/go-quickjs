@@ -4,9 +4,8 @@ package vm
 
 // Each function's loop meets, partway through an invocation, what its code
 // was not compiled for -- a string where numbers ran, a BigInt -- and
-// deoptimizes there, or leaves for Go at it: the interpreter runs the frame
-// to its loop's next back-edge check, and the tree, where the function has
-// a plain one (ztree_goon.go), the rest from that loop's header.
+// deoptimizes there, or leaves for Go at it: the interpreter runs the rest
+// of the frame.
 const treeGoOnSetup = `
 	function mixed(n, k) {
 		let s = 0

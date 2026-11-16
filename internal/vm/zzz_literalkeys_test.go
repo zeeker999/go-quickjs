@@ -20,7 +20,7 @@ func shapeOfNew(t *testing.T, r *Runtime, src string) *shape {
 }
 
 // Register code's literals made at once (new_object_lit) take the realm's
-// root for their keys as the tree's do: one layout for the same keys in
+// root for their keys: one layout for the same keys in
 // any function, a closure made anew or two of one function's sites, and
 // one of their own for other keys.
 func TestRegLiteralKeysShareALayout(t *testing.T) {

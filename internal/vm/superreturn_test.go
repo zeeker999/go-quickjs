@@ -8,8 +8,7 @@ import "testing"
 // P, P returning {}, makes no R, and fields set after super() go on that
 // object. It had been given R's prototype, as a native constructor's
 // object is, Error's and Array's among them, which build their own and
-// are still instances of the class extending them. Each answer is Node's,
-// on the trees and in the interpreter.
+// are still instances of the class extending them. Each answer is Node's.
 func TestSuperReturnsOwnObject(t *testing.T) {
 	t.Parallel()
 	const src = `

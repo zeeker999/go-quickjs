@@ -1,8 +1,7 @@
 // Command regrefusals is the register backend's refusal inventory: it
-// compiles every .js and .mjs file under the directories it is given, with
-// the register form on, and counts the functions regcomp compiled and those
-// it refused, by reason (docs/register-interpreter.md, "Where stage 1
-// stands").
+// compiles every .js and .mjs file under the directories it is given and
+// counts the functions regcomp compiled and those it refused, by reason
+// (docs/register-interpreter.md, "Tools and switches").
 //
 //	go run ./internal/cmd/regrefusals [-top 40] [-files] [-list] dir...
 //

@@ -12,27 +12,26 @@ import (
 // jitGoCallPlain makes a call of Go native code makes (ssa.GoCall), at its
 // level's code's exit PC, where making it runs no script and cannot throw,
 // without the frames, the pins and the operands on the VM's stack that
-// jitGoCall and jitGoCallNested give a call that may -- as the tree
-// tier makes these without a frame (callRest's pureElemOp, setProp's fast
-// paths), and as V8's code calls a builtin that cannot call back without a
-// frame of JavaScript's: a leaf's call (jitPlainCall) -- a Map's or a
-// Set's get, has, set, add or delete, a WeakMap's or a WeakSet's
+// jitGoCall and jitRegGoCallNested give a call that may -- as the
+// interpreter makes these without a frame (callRest's pureElemOp, setProp's
+// fast paths), and as V8's code calls a builtin that cannot call back
+// without a frame of JavaScript's: a leaf's call (jitPlainCall) -- a Map's
+// or a Set's get, has, set, add or delete, a WeakMap's or a WeakSet's
 // operations, Date.now, String(x) of a primitive; a write a site's cache
-// answers with a data property or an addition along its
-// transition, or an ordinary object's store it does not answer, or of an
-// array's length (jitPlainWrite); a for...in's cursor of an object no
-// proxy's (jitForInPlain). Each had cost a
-// call of Go its frame, its operands copied and cleared, its code pinned
-// and its learning asked, more than what the existing tiers spend on the
-// whole operation: microbench's map_set_int, map_set_string and
-// array_length_decr ran slower with the JIT than without. It writes the
-// result to the call's keep cell and reports whether it made the call;
-// what it does not make it leaves to them, untouched.
+// answers with a data property or an addition along its transition, or an
+// ordinary object's store it does not answer, or of an array's length
+// (jitPlainWrite); a for...in's cursor of an object no proxy's
+// (jitForInPlain). Each had cost a call of Go its frame, its operands copied
+// and cleared, its code pinned and its learning asked, more than what the
+// interpreter spends on the whole operation: microbench's map_set_int,
+// map_set_string and array_length_decr ran slower with the JIT than without.
+// It writes the result to the call's keep cell and reports whether it made
+// the call; what it does not make it leaves to them, untouched.
 //
 // It counts no call of Go (ssaStats' goCalls): what such a call costs is
 // a native operation's, which the code's profit (jitSSAProfit) counts as
 // its work. None of these calls is one the JIT learns a native form of at
-// its call of Go (jitCallSeen): push of one value and pop, Math.random and
+// its call of Go (jitRegCallSeen): push of one value and pop, Math.random and
 // the searches are not taken here.
 func (r *Runtime) jitGoCallPlain(ctx *abi.Context) bool {
 	// Asked first, of the operation's kind and its function's identity
@@ -161,7 +160,7 @@ func (r *Runtime) jitGoInlined(ctx *abi.Context, cl *closure, addr uintptr) *clo
 // jitPlainCall is the result of the call of a built-in among its operands
 // (abi.GoCallMethod's receiver, the function, the arguments; a plain
 // call's the function and the arguments) where it runs nothing and throws
-// nothing: a leaf's (jitLeafOp), applied as every tier applies it without
+// nothing: a leaf's (jitLeafOp), applied as the interpreter applies it without
 // a frame (pureElemOp) -- a collection's lookup, addition or deletion on
 // its own kind of collection, a weak one's, Date.now, String(x) of a
 // primitive, hasOwnProperty, a push of other than one value, whose native
@@ -227,7 +226,7 @@ func (r *Runtime) jitPlainCall(ctx *abi.Context, in bytecode.Instr, n int) (Valu
 // jitLeafOp reports whether native code's call of a built-in of frameless
 // application op (elemOp) is made without a frame (jitGoCallPlain): any
 // but those whose native forms the JIT learns at the calls of Go jitGoCall
-// makes (jitCallSeen) -- push and pop, Math.random, a string's charCodeAt,
+// makes (jitRegCallSeen) -- push and pop, Math.random, a string's charCodeAt,
 // its one character's substring, slice, substr and charAt, its searches,
 // String.fromCharCode, parseInt of a number, and an array's searches --
 // which, made without a frame, it would never learn -- and RegExp's exec
@@ -251,7 +250,7 @@ func jitLeafOp(op uint8) bool {
 // proxy, whose traps would run, or a module namespace, whose bindings may
 // be uninitialized. React copies each element's props in a for...in,
 // whose start, made with the frames of the levels native code called it
-// from (jitGoCallNested), was the commonest call of Go in rendering the
+// from (jitRegGoCallNested), was the commonest call of Go in rendering the
 // SSR benchmark's page. It writes the cursor to the call's keep cell and
 // reports whether it made it.
 func (r *Runtime) jitForInPlain(ctx *abi.Context) bool {

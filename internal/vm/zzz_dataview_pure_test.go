@@ -166,7 +166,7 @@ const dataViewPureWant = "Int8:15,15 Uint8:15,15 Int16:15,15 Uint16:15,15 Int32:
 // A native leaf that writes -- a DataView's setter -- is applied in a pure
 // body only where the body may store (pureInvoke): one that gave up after
 // it is evaluated again with a frame, which had written again. Each answer
-// is Node's, in the tree tier and in the interpreter.
+// is Node's.
 func TestDataViewSetterInPureBody(t *testing.T) {
 	t.Parallel()
 	for _, tree := range []bool{true} {

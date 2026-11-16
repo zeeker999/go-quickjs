@@ -164,7 +164,7 @@ func regBuild(fn *bytecode.Function, rc *bytecode.RegCode) *regCode {
 		c.leaf, c.leafOps = regLeafCode, regLeafOps(fn, rc)
 	case fn.Leaf == bytecode.LeafPure && !fn.PureCalls && !pureByTree(fn):
 		// A longer body runs faster as code than in the frameless
-		// evaluator, as the tree tier finds (pureByTree).
+		// evaluator (pureByTree).
 		c.leaf = regLeafPure
 	case fn.Leaf != bytecode.LeafNone && fn.Leaf != bytecode.LeafPure:
 		c.leaf = regLeafThis

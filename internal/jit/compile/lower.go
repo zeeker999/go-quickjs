@@ -34,7 +34,7 @@ func (e *Refusal) Error() string {
 
 func refuse(pc int, why string) error { return &Refusal{PC: pc, Reason: why} }
 
-// hostOnly is the reason LowerSSA refuses a function that does nothing
+// hostOnly is the reason LowerReg refuses a function that does nothing
 // native code saves time on (HostOnly).
 const hostOnly = "host operations without native loop or array work"
 
@@ -58,15 +58,15 @@ func GeneratorResumable(fn *bytecode.Function) bool {
 	return true
 }
 
-// HostOnly reports whether err is LowerSSA's refusal of a function for
-// having no loop and no array work, which LowerSSAHot may lower.
+// HostOnly reports whether err is LowerReg's refusal of a function for
+// having no loop and no array work, which LowerRegHot may lower.
 func HostOnly(err error) bool {
 	r, ok := err.(*Refusal)
 	return ok && r.Reason == hostOnly
 }
 
 // Hints are what the VM has seen its function's code do that its bytecode
-// does not say, which a lowering for the new pipeline takes (Lower*With).
+// does not say, which a lowering for the new pipeline takes (LowerReg*With).
 // StringAdds are the PCs of additions that have met a string: each is Go's
 // (ir.StringAdd), its operands read as they are, not as numbers -- as V8's
 // code follows an addition's feedback. A loop's `token += c`, whose token
@@ -114,14 +114,9 @@ func argumentsOwn(fn *bytecode.Function) bool {
 		// itself, a native call of f with the arguments its context holds
 		// (ir.Program's Forwards), as V8's CallForwardVarargs copies its
 		// caller's arguments: where it may (forwardsNatively). Its callers
-		// inline it where they know what it forwards to (LowerSSAForward).
-		// One that only reads its arguments by index, which the compiler
-		// marks so too, is its own. Go's call of the built-in apply from
-		// native code at each apply_arguments had cost more than the tree
-		// tier's, measured: a forwarder native callers called, 244 ns a
-		// call against 180 with it refused, the tree tier alone 162; and
-		// one of a loop of its own, 143 ns an apply against the tree
-		// tier's 117.
+		// inline it where they know what it forwards to
+		// (LowerRegForwardWith). One that only reads its arguments by
+		// index, which the compiler marks so too, is its own.
 		return forwardsNatively(fn)
 	}
 	if !fn.MappedArguments || fn.ParamCount == 0 {
@@ -143,8 +138,6 @@ func argumentsOwn(fn *bytecode.Function) bool {
 	return fn.ParamCount+2 <= abi.MaxGoArgs
 }
 
-// paramCaptured reports whether a closure fn makes captures one of its
-// parameters.
 // forwardsNatively reports whether fn's apply_arguments may hand on its
 // call's arguments as they were given (ir.Program's Forwards): not where a
 // mapped arguments object would alias a parameter the code, or a closure,
@@ -164,6 +157,8 @@ func forwardsNatively(fn *bytecode.Function) bool {
 // (ssa.CallSite's Forward) only in code that does.
 func ForwardsNatively(fn *bytecode.Function) bool { return forwardsNatively(fn) }
 
+// paramCaptured reports whether a closure fn makes captures one of its
+// parameters.
 func paramCaptured(fn *bytecode.Function) bool {
 	for i := 0; i < fn.ParamCount && i < len(fn.Locals); i++ {
 		if fn.Locals[i].Captured {
@@ -322,7 +317,7 @@ func stringConcats(p *ir.Program, reads []int32) {
 	// str is what is taken for a string, which decides who makes an addition
 	// and is right if it is wrong; sure what cannot be anything else, which
 	// is what a conversion may be dropped for: an addition that has met a
-	// string once (hintedStringAdds) may be given two numbers now.
+	// string once (Hints' StringAdds) may be given two numbers now.
 	str := make([]bool, p.Locals+p.StackSize)
 	sure := make([]bool, p.Locals+p.StackSize)
 	targets := make([]bool, len(p.Code)+1)

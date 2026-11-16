@@ -11,8 +11,7 @@ import "testing"
 // BigInt stores and BigInt.asIntN convert alike. A pure body adds,
 // subtracts, multiplies and orders BigInts an int64 holds itself
 // (pureBigArith), and leaves the rest -- a result past the range, a BigInt
-// beside a Number, which throws -- to its frame. Run on the tree and
-// without it.
+// beside a Number, which throws -- to its frame.
 func TestBigIntElements(t *testing.T) {
 	const src = `
 		var out = []

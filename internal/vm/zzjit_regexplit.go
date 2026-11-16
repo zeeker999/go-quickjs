@@ -11,8 +11,8 @@ import (
 // A RegExp literal's call of the built-in exec or test, /x/.test(s), given
 // a primitive, runs nothing of the script's, and the RegExp it was called
 // on -- only ever the call's receiver -- is reachable from nothing once it
-// returns: the tree tier gives it back to the literal (see
-// ztree_zzzzzzregexp.go), and native code, whose literal takes its RegExps
+// returns: the interpreter gives it back to the literal
+// (regexpLiteralDone), and native code, whose literal takes its RegExps
 // from a pool, has the call of Go give it back to the pool, lastIndex 0
 // again, as the pool's RegExps are made. A literal in a loop then made a
 // RegExp each time round in native code alone.

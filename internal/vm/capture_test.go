@@ -5,7 +5,7 @@ import "testing"
 // TestCaptureRoom pins the bindings a closure is the first to capture being
 // made in one allocation: each is still its own binding, shared with every
 // other closure over it, and a binding made afresh -- a loop's let -- is a
-// new one, on both tiers.
+// new one.
 func TestCaptureRoom(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -60,7 +60,7 @@ func TestCaptureRoomAllocs(t *testing.T) {
 
 // TestArgumentsRoom pins an arguments object made with its first elements
 // in its own allocation: what it holds and how it grows past them, mapped
-// and not, on both tiers.
+// and not.
 func TestArgumentsRoom(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {

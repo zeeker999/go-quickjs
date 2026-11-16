@@ -2,15 +2,14 @@ package vm
 
 import "testing"
 
-// A callback a built-in calls for each element is called by callDirect, and
-// an arrow, or a function whose frame may end in a tail call, is run there
-// on its tree (treeRest), as a tree's call node runs one: what the arrow
+// A callback a built-in calls for each element is called by callDirect,
+// which enters its register code directly (regDirect): what an arrow
 // captured -- its this, its new.target, the bindings it writes -- what it
 // throws, and a recursion through tail calls under a built-in are as they
 // are when it is run by runFD. Each callback has a local of its own, so
-// that it is no pure body and is run on its tree, not by pureCall. Map's
-// and Set's forEach, Array.from's mapping, replace's function and JSON's
-// replacer and reviver call theirs as the array methods do.
+// that it is no pure body and is run as register code, not by pureCall.
+// Map's and Set's forEach, Array.from's mapping, replace's function and
+// JSON's replacer and reviver call theirs as the array methods do.
 func TestCallbackTreeRest(t *testing.T) {
 	const src = `
 		var out = [], last

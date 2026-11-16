@@ -156,8 +156,7 @@ func feedbackCountsReturn(op bytecode.ROp) bool {
 // from the context's cc (closureCode's jitRegTick), which a return counts
 // down, and feedbackEnters its jitEnters, which a return sets once none
 // is left, so that the function's next call goes to the JIT's tier-up
-// (package vm's jitRegCallTier), as the stack form's invocations each
-// spend its budget (jitTierWork).
+// (package vm's jitRegCallTier).
 func feedbackTick() int32 {
 	return ccRel(off("closureCode.jitRegTick"))
 }

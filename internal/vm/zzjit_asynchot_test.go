@@ -5,8 +5,8 @@ package vm
 import "testing"
 
 // jitAsyncAgreesForTest runs setup and then src, a script whose promise
-// jobs leave its answer in out, in the interpreter, the tree tier, and the
-// JIT under each stress setting the differential tests use, and fails
+// jobs leave its answer in out, in the interpreter and the JIT under each
+// stress setting the differential tests use, and fails
 // unless each answers as the interpreter does. It returns the JIT's
 // runtime at its default setting, src run there rounds times.
 func jitAsyncAgreesForTest(t *testing.T, setup, src string, rounds int) *Runtime {
@@ -60,11 +60,10 @@ func jitAsyncAgreesForTest(t *testing.T, setup, src string, rounds int) *Runtime
 
 // Async functions and generators of calls and no loop, compiled once their
 // resumptions have made them hot, as any function's calls make it
-// (LowerSSAHot): each resumption -- the first, past the parameters, and
-// each after an await or a yield -- enters native code at its pc. LowerSSA
-// refuses them for their want of a loop, and Go had marked them refused at
-// their first resumption, for good: npm's 521 async functions of calls,
-// which the tree tier ran. A guard that fails (an object of another
+// (LowerRegHot): each resumption -- the first, past the parameters, and
+// each after an await or a yield -- enters native code at its pc. Go had
+// marked them refused at their first resumption, for good: npm's 521
+// async functions of calls. A guard that fails (an object of another
 // shape), a throw from a call caught by the body's handler, a rejection
 // thrown at the await, a generator whose locals a closure captures, which
 // no loop's step resumes natively, one whose every resumption is a call

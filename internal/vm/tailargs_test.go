@@ -11,8 +11,7 @@ import "testing"
 // through a bound function, one that rotates five arguments and one that
 // passes fewer than it takes, one whose frames call a function deep in
 // tail calls of its own between theirs, and one that reads arguments
-// after such a call -- on the trees and in the interpreter, three rounds
-// alike.
+// after such a call -- three rounds alike.
 func TestTailCallArguments(t *testing.T) {
 	t.Parallel()
 	const src = `

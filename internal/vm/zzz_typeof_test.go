@@ -83,7 +83,7 @@ const typeofTestWant = "uOF?/10101010/n/p--/0/undefined:false,oFU?/01101010/on/p
 // as Node does, for every kind of value, document.all among them; a test
 // against a name of no type is false with its operand still evaluated
 // (calls counts them); typeof of a name nothing declares throws nothing.
-// Each function has a local of its own, so that it is run on its tree
+// Each function has a local of its own, so that it is run as register code
 // rather than by pureCall.
 func TestTypeofTests(t *testing.T) {
 	t.Parallel()

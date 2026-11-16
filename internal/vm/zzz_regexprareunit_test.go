@@ -34,8 +34,7 @@ function run() {
 const regexpRareUnitTestWant = `11374 {"Q":"‰","QQ":"Q\"","x"#,"Qngr":"\/Qngr","y"#} ["\"\\/Qngr(12)","12"]`
 
 // A search for a pattern's required literal over a subject's code units
-// finds Node's matches, in the tree tier and the interpreter, with the
-// collector idle and running.
+// finds Node's matches, with the collector idle and running.
 func TestRegExpRareUnit(t *testing.T) {
 	for _, idle := range []bool{true, false} {
 		for _, tree := range []bool{true} {

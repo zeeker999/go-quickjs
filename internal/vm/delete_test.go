@@ -6,8 +6,7 @@ import "testing"
 // makes it: a string's length and its indices are the String object's own,
 // non-configurable -- false in sloppy code, a TypeError in strict code --
 // and anything else is absent from the wrapper -- true -- as Node answers.
-// Every property of a primitive had been deleted, true. In the interpreter
-// and on the trees, a loop of each enough for the tree tier to take it.
+// Every property of a primitive had been deleted, true. Each in a loop.
 func TestDeletePrimitiveProperty(t *testing.T) {
 	t.Parallel()
 	const src = `

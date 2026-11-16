@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-// TestDisasm pins what the disassembly says of a few functions: operands
-// decoded by name, the tree tier's verdict and its reason, -func, and the
-// source line before its instructions.
+// TestDisasm pins what the disassembly says of a few functions: register
+// code's operands decoded by name, -func, and the source line before its
+// instructions.
 func TestDisasm(t *testing.T) {
 	src := `var g = 1;
 function sum(n) {

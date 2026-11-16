@@ -17,12 +17,11 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/vm"
 )
 
-// The register tier's differential tests (docs/register-interpreter.md,
-// "Raw int32 registers"): the same programs run with the register tier off
-// and on, each in runtimes of their own, and every result compared. The
-// register code's correctness rests on its verifier for memory and on these
-// for meaning: what a raw int32 register holds must be what the Value the
-// stack form keeps would be, at every overflow, -0, NaN and shift.
+// The register interpreter's differential tests
+// (docs/register-interpreter.md, "Correctness"): programs run as register
+// code, each in runtimes of their own, and every result compared with the
+// recorded answers (testdata/golden.json). The register code's correctness
+// rests on its verifier for memory and on these for meaning.
 
 // regDiffMemoryLimit is the soft limit on the test binary's memory
 // (debug.SetMemoryLimit) where GOMEMLIMIT sets none. The package's tests
@@ -505,8 +504,8 @@ function kept(n) { var all = []; for (var j = 0; j < n; j++) { var a = []; for (
 
 // TestRegDiffTyped compares typed arrays' elements read and written by
 // get_index, set_index and their immediate forms, out of line
-// (regTypedGet, regTypedSet), with the tree's, and updates that write a
-// number's word alone.
+// (regTypedRead, regTypedStore), with the recorded answers, and updates
+// that write a number's word alone.
 func TestRegDiffTyped(t *testing.T) {
 	regDiffParallel(t)
 	src := `
@@ -539,8 +538,8 @@ function words() { var a = [1, -0, 0.5, 2], o = { x: 1, y: -0 }; var z = -0; a[0
 }
 
 // TestRegDiffElemWrites compares element writes on arrays that the fast
-// path does not answer (regSetMiss) with the tree's: appends at the
-// length, holes filled, a shared literal's element, a frozen or
+// path does not answer (regSetMiss) with the recorded answers: appends at
+// the length, holes filled, a shared literal's element, a frozen or
 // non-extensible array, a read-only length, a setter or a read-only
 // element up the chain, sparse arrays, an arguments object and keys that
 // are no index.
@@ -568,8 +567,8 @@ function proxied() { var log = [], a = [1], p = new Proxy(a, { set: function (o,
 	regDiff(t, src, calls)
 }
 
-// TestRegDiffLength compares get_length with the tree's: strings flat,
-// built and cut, with surrogates, and what is no string or array -- a
+// TestRegDiffLength compares get_length with the recorded answers: strings
+// flat, built and cut, with surrogates, and what is no string or array -- a
 // String object, a function, an object with a getter, null.
 func TestRegDiffLength(t *testing.T) {
 	regDiffParallel(t)
@@ -584,9 +583,9 @@ function lens() { var s = "", r = []; for (var i = 0; i < 20; i++) { s += "a\ud8
 }
 
 // TestRegDiffAppends compares appends to a local (append, str_freeze)
-// with the tree's: strings kept by an array, an object, a call, a return
-// or a global between appends, which must not see the appends after; a
-// read of the length, which keeps nothing; numbers, objects whose
+// with the recorded answers: strings kept by an array, an object, a call,
+// a return or a global between appends, which must not see the appends
+// after; a read of the length, which keeps nothing; numbers, objects whose
 // conversion runs code or throws, symbols, and a local that holds no
 // string; strings long enough to be grown in place many times over.
 func TestRegDiffAppends(t *testing.T) {
@@ -618,10 +617,10 @@ function cut(n) { var out = "", parts = []; for (var i = 0; i < n; i++) { out +=
 }
 
 // TestRegDiffLeafRun compares short bodies of numbers and upvalues that
-// register code runs without a frame (regLeafRun) with the tree's, where
-// they run and where they give up: what is no number, a store to an
-// upvalue after the operation that gave up, too few arguments, errors and
-// their stack lines.
+// register code runs without a frame (regLeafRun) with the recorded
+// answers, where they run and where they give up: what is no number, a
+// store to an upvalue after the operation that gave up, too few arguments,
+// errors and their stack lines.
 func TestRegDiffLeafRun(t *testing.T) {
 	regDiffParallel(t)
 	src := `
@@ -652,10 +651,10 @@ function held(xs) { var calls = 0, last = 0, both = 0; var r = xs.reduce((acc, x
 }
 
 // TestRegDiffObjectLiterals compares object literals made at once
-// (new_object_lit) with the tree's: key order with index-like keys,
-// values that throw or read the binding the literal goes to, many keys,
-// sites whose objects grow afterwards, and literals the form leaves to
-// define_field.
+// (new_object_lit) with the recorded answers: key order with index-like
+// keys, values that throw or read the binding the literal goes to, many
+// keys, sites whose objects grow afterwards, and literals the form leaves
+// to define_field.
 func TestRegDiffObjectLiterals(t *testing.T) {
 	regDiffParallel(t)
 	src := `
@@ -681,10 +680,10 @@ function wide() { var src = "return {"; for (var i = 0; i < 300; i++) src += "p"
 }
 
 // TestRegDiffCharCodeAt compares s.charCodeAt(i) (char_code_at) with the
-// tree's: positions inside, at and past the ends, fractions, NaN, -0 and
-// infinities; surrogate halves; arguments that are no number, whose
-// conversion runs code; receivers that are no string -- a String object,
-// a number, null, an object with a method of its own that throws; the
+// recorded answers: positions inside, at and past the ends, fractions, NaN,
+// -0 and infinities; surrogate halves; arguments that are no number, whose
+// conversion runs code; receivers that are no string -- a String object, a
+// number, null, an object with a method of its own that throws; the
 // built-in replaced by a function and by a getter, and put back; and the
 // stacks and messages of what throws, placed at the read or the call.
 func TestRegDiffCharCodeAt(t *testing.T) {
@@ -707,9 +706,10 @@ function scan(s) { var h = 0, i; for (i = 0; i < s.length; i++) h = (h * 31 + s.
 }
 
 // TestRegDiffRegExpLiterals compares RegExp literals (new_regexp) with the
-// tree's: a new object at each evaluation, with its own lastIndex; a
-// literal given to replace, split, match and test, whose RegExp the tree
-// may have back; flags; and a literal's object kept and compared.
+// recorded answers: a new object at each evaluation, with its own
+// lastIndex; a literal given to replace, split, match and test, whose
+// RegExp the call may give back; flags; and a literal's object kept and
+// compared.
 func TestRegDiffRegExpLiterals(t *testing.T) {
 	regDiffParallel(t)
 	src := `
@@ -726,12 +726,13 @@ function uses(s) { return [esc(s), s.split(/,\s*/).length, (s.match(/\d+/g) || [
 
 // TestRegDiffRegExpLiteralCalls compares a literal's exec and test
 // (lit_exec, lit_test, call_lit) and a literal given to replace, split and
-// match (call_arg_lit) with the tree's where the RegExp may be given back
-// and where it must not be: a sticky or global literal's lastIndex at each
-// evaluation, an object argument whose toString runs, the methods replaced
-// on the prototype and read through a getter in the order the call reads
-// them, a replacer function, a split's limit, errors thrown by the call and
-// by its arguments, and the RegExp kept by the method it calls.
+// match (call_arg_lit) with the recorded answers where the RegExp may be
+// given back and where it must not be: a sticky or global literal's
+// lastIndex at each evaluation, an object argument whose toString runs, the
+// methods replaced on the prototype and read through a getter in the order
+// the call reads them, a replacer function, a split's limit, errors thrown
+// by the call and by its arguments, and the RegExp kept by the method it
+// calls.
 func TestRegDiffRegExpLiteralCalls(t *testing.T) {
 	regDiffParallel(t)
 	src := `
@@ -794,8 +795,8 @@ function errs() { var out = []; try { /a/.test({ toString: function () { throw n
 }
 
 // TestRegDiffTry compares try statements in register code: exceptions of
-// throw statements, operators, getters, setters, built-ins and calls of
-// both tiers caught; catch bindings read, written, captured and shadowing;
+// throw statements, operators, getters, setters, built-ins and calls
+// caught; catch bindings read, written, captured and shadowing;
 // finally clauses run for a normal completion, break, continue, return and
 // throw, nested, overriding the completion or not; rethrows from catch and
 // finally; and a stack overflow.
@@ -1348,7 +1349,7 @@ function viaCap() { var r = []; for (var i = 0; i < 3; i++) r.push(cap(1), cap(1
 		}
 		return out
 	}
-	// The answers of the stack interpreter and the tree tier.
+	// The answers the stack interpreter and the tree tier gave.
 	want := []string{"7", "7", "21",
 		"3:1,2,3:15 1:4:15 0::15 3:1,2,3:15 1:4:15 0::15 3:1,2,3:15 1:4:15 0::15",
 		"5,6,7,8|10 9|18 5,6,7,8|10 9|18 5,6,7,8|10 9|18",

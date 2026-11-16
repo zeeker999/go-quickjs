@@ -6,12 +6,12 @@ import (
 )
 
 // Array(...) and new Array(...), where new.target is Array itself, are a
-// native leaf every tier applies without a frame (elemArrayNew), where its
-// check passes: any arguments but one number that is not an array length,
-// which throws its RangeError the ordinary way, as does every construction
-// by another new.target or of a subclass. Node's answers, on the trees and
-// in the interpreter, from holes and lengths to elements, prototypes and
-// errors; and the check's own answers.
+// native leaf the interpreter applies without a frame (elemArrayNew), where
+// its check passes: any arguments but one number that is not an array
+// length, which throws its RangeError the ordinary way, as does every
+// construction by another new.target or of a subclass. Node's answers,
+// from holes and lengths to elements, prototypes and errors; and the
+// check's own answers.
 func TestArrayConstructionLeaf(t *testing.T) {
 	const src = `'use strict'
 		function show(a) { return Array.isArray(a) + ':' + a.length + ':' + Object.keys(a).join('.') + ':' + Array.from(a, (v) => v === undefined ? 'u' : String(v)).join('.') + ':' + (Object.getPrototypeOf(a) === Array.prototype) }

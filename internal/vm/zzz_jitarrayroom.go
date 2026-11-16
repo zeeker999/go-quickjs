@@ -9,7 +9,7 @@ import (
 // jitLiteralArrayRoom is the capacity pool's next arrays are made with, the
 // literal's n elements at least. A pool with a large hint holds one array: a
 // batch would retain unused buffers and delay observing a changed length.
-// Native code may shrink a hint, but only the tree tier's two samples may
+// Native code may shrink a hint, but only the interpreter's two samples may
 // establish a large one. It is given its sample's length before the sample
 // goes: past the limit, or short, the room falls back to what a small literal
 // learns.

@@ -166,7 +166,7 @@ func (r *Runtime) jitOpFrameless(f *frame, cl *closure, in bytecode.Instr, args 
 		v, err := r.objectRest(src, excluded)
 		return v, err == nil
 	case bytecode.OpCallSpread:
-		// A leaf's call, Math.max(...a): applied as every tier applies it
+		// A leaf's call, Math.max(...a): applied as the interpreter applies it
 		// without a frame (jitPlainCall), its arguments the array's
 		// elements, where its check passes; any other call is the
 		// frame's.

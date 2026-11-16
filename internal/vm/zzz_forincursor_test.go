@@ -12,7 +12,7 @@ import (
 // by a break, a return and a throw; with keys deleted and added as they go;
 // stopped in a generator while others run; with a proxy's traps running
 // loops at their start and in their steps, and throwing; and in recursion.
-// Three rounds, so that the tree tier and native code meet them too.
+// Three rounds, so that native code meets them too.
 const forInCursorTestSrc = `
 const out = []
 function keys(o) { const r = []; for (const k in o) r.push(k); return r.join() }

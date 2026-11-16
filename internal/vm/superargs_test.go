@@ -10,7 +10,7 @@ import "testing"
 // arguments object, its rest array and a default computed by a call while
 // the constructor goes on computing in its slots; built-ins and a parent
 // whose argument is a construction of the same class get theirs as they
-// were given. Node's answers, on the trees and in the interpreter.
+// were given. Node's answers.
 func TestSuperArgumentsInPlace(t *testing.T) {
 	const src = `'use strict'
 		class Keep { constructor(a, b = a * 10, ...rest) { this.args = arguments; this.b = b; this.rest = rest; this.n = arguments.length } }

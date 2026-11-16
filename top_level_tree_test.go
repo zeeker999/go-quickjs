@@ -10,13 +10,12 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/vm"
 )
 
-// TestTopLevelTrees pins that the top level of a script, of eval code and of
-// a module, run as a tree where it has a loop, does what the interpreter
-// does: its declarations of vars, functions, lets and consts, the errors
-// they throw for a name already declared, a property that cannot be
-// shadowed or a global that cannot be extended, its completion value, eval
-// code's vars going to the function that called eval, and a module's
-// bindings, imports and top-level await.
+// TestTopLevelTrees pins what the top level of a script, of eval code and
+// of a module does where it has a loop: its declarations of vars,
+// functions, lets and consts, the errors they throw for a name already
+// declared, a property that cannot be shadowed or a global that cannot be
+// extended, its completion value, eval code's vars going to the function
+// that called eval, and a module's bindings, imports and top-level await.
 func TestTopLevelTrees(t *testing.T) {
 	// Each script runs in turn in one runtime. One marked must build a tree,
 	// which only its top level, or the eval code it runs, has a loop to

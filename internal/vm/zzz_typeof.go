@@ -1,12 +1,10 @@
 package vm
 
-// typeof's tests in the tree tier -- typeof f === 'function', typeof x !==
-// 'undefined', typeof v == 'object' -- as one node that asks the value's
-// kind and makes no string, as V8's TestTypeOf does. A typeof had been a
-// node making its name, typeofString's switch over the value's kind and
-// then over the name, and the equality a node comparing that string with
-// the constant: three calls, two switches and a string comparison for a
-// test of the value's tag.
+// typeof's tests -- typeof f === 'function', typeof x !== 'undefined',
+// typeof v == 'object' -- ask the value's kind and make no string, as V8's
+// TestTypeOf does (typeofKind, which the register interpreter's typeof
+// tests and switch (typeof x) ask), rather than making the name and
+// comparing that string with the constant.
 //
 // The test is the one Value.TypeOf answers: an object with
 // [[IsHTMLDDA]] (Annex B's document.all) is "undefined", any other
@@ -15,21 +13,11 @@ package vm
 // === 'strnig' -- is a test that never holds, the value still evaluated.
 // ==, != and their strict forms answer alike, the two sides strings.
 //
-// A typeof that no such test takes is still marked (tentryRare's typeOf,
-// its operand), so that a switch on it can test the kind as well (see
-// zzz_switch.go).
-//
 // Its functions are generic, each instantiated with struct{} alone: Go
 // lays a generic function's instantiations out after every function and
 // closure of the package (see zzz_direct.go), where code written anywhere
 // else moves the closures, or the functions after it, against the hot
-// ones (AGENTS.md). The tree builder reaches it through opHook, called
-// where buildBlock's call of op was, and eqJumpAtHook, which eqJumpAt is,
-// the function eqJump asks first: each asks this file first and then
-// makes the call it stands for. buildBlock's code grows within the
-// padding that rounds it to 32 bytes, op, eqJump and the closure eqJumpAt
-// had been are as they were, and every function and closure of the
-// package stays at its address (go tool nm).
+// ones (AGENTS.md).
 
 // The types' indices in typeofNames.
 const (

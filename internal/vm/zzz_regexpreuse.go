@@ -20,8 +20,9 @@ import (
 //
 // some 15,000 times an iteration, each array garbage once it returns.
 //
-// The tree tier finds such a call where it builds it (reuseExecCall): a
-// call of a method named exec whose result is stored in a local, l, of a
+// Such a call is one the register compiler marks (bytecode.RMarkReuse)
+// and execReuseOf, reading the stack form, finds: a call of a method named
+// exec whose result is stored in a local, l, of a
 // function that is no generator, async function or sloppy one with a
 // direct eval, that no closure captures and is no parameter -- the
 // arguments object may alias one -- and that every instruction reads, if
@@ -50,7 +51,7 @@ import (
 //
 // The call is made as any other, through callRest, by the same path: the
 // leaf's check, the leaf's call without a frame, the frame and the tick
-// where it is refused. The node only tells exec's leaf, just before, of
+// where it is refused. The call only tells exec's leaf, just before, of
 // the call's local and the frame's locals (execReuseCall, as
 // zzz_regexpdead.go tells it of a result nothing reads), which the leaf
 // takes as it begins, and uses where it makes the array of a match of
@@ -61,13 +62,12 @@ import (
 //
 // The functions are generic, each instantiated with struct{} alone: Go
 // lays a generic function's instantiations out after every function and
-// closure of the package (see zzz_direct.go). The tree builder reaches
-// reuseExecCall through opHook (zzz_typeof.go).
+// closure of the package (see zzz_direct.go).
 
 // execReuseSite is a call of exec whose arrays may be made again: l is the
 // local its result is stored in; strs says its pieces' Strings may be made
 // again too, and s is the one other local they are stored in, or -1. It is
-// the tree's, and holds nothing of any runtime's.
+// the register code's (regReuseSites), and holds nothing of any runtime's.
 type execReuseSite struct {
 	l, s int
 	strs bool
@@ -183,8 +183,8 @@ func piecesIn[_ any](r *Runtime, p *Value, strs []String) bool {
 }
 
 // slotGone reports whether the slot p is of the stack at or above its top,
-// where no frame is: a frame's locals and operands are beneath the top
-// while it runs (callTree), and its slots are left as they were when it
+// where no frame is: a frame's registers are beneath the top while it
+// runs, and its slots are left as they were when it
 // returns, to be written by the frames after it.
 func slotGone[_ any](r *Runtime, p *Value) bool {
 	if len(r.stack) == 0 {

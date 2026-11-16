@@ -145,10 +145,10 @@ func TestJITRegNativeCalls(t *testing.T) {
 }
 
 // regLitSrc calls RegExp literals' exec and test in loops, which register
-// code makes one instruction of (regexp_lit): lowered as the stack form's
-// code is (compile's regexpLit), the literal from its pool, its method
-// read, called; then RegExp.prototype.exec replaced, and a getter put in
-// its place, which the code was not compiled for.
+// code makes one instruction of (regexp_lit): lowered (compile's
+// regexpLit), the literal from its pool, its method read, called; then
+// RegExp.prototype.exec replaced, and a getter put in its place, which the
+// code was not compiled for.
 const regLitSrc = `
 function lits(n, s) {
 	var k = 0, m = "";

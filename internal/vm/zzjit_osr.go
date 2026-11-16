@@ -20,8 +20,7 @@ type jitLearned struct {
 	// (jitState's regLearned), whose pcs are register pcs throughout;
 	// regLink is the link native callers call its code through
 	// (jitState's regLinks, regLinkOf), nil until a caller asks for one,
-	// read without a key made, as the stack form's code reads its entry's
-	// link.
+	// read without a key made.
 	reg     bool
 	regLink *jitLink
 	// failed and failedEntries are the sites, by slot IR PC, and the
@@ -30,12 +29,12 @@ type jitLearned struct {
 	failedEntries []uint32
 	// bigints are the sites, by slot IR PC, of arithmetic and comparisons
 	// whose guard failed at BigInts in the int64 range: the code compiled
-	// again makes them on those natively (jitBigIntSeen), until that
+	// again makes them on those natively (jitRegBigIntSeen), until that
 	// speculation fails, and the site is generic (failed). bigwide are
 	// those of them whose guard failed at BigInts from 0 to 2^64-1, some
 	// past the int64 range: made natively as those (ssa's BigIntWide).
 	bigints, bigwide []int32
-	// resumed are the PCs after calls Go has gone on at (jitGoOn), which
+	// resumed are the PCs after calls Go has gone on at (jitRegGoOn), which
 	// the next compile has entries at (ssa.ResumeFeedback).
 	resumed []uint32
 	// literals are the object literals the code makes natively, each with
@@ -54,7 +53,7 @@ type jitLearned struct {
 	cellsPool *abi.ObjectPool
 	// poly are the property sites' cases and accessors the code met that
 	// their caches cannot hold, and whether each is megamorphic, which it
-	// is compiled again for (jitDeoptSeen, jitPolySeen).
+	// is compiled again for (jitRegDeoptSeen, jitPolySeen).
 	poly []jitPolySite
 	// typedReads are the element reads, by PC, whose result no native
 	// operation takes as a number, whose receivers have been typed arrays
@@ -84,7 +83,7 @@ type jitLearned struct {
 	stepResults []jitStepResult
 	// genResults are the pools of the calls of next the code makes
 	// natively (jitGenResultPool); genMakes the calls of generator
-	// functions whose generators it makes natively (jitGenMakeSeen).
+	// functions whose generators it makes natively (jitRegGenMakeSeen).
 	genResults []jitGenResult
 	genMakes   []jitGenMake
 	// strSites are the method reads that met a string receiver, which the
@@ -102,7 +101,7 @@ type jitLearned struct {
 	// compiled again, each with the function it was seen to call.
 	nativeCalls []jitInline
 	// inlines are the calls the code inlines, or will when compiled again,
-	// each with the function it was seen to call (jitCallSeen); notInline
+	// each with the function it was seen to call (jitRegCallSeen); notInline
 	// are those that stopped being: what the callee does kept leaving
 	// native code.
 	inlines   []jitInline
@@ -115,12 +114,12 @@ type jitLearned struct {
 	// decided (callSites' count), by PC, one of each code: as V8's call
 	// feedback holds every target a call met before its function is
 	// optimized, one that met more than one function is polymorphic, made
-	// natively to each, not inlined for the one it met last (jitCallSeen).
+	// natively to each, not inlined for the one it met last (jitRegCallSeen).
 	settling []jitInline
 	// calls are what the existing tiers counted of the function's calls,
 	// and of its invocations, since it was first given an entry
 	// (jitCallCounts): its code, and the entries made for it after this
-	// one, keep them (jitCompileFor, jitGhost); nil until it is invoked
+	// one, keep them (jitRegCompileFor, jitGhost); nil until it is invoked
 	// with this entry.
 	calls *jitCallCounts
 }
@@ -160,7 +159,7 @@ const jitKeptStarts = 4
 
 // jitFramesLeaving is how many calls of a function go on in the code kept
 // for its loops before it is asked whether most of its calls do
-// (jitFramesLeave): past a compile's worth of what leaving costs.
+// (jitRegFramesLeave): past a compile's worth of what leaving costs.
 const jitFramesLeaving = 256
 
 // osrInUse reports whether what e's entry for on-stack replacement holds

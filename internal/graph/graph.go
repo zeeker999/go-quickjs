@@ -1,5 +1,5 @@
 // Package graph is a directed graph over dense node numbers, 0 to n-1, and
-// what the tree tier's structuring asks of one: reverse postorder, natural
+// what a structuring of control flow asks of one: reverse postorder, natural
 // loops and how they nest -- one way of finding each, over arrays indexed
 // by node -- and a DOT rendering to look at one.
 //

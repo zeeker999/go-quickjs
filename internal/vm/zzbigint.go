@@ -127,8 +127,8 @@ func (r *Runtime) bigOfKept(neg bool, mag []uint) Value {
 
 // bigFreeList is the BigInts given back to a runtime, by their room in
 // words, from bigBlockFrom to bigFreeTop, up to bigFreeDepth of each:
-// the results of arithmetic in the tree tier that an operator of its
-// parent node took and nothing else saw, whose blocks C QuickJS would
+// the results of arithmetic that an operator took and nothing else saw
+// (regBigRelease, bigRelease), whose blocks C QuickJS would
 // free as it goes. A loop of arithmetic on numbers of hundreds of bits
 // makes results the size of the ones before, and in their blocks the
 // collector has a fraction of the bytes to collect -- and scans the
@@ -144,8 +144,8 @@ const (
 )
 
 // bigRelease gives back a's and b's blocks, those of a and b that flags
-// marks as fresh (treeFreshA, treeFreshB) -- each a result of the tree
-// tier's arithmetic that an operator of two BigInts has just taken, and
+// marks as fresh (treeFreshA, treeFreshB) -- each a result of arithmetic
+// that an operator of two BigInts has just taken, and
 // nothing else has seen -- and old's, the value of the local v is about
 // to be stored to, where flags says the local holds its values alone
 // (treeOwnRes) and old is one such a store kept (bigSoleBit), for
@@ -198,14 +198,13 @@ func (r *Runtime) bigGive(b *BigInt) {
 	}
 }
 
-// treeFreshA and treeFreshB mark, in the pc a tree's arithmetic or bitwise
-// node passes arithSlow or bitwiseSlow, its left and right operands as
-// fresh: trees of arithmetic of their own, whose results nothing else
-// takes, which a BigInt operator of the two may give back (bigRelease).
-// treeOwnRes marks the node as one whose result is stored to a local that
-// holds its values alone, the local treeOwnShift's bits number
-// (zzbigown.go). treePCMask is the pc itself. A function whose pc is past
-// it has no marks.
+// treeFreshA and treeFreshB mark, in the flags jitBigRelease passes
+// bigRelease for native code's operator, its left and right operands as
+// fresh: results of arithmetic of their own, which nothing else takes,
+// which a BigInt operator of the two may give back (bigRelease).
+// treeOwnRes marks the operator as one whose result is stored to a local
+// that holds its values alone (zzbigown.go). treeOwnShift and treePCMask
+// are read by nothing.
 const (
 	treePCMask   = 1<<20 - 1
 	treeOwnShift = 20

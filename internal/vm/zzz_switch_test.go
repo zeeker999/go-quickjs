@@ -203,8 +203,8 @@ const switchTestWant = "A.d3.-.A.3.s.Acf.AB.b!.12.25.-.-.caught:boom,S.d3.-.-.36
 
 // A run of a switch's literal cases is one lookup (zzz_switch.go),
 // which answers as the interpreter's chain of comparisons does, and as
-// Node does. Each function has a local of its own, so that it is run on
-// its tree rather than by pureCall.
+// Node does. Each function has a local of its own, so that it is run as
+// register code rather than by pureCall.
 func TestSwitchLookups(t *testing.T) {
 	t.Parallel()
 	for _, tree := range []bool{true} {

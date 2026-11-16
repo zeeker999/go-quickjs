@@ -20,7 +20,7 @@ import (
 //
 // Native counts the times its code ran -- Go's entries, at its start or
 // into a loop, and native callers' calls -- and Declined the calls the
-// existing tiers made without entering it, which a slow function's are;
+// interpreter made without entering it, which a slow function's are;
 // Hosts, Guards and Ended count its exits: to Go for an operation, at a
 // failed guard, and finished in the interpreter; GoCalls the calls of Go
 // it made; Work the work done natively, in instructions, as the JIT

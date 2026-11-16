@@ -5,7 +5,7 @@ import "testing"
 // TestIteratorsClosedBeforeFinally pins that a return, a break or a
 // continue leaving a for...of inside a try closes the loop's iterator
 // before the try's finally clause runs, as the loop is left before the try
-// is, on both tiers; that a failure in the iterator's return method then
+// is; that a failure in the iterator's return method then
 // becomes the completion, which a catch around the loop catches and one
 // inside it does not; and that a return leaving a finally clause's own loop
 // does the same. The answers are Node's.

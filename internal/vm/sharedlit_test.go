@@ -18,10 +18,9 @@ func sharedElemsForTest(v Value) (bool, unsafe.Pointer) {
 	return o.flags&objSharedElems != 0, unsafe.Pointer(unsafe.SliceData(o.elemsOf()))
 }
 
-// TestSharedArrayLiteral pins that the tree tier makes the arrays of a
-// literal of constants over one storage of the constants, marked shared,
-// and that the interpreter, whose case of new_array is unchanged, makes each
-// its own. A literal with anything but constants, or none, has no site.
+// TestSharedArrayLiteral pins that register code makes the arrays of a
+// literal of constants over one storage of the constants, marked shared. A
+// literal with anything but constants, or none, has no site.
 func TestSharedArrayLiteral(t *testing.T) {
 	t.Parallel()
 	for _, tree := range []bool{true} {
@@ -60,11 +59,10 @@ func TestSharedArrayLiteral(t *testing.T) {
 }
 
 // TestSharedArrayLiteralWrites pins that every way a script can write an
-// array leaves a shared literal's other arrays as they were, and does to the
-// array written what it does to an array of its own: each write is run on
-// a shared array, with the tree tier, and on one of its own, in the
-// interpreter, and the two must agree. Each has a literal of its own, which
-// gives sharing up after a few copies.
+// array leaves a shared literal's other arrays as they were, and does to
+// the array written what it does to an array of its own: each write is run
+// on a shared array, and the literal's next arrays must be as they were.
+// Each has a literal of its own, which gives sharing up after a few copies.
 func TestSharedArrayLiteralWrites(t *testing.T) {
 	t.Parallel()
 	writes := []string{
@@ -175,16 +173,13 @@ func TestSharedArrayLiteralWrites(t *testing.T) {
 	for _, form := range []string{"function", "script", "interpreter"} {
 		for _, w := range writes {
 			var got [2]string
-			// Inside a function, which the tree tier builds, or as the script's
-			// own code, which runs in the interpreter, where its store tests
-			// the flag in executeAt's case.
+			// Inside a function, or as the script's own code.
 			run := `(function () { ` + w + ` })();`
 			switch form {
 			case "script":
 				run = w + `;`
 			case "interpreter":
-				// A function with a direct eval, which the tree tier does not
-				// build: its stores are executeAt's OpSetIndex.
+				// A function with a direct eval.
 				run = `(function () { ` + w + `; if (a.length < 0) eval(''); })();`
 			}
 			for k, tree := range []bool{true} {
@@ -343,8 +338,7 @@ func (r *Runtime) runOrFatalForTest(t *testing.T, src string) Value {
 // doubles, int32's bounds, long strings. Negations (-0 among them), NaN and
 // Infinity, which are not constants' pushes, holes, BigInts and nested
 // literals make no site of the literal holding them, while a nested
-// literal of constants is one of its own. Each answer is the same with the
-// tree tier, which shares, and without, in the interpreter.
+// literal of constants is one of its own.
 func TestSharedArrayLiteralConstants(t *testing.T) {
 	t.Parallel()
 	long := strings.Repeat("long", 300)

@@ -377,9 +377,7 @@ func (o *Object) embedArrayExt(e *arrayExt) {
 // the slot it is spilled to then holds nil+32, or a pointer past o's
 // allocation, live across the loop's calls, and a stack's copy or a
 // collection throws (invalid pointer found on stack). extAt and dataExtAt
-// are still unsafe.Add, because their field's address, the same
-// instructions once compiled, schedules executeAt's and allocates its
-// registers otherwise; internal/cmd/hoistcheck finds each sum the pass
+// are still unsafe.Add; internal/cmd/hoistcheck finds each sum the pass
 // moves, theirs included, and fails for one it does not know to have its
 // object wherever the loop is entered.
 func (o *Object) arrayExt() *arrayExt {
@@ -1672,7 +1670,8 @@ var elemHole = uninitialized
 // whole of the value's bits with the hole's: the other uninitialized values
 // -- the markers of a Map's or a WeakMap's deleted entries -- are never
 // elements, and one comparison keeps elemAt and setElem, which ask it of
-// every element a tree reads or writes, small enough for Go to inline.
+// every element the interpreter reads or writes, small enough for Go to
+// inline.
 func isHole(v Value) bool { return math.Float64bits(v.num) == holeBits }
 
 // holeBits is elemHole's bits: an uninitialized value of payload 0.

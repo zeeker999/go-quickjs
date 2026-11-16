@@ -16,7 +16,7 @@ import (
 // is made, by its maker, by another closure or one a closure makes, by an
 // update, by an eval, through a mapped arguments object; one still in its
 // dead zone, as a hoisted function or a switch's other case sees it, or a
-// parameter list's later parameter. Each on both tiers.
+// parameter list's later parameter.
 func TestCaptureByValue(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -267,8 +267,8 @@ func runCaptureCase(t *testing.T, r *Runtime, c captureCase, rounds int) string 
 	return v.String().Go()
 }
 
-// TestCaptureByValueCases runs captureCases on both tiers, three calls of
-// each case's function in a runtime of its own.
+// TestCaptureByValueCases runs captureCases, three calls of each case's
+// function in a runtime of its own.
 func TestCaptureByValueCases(t *testing.T) {
 	t.Parallel()
 	for _, c := range captureCases {

@@ -107,8 +107,8 @@ const regexpLeafTestWant = `null,1,false,1 null,0,false,0 null,0,false,0 null,1,
 
 // RegExp.prototype's exec and test are native leaves (zzz_regexpleaf.go),
 // applied without a frame where nothing they do runs script, throws or
-// writes lastIndex: each answer is Node's, in the tree tier and in the
-// interpreter, and the check passes exactly where it says.
+// writes lastIndex: each answer is Node's, and the check passes exactly
+// where it says.
 func TestRegExpLeaves(t *testing.T) {
 	for _, tree := range []bool{true} {
 		r := New(Config{})
@@ -303,11 +303,10 @@ func TestRegExpLeaves(t *testing.T) {
 	_ = bytecode.OpCall
 }
 
-// A match the matcher makes past its step budget, with nothing to stop
-// the script, throws its SyntaxError as regexpMatch throws it, through
-// exec's and test's one-pass function (regexpLeaf's match), in the tree
-// tier and in the interpreter, where a RegExp neither global nor sticky
-// takes it.
+// A match the matcher makes past its step budget, with nothing to stop the
+// script, throws its SyntaxError as regexpMatch throws it, through exec's
+// and test's one-pass function (regexpLeaf's match), where a RegExp neither
+// global nor sticky takes it.
 func TestRegExpLeafComplexity(t *testing.T) {
 	t.Parallel()
 	for _, c := range []struct {

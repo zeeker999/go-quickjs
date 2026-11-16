@@ -27,8 +27,9 @@ import (
 // string too long to be one, which throws, is replaced as before; so is any
 // other replace -- a function's, which is called as it was.
 //
-// Whether a call's result is read the bytecode says: the instruction
-// after the call takes it (deadResultAt) -- a drop, a jump on its truth,
+// Whether a call's result is read the register compiler says
+// (bytecode.RMarkDead): the instruction after the call takes it -- a
+// drop, a jump on its truth,
 // && 's jump_if_false_keep, which keeps only a falsy value, null, or a
 // not. The call is made as it was, through callRest, by the same path:
 // the leaf's check, the leaf's call without a frame, the frame and the
@@ -40,27 +41,16 @@ import (
 // a memory meter counts what is made, or a debugger may run the script's
 // code at the call's tick, the call is told nothing.
 //
-// The tree tier builds such a call into a node of its own (deadExecCall)
-// wherever the method read is exec's or replace's, on a receiver of any
-// kind: a local or this read in place (a method entry), a property of
-// either, a RegExp literal (regexpLitCall's), and anything in its slot --
-// an upvalue, a global, an element -- whose get_prop_this deadExecGet
-// marks (execDeadRare, replaceDeadRare); replace given a RegExp literal
-// gives the literal its RegExp back as regexpArgCall's node does, but for
-// a method entry's, which stays regexpArgMethodCall's. Any other call is
-// the builder's as before. Native code tells the functions through its
-// leaf's call's description (ssa.CallSite's Unused) or the bytecode after
-// its call of Go (zzjit_regexpdead.go).
+// The register interpreter makes a call so marked through regDeadCall,
+// wherever the method read is exec's or replace's; any other call is made
+// as before. Native code tells the functions through its leaf's call's
+// description (ssa.CallSite's Unused) or the bytecode after its call of Go
+// (zzjit_regexpdead.go).
 //
 // The functions are generic, each instantiated with struct{} alone: Go
 // lays a generic function's instantiations out after every function and
-// closure of the package (see zzz_direct.go). The tree builder reaches
-// them through opHook (zzz_typeof.go).
+// closure of the package (see zzz_direct.go).
 
-// execDeadRare and replaceDeadRare are the rare of a get_prop_this of exec
-// or of replace whose receiver is in its slot, beneath it (deadExecGet),
-// which the call of it builds into deadExecNode's node where nothing reads
-// its result.
 var ()
 
 // deadCallRest is callRest's call of o, fd its function's data, on recv

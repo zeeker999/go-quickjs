@@ -9,14 +9,13 @@ import (
 // A pure body's misses are its template's (closureCode.pureMiss): a
 // callback made anew at each call of its maker, whose read of a getter
 // misses at every call, stops being tried once its template has missed
-// pureMissLimit times, and a closure made after is planned its tree's call,
-// as one made once is. Counted per closure, each was tried and given up on
+// pureMissLimit times. Counted per closure, each was tried and given up on
 // at every call, then made with a frame.
 //
-// The tree's mechanism, on the old tiers. Register code's call site
-// answers each closure of the template as the one it met (regSameTemplate),
-// whose frame the native code enters itself, without trying the body
-// frameless: there the template is tried pureMissLimit times at most.
+// Register code's call site answers each closure of the template as the one
+// it met (regSameTemplate), whose frame the native code enters itself,
+// without trying the body frameless: there the template is tried
+// pureMissLimit times at most.
 func TestPureMissPerTemplate(t *testing.T) {
 	t.Parallel()
 	for _, old := range []bool{false} {

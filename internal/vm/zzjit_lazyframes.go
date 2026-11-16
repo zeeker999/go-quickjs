@@ -11,7 +11,7 @@ import (
 )
 
 // jitLazyLevels is a call of Go from a native callee whose levels below
-// the calling one have no frames yet (jitGoCallNested): those of contexts
+// the calling one have no frames yet (jitRegGoCallNested): those of contexts
 // root+1 to idx-1, at depth on, the calling level's frame past them. They
 // are made when a frame among them is read -- frameAt, which a stack trace,
 // a function's caller, a generator's search for its own run read through

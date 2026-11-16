@@ -2409,8 +2409,8 @@ type GoOp uint8
 // GoLeaf is a call of a leaf, a built-in that runs no script where its
 // check passes (LeafFeedback): the function the first operand, which the
 // call has checked it calls, the receiver the second of a method call
-// (Method), the Argc arguments past them. Go applies it as every tier does
-// without a frame -- the built-in's own function where its check passes,
+// (Method), the Argc arguments past them. Go applies it as the interpreter
+// does, without a frame -- the built-in's own function where its check passes,
 // or the leaf's own -- with nothing to find out of the call first, as V8's
 // code calls a fast API function with no frame of JavaScript's, and
 // writes its result to the call's keep cell; what it refuses leaves for Go
@@ -2497,7 +2497,7 @@ const (
 // object is kept in once made: Go reads the frame's argument k, where the
 // object is not made and k is an index of the arguments; with Argc 1, its
 // one operand that local, arguments.length, their count. Go refuses the
-// rest, and the code leaves for Go to make it there (jitHost): the object
+// rest, and the code leaves for Go to make it there: the object
 // made, an index past the arguments, any other key.
 
 // GoHost is an instruction of a function's own code that reads only its
@@ -2663,7 +2663,7 @@ const (
 // operation's operands are registers, not the copies to and from the
 // stack the stack form's are -- and has 0.85 of the stack form's
 // instructions, the median of Are We Fast Yet's 284 functions whose names
-// are unique, lowered both ways (LowerRegInline, LowerSSAInline): V8's
+// are unique, lowered both ways when the JIT lowered the stack form too: V8's
 // 2.6 bytes to a stack-form instruction are 3.1 to a register one. So each
 // of its instructions counts 20/17 of one, rounded, and a callee, a
 // function's budget and a small or looping callee take the same code in
@@ -3009,9 +3009,8 @@ type PropertySite struct {
 	// makes on the read's branch of its own (ObjectOfTry), rather than
 	// at an exit; a read of undefined or null, which throws, exits still.
 	Primitives bool
-	// Scan, for a read whose cache is empty though it may have run -- the
-	// VM's interpreter reads a small table without filling it, which only
-	// its tree tier does -- has a receiver's own small table searched for
+	// Scan, for a read whose cache is empty though it may have run, has a
+	// receiver's own small table searched for
 	// the key, plain data, and deoptimizes where it does not have it,
 	// rather than at every receiver.
 	Scan bool
@@ -5555,9 +5554,8 @@ func (b *builder) goKeyedWrite(blk *Block, in ir.Instruction, operand func(ir.Op
 }
 
 // iterStep makes in, a loop's step, by a call of Go from native code
-// (GoCall, Step) -- as the tree tier's step calls iterNext, where an exit
-// and an entry at every turn had cost a small loop's body four times over
-// -- and ends blk with the branch on its answer: the uninitialized value,
+// (GoCall, Step) -- an exit and an entry at every turn had cost a small
+// loop's body four times over -- and ends blk with the branch on its answer: the uninitialized value,
 // which no step yields, for a cursor done, any other its next value. What
 // Go refuses leaves for Go to make after an exit.
 func (b *builder) iterStep(blk *Block, pc int, in ir.Instruction, operand func(ir.Operand) *Value, guard func(Op, Type, ir.ExitKind, ...*Value) *Value) {

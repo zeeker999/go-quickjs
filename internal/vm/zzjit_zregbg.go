@@ -15,19 +15,18 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
 
-// Register code compiled in the background, as the stack form's is
-// (zzjit_background.go): the runtime's goroutine lowers the function's
-// register code and asks its feedback ahead (jitRegSnapshotOf); a worker
-// of the process's builds the function from the snapshot, optimizes it
-// and runs the backend (jitRegJob.run), touching nothing of the
-// runtime's; and the runtime's goroutine installs it at a later check
-// (jitDrain), at a sample of the register tier's (jitRegHot), placing its
-// code as the compile made on the spot would have. Meanwhile the function
-// runs in the interpreter, or in its code that the compile replaces, which
-// goes on running, valid, called by its native callers, as V8's does; a
-// compile of a function deoptimized since is thrown away, as the stack
-// form's is (jitReoptimized). A build that asked what the snapshot was not asked (a
-// miss), or whose questions took back what they cannot, is built on the
+// Register code compiled in the background (zzjit_background.go): the
+// runtime's goroutine lowers the function's register code and asks its
+// feedback ahead (jitRegSnapshotOf); a worker of the process's builds the
+// function from the snapshot, optimizes it and runs the backend
+// (jitRegJob.run), touching nothing of the runtime's; and the runtime's
+// goroutine installs it at a later check (jitDrain), at a sample of the
+// interpreter's (jitRegHot), placing its code as the compile made on the
+// spot would have. Meanwhile the function runs in the interpreter, or in
+// its code that the compile replaces, which goes on running, valid, called
+// by its native callers, as V8's does; a compile of a function deoptimized
+// since is thrown away. A build that asked what the snapshot was not asked
+// (a miss), or whose questions took back what they cannot, is built on the
 // runtime's goroutine at the install instead.
 
 // jitRegJob is a register compile in the background.
@@ -38,8 +37,8 @@ type jitRegJob struct {
 	realm  *Realm
 	callee bool
 	// deopts is the function's deoptimizations when it was prepared: a
-	// compile its function deoptimized since is thrown away, as the stack
-	// form's is (jitReoptimized), what that taught asked for anew.
+	// compile its function deoptimized since is thrown away, what that
+	// taught asked for anew.
 	deopts uint16
 	// frameAt is the loop's header a frame waits at for the compile
 	// (jitRegFrameAt), whose entry escape analysis keeps.
@@ -93,9 +92,8 @@ func jitRegShape(f *ssa.Func, p *ir.Program, cl *closure, c *regCode) map[uint32
 	f.Scratch = p.Locals - jitRegScratchBase(p)
 	f.ThisSlot = -1
 	if p.This {
-		// A derived constructor's this binding, past its captured
-		// bindings, which native code finds in the context (abi.Context's
-		// This), as the stack form's this slot.
+		// A derived constructor's this binding, past its captured bindings,
+		// which native code finds in the context (abi.Context's This).
 		f.ThisSlot = p.UpvalueBase + p.Upvalues
 	}
 	f.Params, f.StartOnly = p.ParamBase+p.Params, false
@@ -121,14 +119,12 @@ func jitRegShape(f *ssa.Func, p *ir.Program, cl *closure, c *regCode) map[uint32
 			continue
 		}
 		// An entry at a loop's header the build did not mark OSR's, which
-		// on-stack replacement enters all the same, as the stack form's
-		// enters any entry at a loop's header (tryJITAt): a header Go has
-		// gone on at, whose entry the code keeps, its objects made there
+		// on-stack replacement enters all the same: a header Go has gone on
+		// at, whose entry the code keeps, its objects made there
 		// (jitRegFeedback's Resumed, jitRegFramesLeave); and in a
 		// generator's code, whose yields suspend it natively where a step
 		// resumed it, every header: the build marks none of its entries
-		// OSR's, none the escape analysis may drop (ssa.Func's
-		// GenResumes).
+		// OSR's, none the escape analysis may drop (ssa.Func's GenResumes).
 		if headers == nil {
 			headers = make([]bool, len(p.Code)+1)
 			for pc, in := range p.Code {
@@ -222,9 +218,9 @@ func (j *jitRegJob) workRecovering() {
 	j.mc, j.err = mir.CompileWith(&j.w.MIR, f, j.enc, j.opts)
 }
 
-// jitRegDrainJobs installs the register compiles in the background that
-// are done, as jitDrain installs the stack form's: under QJS_JIT_STRESS's
-// background=K, each at the Kth check after it was handed over.
+// jitRegDrainJobs installs the register compiles in the background that are
+// done (jitDrain): under QJS_JIT_STRESS's background=K, each at the Kth
+// check after it was handed over.
 func (r *Runtime) jitRegDrainJobs(stress bool, k int) {
 	s := r.jit
 	for i := 0; i < len(s.regJobs); {
@@ -314,12 +310,11 @@ func (r *Runtime) jitRegInstall(j *jitRegJob) {
 		s.backendPanics++
 		e.refusal = fmt.Sprintf("%v: %v", jitRefused, j.err)
 	case j.missed:
-		// Built here, as on the spot, from feedback asked anew, as the
-		// stack form's missed compile is (compileSSAFinish): the job's
-		// was the snapshot's, whose questions' effects -- the closures
-		// the code inlines, the objects and shapes it keeps -- the
-		// snapshot took back, to replay those the build asks; asked again,
-		// an instruction's Inline and NativeCalls answer from its cache
+		// Built here, as on the spot, from feedback asked anew: the job's
+		// was the snapshot's, whose questions' effects -- the closures the
+		// code inlines, the objects and shapes it keeps -- the snapshot
+		// took back, to replay those the build asks; asked again, an
+		// instruction's Inline and NativeCalls answer from its cache
 		// (jitRegFeedback's askedOf) without them, and code built from it
 		// had inlined callees its keep did not name, which an exit inside
 		// one could not find (jitRegInlined).

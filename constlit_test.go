@@ -13,8 +13,7 @@ import (
 // and the value after; a switch's case block's binding read past its
 // declaration; a direct eval's var and a with object answering for the
 // name; a loop's const; an assignment, which throws a TypeError; each kind
-// of literal; and tests of a const false and true; on the tree tier and
-// in the interpreter.
+// of literal; and tests of a const false and true.
 func TestConstLiteralReads(t *testing.T) {
 	const src = `(function () {
   const r = [];

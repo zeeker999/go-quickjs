@@ -87,7 +87,7 @@ const forEachSetup = `
 
 // A forEach on an array is a loop of the caller's native code (ssa's
 // forEachCall), its callback called natively, where Go had made every
-// forEach and run its callbacks in the tree tier; what the loop's checks
+// forEach and run its callbacks in the interpreter; what the loop's checks
 // find -- a hole, an element past the array's end now, a callback that
 // leaves -- Go goes on with from that index (jitLoopFinish), as V8's
 // builtin continuation frames do. Each answer is the interpreter's, and

@@ -8,9 +8,8 @@ import (
 // whose arguments object is never made: RayTrace's Class.create
 // constructor, called and constructed, with fewer and more arguments than
 // it names, a mapped parameter assigned before the call, an apply that is
-// not the built-in, and nested forwarding -- the stack interpreter's
-// answers, run as register code, the arguments passed on without an
-// object.
+// not the built-in, and nested forwarding -- run as register code, the
+// arguments passed on without an object.
 func TestRegApplyArgs(t *testing.T) {
 	const src = `
 		var Class = { create: function () { return function () { this.initialize.apply(this, arguments) } } };

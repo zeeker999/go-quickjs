@@ -5,7 +5,7 @@ package vm
 import "encoding/binary"
 
 // BigInt64Arrays and BigUint64Arrays read natively: an element read that
-// has met one (jitIndexSeen), and the loops of their forEach, reduce,
+// has met one (jitRegIndexSeen), and the loops of their forEach, reduce,
 // filter, some, every, find and findIndex, read the element as a BigInt
 // held in its value (ssa.OpBigElemRead), its type's word, which native
 // code boxes where a use needs a value, as V8's code reads a

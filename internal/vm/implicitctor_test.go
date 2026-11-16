@@ -11,7 +11,7 @@ import "testing"
 // which called next at each construction. The arguments reach the parent as
 // they were given -- none, an undefined, a null, through two implicit
 // constructors -- and so do those of a class extending Array and a
-// function. Each answer is Node's, on the trees and in the interpreter.
+// function. Each answer is Node's.
 func TestImplicitConstructorForwards(t *testing.T) {
 	t.Parallel()
 	const src = `

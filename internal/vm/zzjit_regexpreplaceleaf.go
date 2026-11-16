@@ -45,10 +45,9 @@ import (
 // (abi.GoCallState's Unused), the leaf makes no string: one as truthy as
 // it would have been stands for it (deadReplaced).
 //
-// A RegExp literal's replace stays a call of Go in the stack form's code,
-// which gives the literal's pool its RegExp back (jitRegExpLitPool); in
-// register code, whose call makes the literal (RMarkLitArg), natively from
-// its pool, it is the leaf's, which gives it back (jitLeafForm's giveArg).
+// A RegExp literal's replace, whose call makes the literal (RMarkLitArg)
+// natively from its pool, is the leaf's, which gives it back (jitLeafForm's
+// giveArg).
 //
 // The functions are generic, each instantiated with struct{} alone, and
 // the leaf's check and function are methods of a generic type.
@@ -271,8 +270,7 @@ func jitReplaceLeafForm[_ any](r *Runtime, st *abi.GoCallState, fd *funcData, fi
 	if st.Give != 0 {
 		// A RegExp literal the call made its first argument (RMarkLitArg),
 		// from its pool: given back once the leaf has replaced with it,
-		// which keeps nothing of it, as the stack form's call of Go gives
-		// a literal's back (jitRegExpLitDone).
+		// which keeps nothing of it.
 		form.give, form.giveArg = (*abi.ObjectPool)(*(*unsafe.Pointer)(unsafe.Pointer(&st.Give))), true
 	}
 	st.LeafForm = unsafe.Pointer(form)

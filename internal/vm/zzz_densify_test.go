@@ -95,8 +95,7 @@ sparseGaps70000=70000/23334/46666/816678333/0,3,6..69990,69993,69996,69999/23335
 6890
 true2000`
 
-// A sparse array made dense again answers as it did: Node's answers, in the
-// tree tier and in the interpreter.
+// A sparse array made dense again answers as it did: Node's answers.
 func TestDensify(t *testing.T) {
 	t.Parallel()
 	for _, tree := range []bool{true} {

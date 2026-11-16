@@ -26,8 +26,7 @@ const argsRecursionSetup = `
 // calls of Go, leave native code at every call:
 //   - a.length of an object that is no array, once its speculation has
 //     failed, is Go's read from native code (ssa.GoHost); and at an exit Go
-//     reads it, and an element by a local's key, and goes on natively, where
-//     jitHost had made neither, the interpreter finishing the invocation;
+//     reads it, and an element by a local's key, and goes on natively;
 //   - a[i] of an arguments object that aliases nothing is Go's read from
 //     native code (jitKeyedClass, ssa.GoIndex), as an ordinary object's;
 //   - a call of Go leaves code due to be compiled again only where the

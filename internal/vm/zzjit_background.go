@@ -12,14 +12,15 @@ import (
 )
 
 // Compiling in the background, as V8's concurrent recompilation does
-// (docs/performance-plan.md, D8). A compile is a jitJob in three steps: the
-// runtime's goroutine prepares it, building the function from what the
-// runtime knows (compileSSAPrepare); a worker of the process's optimizes it
-// and runs the backend (jitJob.run), touching nothing of the runtime's; and
-// the runtime's goroutine installs it at a later check (jitDrain), placing
-// its code, as the compile made on the spot would have once compiled
-// (jitCompiled, jitReoptimized). Meanwhile the function runs in the
-// existing tiers, or in its code, still valid, that the compile replaces.
+// (docs/performance-plan.md, D8). A compile is a jitRegJob
+// (zzjit_zregbg.go) in three steps: the runtime's goroutine lowers the
+// function's register code and asks its feedback ahead
+// (jitRegSnapshotOf); a worker of the process's builds, optimizes it and
+// runs the backend (jitRegJob.run), touching nothing of the runtime's; and
+// the runtime's goroutine installs it at a later check (jitDrain,
+// jitRegInstall), placing its code as the compile made on the spot would
+// have. Meanwhile the function runs in the interpreter, or in its code,
+// still valid, that the compile replaces.
 //
 // The runtime asks it with JITBackground, or QJS_JIT_STRESS's background
 // does, which a test that sets its own stress (jitStress) leaves out, as
@@ -29,13 +30,13 @@ import (
 
 // jitJobsMax is how many compiles a runtime has in the background at once,
 // as V8 queues at most eight of an isolate's: past it, a function due to be
-// compiled waits in the existing tiers, and is asked again at its next
+// compiled waits in the interpreter, and is asked again at its next
 // invocation.
 const jitJobsMax = 4
 
 // A jitJob's state, which hands it between its worker and the runtime's
 // goroutine: queued for a worker, being worked, done, or abandoned by its
-// runtime, whose worker then gives its workspace back (jitJob.run).
+// runtime, whose worker then gives its workspace back (jitRegJob.run).
 const (
 	jitJobQueued int32 = iota
 	jitJobWorking
@@ -50,10 +51,7 @@ const (
 // (JITCompileRepeat), which they do on the compiling goroutine, nor while a
 // test looks at each compile's SSA (jitSSAOptimized). A compile there that
 // finds the runtime with as many in the background as it may (jobsFull)
-// waits, asked again at a later check, rather than be made on the spot:
-// the callees a compile seeds (jitSeedCalls) are called through their
-// links meanwhile, and those it wants (jitWantedCallees) have it compiled
-// again once it has spent a budget.
+// waits, asked again at a later check, rather than be made on the spot.
 func (r *Runtime) jitInBackground(fn *bytecode.Function) bool {
 	return (r.jitBackground || r.jitStress.background) && !fn.TopLevel && r.jit != nil && r.jit.compiling == 0 &&
 		mir.Timing == nil && JITCompileRepeat == 0 && jitSSAOptimized == nil
@@ -135,8 +133,7 @@ type jitWorkerPool struct {
 	running int
 }
 
-// jitTask is what a worker runs: a compile's work (jitJob), a lowering
-// (jitLowerTask).
+// jitTask is what a worker runs: a compile's work (jitRegJob).
 type jitTask interface{ run() }
 
 // jitWorkerLimit is how many workers compile at once.

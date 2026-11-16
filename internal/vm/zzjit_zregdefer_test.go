@@ -7,11 +7,10 @@ import (
 )
 
 // A function whose compile is deferred for want of room, the JIT's memory
-// full of young code, warms up again before it is asked for again, as the
-// stack form's deferred entry does (tryJITAt): its loop's back edges ask
-// once a budget of work, not at each check. Its budget left spent, every
-// check of its loop had asked -- each a lookup of what it learned and the
-// cache's settling -- millions of times in a run of
+// full of young code, warms up again before it is asked for again: its
+// loop's back edges ask once a budget of work, not at each check. Its
+// budget left spent, every check of its loop had asked -- each a lookup of
+// what it learned and the cache's settling -- millions of times in a run of
 // TestJITRegRealmsWithinTheBudgetClocked, three quarters of its time.
 func TestJITRegDeferredWarmsUpAgain(t *testing.T) {
 	if !jitSSABackend {

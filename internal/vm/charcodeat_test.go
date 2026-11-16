@@ -8,8 +8,8 @@ import "testing"
 // past either end, a lone surrogate -- and makes the call for anything else:
 // a position of another type, whose conversion runs script, a String
 // object, an object with a method of that name, and the built-in replaced
-// on String.prototype, which the same site then calls. The answers are the
-// interpreter's and the trees' alike, and Node's.
+// on String.prototype, which the same site then calls. The answers are
+// Node's.
 func TestCharCodeAtNode(t *testing.T) {
 	t.Parallel()
 	src := `

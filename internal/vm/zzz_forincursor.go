@@ -10,7 +10,7 @@ package vm
 // forInStep, and that is the whole of its release: after it, what is left
 // of the loop is iter_close, which leaves a for...in's cursor alone, and a
 // drop, so nothing reads the cursor again, whenever the next loop takes it.
-// Every loop's start comes through here, from every tier, native code's by
+// Every loop's start comes through here, the interpreter's and native code's by
 // jitForInPlain, so native code needs no release of its own.
 //
 // What that rests on. No script reaches a cursor, so its loop is its only

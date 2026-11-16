@@ -7,7 +7,7 @@ import (
 
 // TestGeneratorValues pins generators and async functions with each count
 // of arguments and locals around the sizes newGenerator makes in one
-// allocation with the object, in both tiers: what the parameters and the
+// allocation with the object: what the parameters and the
 // arguments object see, locals captured by closures across suspensions,
 // and what genRare keeps: an async arrow's new.target and its share of a
 // derived constructor's this, and an async generator's queue. A direct
@@ -141,8 +141,7 @@ func TestGeneratorLoopRoom(t *testing.T) {
 // suspends with nothing beneath the value, in no try statement and with
 // nothing captured has no saved part however often it suspends, one
 // that leaves operands, handlers or captures makes it once, and a
-// generator that finishes lets it go. Each resumption runs as its tree
-// and in the interpreter, which make the same saved part.
+// generator that finishes lets it go.
 func TestGeneratorSavedPart(t *testing.T) {
 	t.Parallel()
 	if unsafe.Sizeof(uintptr(0)) != 8 {

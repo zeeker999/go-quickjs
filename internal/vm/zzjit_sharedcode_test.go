@@ -89,10 +89,10 @@ func TestJITClosuresShareCode(t *testing.T) {
 // taken back by on-stack replacement in a long invocation that left it
 // once -- here at a call of a function its call had not met, which leaves
 // for Go to learn it, its code compiled again for it -- as at any long
-// loop (tryJITAt): kept out of the
-// invocation the interpreter goes on with (jitDeoptBlocks), AWFY
-// DeltaBlue's forEach had run the rest of each of its long loops in the
-// existing tiers, a million calls of its callbacks a run.
+// loop: kept out of the invocation the interpreter goes on with
+// (jitDeoptBlocks), AWFY DeltaBlue's forEach had run the rest of each of
+// its long loops in the interpreter, a million calls of its callbacks a
+// run.
 func TestJITSlowLoopGoesBackNative(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")

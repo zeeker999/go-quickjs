@@ -61,10 +61,8 @@ func TestCursorOneAllocation(t *testing.T) {
 	}
 }
 
-// A tree's for-in walks its keys in its loop's step itself
-// (zvreg_a_gen.go's iterNextTree, a copy of iterNext's walk, so that the
-// step is no call deeper than iterNext's): each answer is the
-// interpreter's, in both tiers, and Node v26.10.0's -- an object's keys,
+// A for-in walks its keys in its loop's step (regIterNext, iterNext's
+// walk): each answer is Node v26.10.0's -- an object's keys,
 // an array's with holes and an index its prototype has, keys deleted and
 // added and an array shortened during the walk, a string's indices, an
 // inherited key, an array's index and named keys, twenty keys -- but for
@@ -101,10 +99,9 @@ func TestTreeForInAsInterpreter(t *testing.T) {
 	}
 }
 
-// A tree's loop steps a Map's or a Set's iterator of its realm itself
-// (zvreg_a_gen.go's iterNextTree, as stepIter's case steps one), its
-// generator test made once: each answer is the interpreter's, in both
-// tiers, and Node v26.10.0's -- a Map's values, keys and entries, a Set's,
+// A loop steps a Map's or a Set's iterator of its realm itself
+// (regStepNext, as stepIter's case steps one): each answer is Node
+// v26.10.0's -- a Map's values, keys and entries, a Set's,
 // entries deleted, added and cleared during the walk, the iterators'
 // next replaced on their prototype and on one iterator, which Go's step
 // calls, and a walk left by break and taken up again.

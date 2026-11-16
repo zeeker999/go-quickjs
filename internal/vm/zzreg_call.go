@@ -14,9 +14,9 @@ import (
 // regCall calls callee with this and args from the register interpreter. A
 // function of this realm that has register code, and that a call runs with
 // nothing to establish but its frame, is run here directly: its frame made
-// as callTree makes one, its registers run by runReg, with no tree, no
-// recover and no other Go call between the two loops. Anything else is
-// called as the stack interpreter calls it. A frame that ended in a tail
+// here, its registers run by runReg, with no recover and no other Go call
+// between the two loops. Anything else is called by callDirect. A frame
+// that ended in a tail
 // call (errTailCall) has its callee called in its place, in this same call
 // of regCall, as run does: a chain of tail calls runs in constant space.
 func (r *Runtime) regCall(callee, this Value, args []Value) (Value, error) {
@@ -69,7 +69,7 @@ func (r *Runtime) regCall(callee, this Value, args []Value) (Value, error) {
 	lc := int(c.locals)
 	locals := r.stack[base : base+lc : base+lc]
 	m := min(int(c.params), len(locals), len(args))
-	//lint:ignore S1001 a loop, not copy: see callTree
+	//lint:ignore S1001 a loop, not copy
 	for i, a := range args[:m] {
 		locals[i] = a
 	}
@@ -388,9 +388,8 @@ func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base, pc 
 		}
 	}
 	if method && callee.IsObject() && callee.Object() == r.callFn {
-		// f.call(t, ...): f called with this t in call's frame, as the
-		// tree's call of it does (callThroughTree), without the generic
-		// call's search for call and then for f.
+		// f.call(t, ...): f called with this t in call's frame, without
+		// the generic call's search for call and then for f.
 		return r.callThrough(r.callFn, r.stack[base+1], r.stack[base+2:base+2+argc])
 	}
 	if calls := f.cl.regCalls; callee.IsObject() && uint(w.C()) < uint(len(calls)) {
@@ -530,7 +529,7 @@ func (r *Runtime) regClosure(f *frame, c *regCode, w bytecode.RInstr, wb int) *O
 
 // regMadeClosure is closure_w's closure o, its function's code planned
 // where it has been built, as makeClosure plans: a function's code is built
-// at its first call, which plans the closure called (regStmt), so that one
+// at its first call, which plans the closure called (planCall), so that one
 // never called is never compiled (bytecode.RegLater). A leaf's is built as
 // it is made: its calls are answered by the stack form's leaf evaluators
 // (pureCall, leafCall), which build nothing, until a plan sends them to its
@@ -555,8 +554,8 @@ func regMadeClosure(o *Object) *Object {
 // around it, a scope for the variables of its own direct eval, and the
 // this binding of a derived constructor's construction or an arrow
 // sharing one. It reports false, having done nothing, where cl has no
-// register code to enter so: the tiers' own runs (regTier off) and a
-// generator's body. A chain of tail calls the frame ends in is made
+// register code to enter so: a generator's body, and a function with no
+// register code (errNoRegCode). A chain of tail calls the frame ends in is made
 // here, in its place.
 //
 //go:noinline
@@ -803,7 +802,7 @@ func regLeafRunnable(rc *bytecode.RegCode) bool {
 const regLeafStores = 4
 
 // regLeafMax is the longest body regLeafRun runs: past it, a frame costs
-// less than the run's dispatch, as the tree tier finds for pure bodies.
+// less than the run's dispatch, as pureByTree finds for pure bodies.
 const regLeafMax = 12
 
 // regLeafOp is an instruction of a body regLeafRun runs: its operation
@@ -1086,13 +1085,13 @@ func (r *Runtime) regThrow(f *frame, c *regCode, next int, regs *[1 << 16]Value)
 	return r.throw(regs[regAt(c.code, pc).A()])
 }
 
-// regIn is key in obj, as the stack interpreter's in.
+// regIn is key in obj.
 func (r *Runtime) regIn(key, obj Value) (Value, error) {
 	if !obj.IsObject() {
 		return Undefined, r.throwTypeError("the right operand of \"in\" must be an object")
 	}
 	// An index straight to its walk; a name to the cache, then to its walk,
-	// which remembers the answer there, as the tree's in does.
+	// which remembers the answer there (hasCached).
 	o := obj.Object()
 	if i := uint32(key.num); float64(i) == key.num && i < atomIndexTag {
 		if has, ok := hasIndexQuick(o, i); ok {
@@ -1115,7 +1114,7 @@ func (r *Runtime) regIn(key, obj Value) (Value, error) {
 	return Bool(has), err
 }
 
-// regDelete is delete obj[key], as the stack interpreter's delete_prop.
+// regDelete is delete obj[key], delete_prop.
 func (r *Runtime) regDelete(cl *closure, obj, key Value) (Value, error) {
 	if obj.IsNullish() {
 		return Undefined, r.throwTypeError("cannot delete a property of %s", r.describe(obj))
@@ -1146,8 +1145,8 @@ func (r *Runtime) regThrowDeadZone(f *frame, c *regCode, next int) error {
 	return r.throwReferenceError("cannot access %q before initialization", f.cl.fn.Locals[regNameIdx(c, pc, regAt(c.code, pc).B())].Name)
 }
 
-// regGetGlobal is get_global's slow path: what the stack interpreter does,
-// then the layout of the global object the site found the slot in noted,
+// regGetGlobal is get_global's slow path: the global's read, then the
+// layout of the global object the site found the slot in noted,
 // for the loop's check.
 func (r *Runtime) regGetGlobal(f *frame, cl *closure, c *regCode, pc int, w bytecode.RInstr) (Value, error) {
 	in := bytecode.Instr{Op: bytecode.OpGetGlobal, A: regNameIdx(c, pc, w.B()), B: uint32(w.C())}
@@ -1211,7 +1210,7 @@ func (r *Runtime) regNoteGlobal(cl *closure, site uint16, name Atom, write bool)
 	}
 }
 
-// regGetProp is get_prop's slow path, as the stack interpreter's case.
+// regGetProp is get_prop's slow path.
 func (r *Runtime) regGetProp(cl *closure, c *regCode, w bytecode.RInstr, obj Value) (Value, error) {
 	site := w.C()
 	name := cl.names[c.siteName[site]]
@@ -1242,8 +1241,8 @@ func (r *Runtime) regGetMethod(cl *closure, c *regCode, w bytecode.RInstr, obj V
 		}
 	} else {
 		// A string's or a number's method, from the cache of its
-		// prototype's data properties that primProp fills, as the tree's
-		// primMethod reads it: s.indexOf, n.toString.
+		// prototype's data properties that primProp fills: s.indexOf,
+		// n.toString.
 		var p *Object
 		if obj.IsString() {
 			p = r.proto.str
@@ -1286,8 +1285,8 @@ func (r *Runtime) regDefineField(cl *closure, name Atom, obj, v Value) error {
 
 // regNewObject is new_object.
 func (r *Runtime) regNewObject(cl *closure, w bytecode.RInstr) *Object {
-	// With the room the site's objects came to need, as the tree tier makes
-	// them (outgrowProps learns it), where the literal says less.
+	// With the room the site's objects came to need (outgrowProps learns
+	// it), where the literal says less.
 	root := r.shapes.siteRoot(&cl.ic[w.C()], r.proto.object)
 	m := int(w.B())
 	if root != nil && int(root.slack) > m {

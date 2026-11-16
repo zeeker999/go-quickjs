@@ -2,7 +2,7 @@ package vm
 
 import "testing"
 
-// TestForAwaitClose pins how a for await is left, on both tiers, against
+// TestForAwaitClose pins how a for await is left, against
 // Node's answers: a break, a continue of an outer loop, a return and a
 // throw close its iterator as AsyncIteratorClose does -- its return method
 // called and what that returns awaited, which the ticker shows taking a

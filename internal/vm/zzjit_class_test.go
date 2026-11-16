@@ -18,7 +18,7 @@ import (
 // method's call of it, through call and apply, a forwarding constructor's
 // apply of it, and at its own call of itself in tail position; a class
 // with fields, and a derived class, are constructed by Go. Each answer is
-// the interpreter's, in every tier and under every stress setting.
+// the interpreter's, under every stress setting.
 func TestJITClassConstructors(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
@@ -66,7 +66,7 @@ func TestJITClassConstructors(t *testing.T) {
 // The constructor of a class constructed in a loop runs natively, inlined
 // in the loop's own native code, as a function's constructor is: it had
 // been refused (a special function kind), and AWFY's Havlak and CD made
-// every object in the tree tier; then called natively, not inlined, as it
+// every object in the interpreter; then called natively, not inlined, as it
 // returns its this (push_this, return), where a function's constructor
 // returns nothing (ssa's returnsThis).
 func TestJITClassConstructorsNative(t *testing.T) {
@@ -80,8 +80,7 @@ func TestJITClassConstructorsNative(t *testing.T) {
 	r := New(Config{JIT: true})
 	t.Cleanup(func() { r.Close(); r.ReleaseClosed() })
 	// The closures chain's last compile inlined (ssa.Func's Inlined),
-	// which register code's entry does not keep as the stack form's
-	// does (ssaInlined).
+	// which register code's entry does not keep.
 	var inlined []uintptr
 	if true {
 		jitSSAOptimized = func(fn *bytecode.Function, f *ssa.Func) {

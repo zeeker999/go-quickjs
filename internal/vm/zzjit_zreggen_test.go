@@ -316,10 +316,9 @@ func TestJITRegGenConsumerSampled(t *testing.T) {
 // An async function whose loop awaits at every turn: each turn is a
 // resumption Go makes of its register code, and the loops' back edges in
 // all are too few for a sample. Its resumptions are its invocations, each
-// spending its length of its budget (jitRegResumed), as the stack form's
-// are (jitResume): counted only at every jitHotWork of them, as code
-// refused for host operations alone is, af was never compiled, and
-// nothing of the program ran natively.
+// spending its length of its budget (jitRegResumed): counted only at every
+// jitHotWork of them, as code refused for host operations alone is, af was
+// never compiled, and nothing of the program ran natively.
 func TestJITRegAsyncResumptionsCompile(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")

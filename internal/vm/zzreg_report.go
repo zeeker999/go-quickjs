@@ -11,16 +11,15 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/compiler/regcomp"
 )
 
-// The register tier's report (QJS_REGREPORT): the calls that cross between
-// register code and the other tiers, by kind and by the function called,
-// with why the backend left that function to the stack form, printed when a
-// runtime closes.
+// The register interpreter's report (QJS_REGREPORT): the calls that cross
+// between register code and other callers and callees, by kind and by the
+// function called, printed when a runtime closes.
 
 var regReportOn = os.Getenv("QJS_REGREPORT") != ""
 
 const (
-	regCrossDirect = iota // callDirect -- a built-in's callback, a tree's call through it -- into register code
-	regCrossEnter         // runFD or callTree into register code
+	regCrossDirect = iota // callDirect -- a built-in's callback -- into register code
+	regCrossEnter         // runFD into register code
 	regCrossOut           // register code calling anything else
 	regCrossNew           // register code constructing
 	regCrossKinds
@@ -44,7 +43,7 @@ var regCross struct {
 	n map[regCrossKey]int64
 }
 
-// regNoteCross counts a call crossing a tier's boundary, of the compiled
+// regNoteCross counts a call crossing register code's boundary, of the compiled
 // function fn, or of the built-in or other callee name.
 func regNoteCross(kind int, fn *bytecode.Function, name string) {
 	regCross.Lock()

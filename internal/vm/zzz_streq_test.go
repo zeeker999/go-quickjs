@@ -30,9 +30,9 @@ s[0] + ' | ' + (s[0] === s[1] && s[1] === s[2])
 
 const strEqTestWant = "ab/ab//3,ab/ab//3,b/b/f/3,b/b/f/3,b/b/f/3,bc/bc/f/3,b/b/f/3,b/b/f/3,bd/bd/f/3,//ef/3,b/b/f/0,//ef/3,b/b/f/3,b/b/f/3,b/b/f/3,b/b/f/3,b/b/f/3,b/b/f/3 | true"
 
-// A strict equality branch with a string constant (strEqJump) answers as
+// A strict equality branch with a string constant answers as
 // the interpreter does, and as Node does. Each function has a local of its
-// own, so that it is run on its tree rather than by pureCall.
+// own, so that it is run as register code rather than by pureCall.
 func TestStrictEqualityWithStrings(t *testing.T) {
 	t.Parallel()
 	for _, tree := range []bool{true} {

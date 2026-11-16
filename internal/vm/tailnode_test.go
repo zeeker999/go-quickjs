@@ -157,8 +157,8 @@ arguments 2: 3:0,40,x | 3 | 40/39/38/37/36/35/34/33/32/31/30/29/28/27/26/25/24/2
 rebound 2: second 1
 throw 2: TypeError bottom 0`
 
-// Calls in tail position answer what Node's do, made by the tree tier's
-// nodes (tailAll) and by the interpreter, in a runtime made twice.
+// Calls in tail position answer what Node's do, in a runtime made four
+// times.
 func TestTailCallsAgreeWithNode(t *testing.T) {
 	t.Parallel()
 	for round := range 4 {
@@ -213,8 +213,7 @@ const deepTailScript = `(function () {
 })()`
 
 // Recursions through calls in tail position far deeper than the call
-// stack run in constant space, as strict code's tail calls must, on the
-// tree tier and in the interpreter alike.
+// stack run in constant space, as strict code's tail calls must.
 func TestDeepTailCalls(t *testing.T) {
 	t.Parallel()
 	const want = "705082704 100000 false false true true 150000 obj obj? c p super bound 2 arrow 100:100000:100000:100000 14285:200000 2:100000:undefined,3:75000:75001,3:50000:50001,3:25000:25001,3:0:1 RangeError deep true"
@@ -236,8 +235,8 @@ func TestDeepTailCalls(t *testing.T) {
 // make calls in tail position of its own. A call in tail position past
 // tailCallDepth to such a function gives it arguments of their own, not
 // tailArgs, which those calls copy theirs into: f's z had been "s3",
-// spin's. By a plain call (tailAll) and by a private method's
-// (tailCallNode), tree tier on and off: Node v26.10.0's answers.
+// spin's. By a plain call and by a private method's: Node v26.10.0's
+// answers.
 func TestTailCallArgumentsAfterDefaults(t *testing.T) {
 	t.Parallel()
 	const src = `(function () {

@@ -167,8 +167,8 @@ const jitSpreadProgram = `
 // that runs no script, and with the code's frame where it may -- a getter,
 // a proxy's trap, an iterator, a key's toString, a callee -- in the order
 // of evaluation the interpreter keeps, its exceptions caught where it
-// catches them. Every answer is the interpreter's and the tree tier's,
-// under each of the stress settings' exits (jitDifferential).
+// catches them. Every answer is the interpreter's, under each of the stress
+// settings' exits (jitDifferential).
 func TestJITSpreadOperations(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
@@ -274,7 +274,7 @@ func TestJITSpreadFrameless(t *testing.T) {
 // and of little else, entered at its header by on-stack replacement, is
 // judged not to pay as its calls are made (jitRunGoProfit): the code
 // leaves after the call that finds so, with that call's result in its
-// place (jitCallResult), and the tree tier runs the rest. Each answer is
+// place (jitCallResult), and the interpreter runs the rest. Each answer is
 // the interpreter's.
 func TestJITSpreadFramedAtLoops(t *testing.T) {
 	t.Parallel()

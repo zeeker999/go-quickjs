@@ -24,7 +24,7 @@ function work(n) {
 
 // TestJITRegBackground compiles register code in the background: built
 // on a worker from its feedback asked ahead (jitRegSnapshotOf), installed
-// at a later check of the register tier's (jitDrain at jitRegHot). The
+// at a later check of the interpreter's (jitDrain at jitRegHot). The
 // answers are those of a runtime that compiles in the foreground, the
 // compiles were handed over and installed, and the code then runs
 // natively.

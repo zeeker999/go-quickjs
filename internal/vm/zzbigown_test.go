@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// Register code gives back the BigInts the tree's operators give back
+// Register code gives back BigInts its operators no longer need
 // (regBigRelease): a fresh operand's block and the value a local that
 // holds its values alone held, so that `sum += a * a; a += incr` makes
 // each result in a block given back before, natively and by the table,

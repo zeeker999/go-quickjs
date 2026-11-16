@@ -95,14 +95,13 @@ const (
 // Bounds are how deep a run's native calls go, which depends on how deep
 // the VM's frames were where Go entered the code, and which Go sets before
 // every entry, once for every context, all of which point here
-// (Context.Bounds): rewritten in each, as they were, an entry from code the
-// tree tier runs recursively, its depth another at each call, wrote the
-// fields of every context there was -- 96 after a deep recursion -- and
-// AWFY's Towers spent a third of its time doing it. LevelLimit is the level
-// past the last a native call may run in. TailLevel is the first level
-// whose code's calls in tail position give up its frame, as the
-// interpreter's do from tailCallDepth frames deep: native code makes them as
-// calls below it, and leaves for Go to make them at it and past
+// (Context.Bounds): rewritten in each, an entry from code the interpreter
+// runs recursively, its depth another at each call, would write the fields
+// of every context there is -- 96 after a deep recursion. LevelLimit is the
+// level past the last a native call may run in. TailLevel is the first
+// level whose code's calls in tail position give up its frame, as the
+// interpreter's do from tailCallDepth frames deep: native code makes them
+// as calls below it, and leaves for Go to make them at it and past
 // (ssa.OpTailRoom).
 type Bounds struct {
 	LevelLimit, TailLevel uint64

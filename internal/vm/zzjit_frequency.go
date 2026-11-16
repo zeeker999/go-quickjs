@@ -192,8 +192,8 @@ func (r *Runtime) jitCountCallAt(d int) {
 // its feedback after its tier-up budget, rarely so few.
 var jitCountsEnough = uint32(math.Ceil(math.Log(0.05) / math.Log(1-ssa.MinInliningFrequency)))
 
-// pureCallCounted is pureCall made at a call site of the script's -- a
-// tree's call node, callRest -- whose call the JIT counts for its inliner,
+// pureCallCounted is pureCall made at a call site of the script's --
+// callRest -- whose call the JIT counts for its inliner,
 // as a call made with a frame is (jitCountPure): here and in callDirect,
 // not in pureCallAt or pureCall, so that pureCallAt's code is the same
 // with the JIT built in as without, and pureCall small enough to inline

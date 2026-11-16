@@ -27,7 +27,7 @@ used({alpha: 1, beta: 2}) + [1, 2, 3].map(twice).join() + used({alpha: 3, beta: 
 // TestRegCompiledLazily pins that a function's register code is compiled
 // at its first call and only then: a function never called keeps none,
 // and the code a call compiles, with the names, constants and sites it adds
-// past its function's own, gives the answers the stack form gives.
+// past its function's own, gives the expected answers.
 func TestRegCompiledLazily(t *testing.T) {
 	fn := compileForTest(t, regLazySrc)
 	byName := map[string]*bytecode.Function{}

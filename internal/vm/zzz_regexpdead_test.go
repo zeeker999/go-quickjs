@@ -117,8 +117,8 @@ func regexpExecLeafForTest(r *Runtime) *regexpLeaf[struct{}] {
 }
 
 // A call of exec whose result nothing reads makes the match, the legacy
-// statics and lastIndex as any other: each answer is Node's, in the tree
-// tier and in the interpreter, with the collector idle.
+// statics and lastIndex as any other: each answer is Node's, with the
+// collector idle.
 func TestRegExpDeadExec(t *testing.T) {
 	for _, tree := range []bool{true} {
 		gc := debug.SetGCPercent(-1)
@@ -133,16 +133,15 @@ func TestRegExpDeadExec(t *testing.T) {
 		if got := v.String().Go(); got != regexpDeadTestWant {
 			t.Errorf("tree tier %v:\ngot  %s\nwant %s", tree, got, regexpDeadTestWant)
 		}
-		// The tree tier's calls gave back the dummy; the interpreter's are
-		// made as before.
+		// The calls gave back the dummy.
 		if (dummy != nil) != tree {
 			t.Errorf("tree tier %v: exec's dummy made: %v", tree, dummy != nil)
 		}
 	}
 }
 
-// regexpDeadKindsSrc has a function for each way the tree tier builds a
-// call of exec whose result nothing reads: on a RegExp an upvalue holds,
+// regexpDeadKindsSrc has a function for each kind of call of exec whose
+// result nothing reads: on a RegExp an upvalue holds,
 // a global, a literal, global or not, a local, a property of a local and
 // of this, this itself, and the calls tested for truth -- an if, a while,
 // a not, an &&, a ternary.
@@ -166,8 +165,8 @@ function many(s, n) { for (var i = 0; i < n; i++) kgre.lastIndex = 0, kUp(s) }`
 // Where the match fails -- spends the step budget -- a call whose result
 // nothing reads throws what a call whose result is read throws: the
 // SyntaxError, its stack, Error.stackTraceLimit's getter run as often, and
-// lastIndex as it was, global or not, in the tree tier and in the
-// interpreter. (Each match spends the budget: half a second.)
+// lastIndex as it was, global or not. (Each match spends the budget: half a
+// second.)
 func TestRegExpDeadExecComplexity(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -322,11 +321,10 @@ all() + ' || ' + all() + ' || ' + all()
 
 const regexpDeadReplaceTestWant = `0/a/b/ab/x/1c2/6 0/2//2/xab1c//6 0/2//2/xab1c//6 0/b//b/xa/1c2/6 0/b//b/xa/1c2/6 0/b//b/xa/1c2/6 0/b//b/xa/1c2/6 if false and x-1c2 0/2//2/xab1c//6 0///a/x/b1c2/6 0/2//2/xab1c//6 5 undefined 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/e/f/ef///2 0/e/f/ef///2 if false and ef 0/e/f/ef///2 0/e/f/ef///2 0/e/f/ef///2 5 undefined 0/a/b/ab//cdef9x/8 0/9//9/abcdef/x/8 0/9//9/abcdef/x/8 0/b/c/bc/a/def9x/8 0/b/c/bc/a/def9x/8 0/e/f/ef/abcd/9x/8 0/e/f/ef/abcd/9x/8 if false and -cdef9x 0/9//9/abcdef/x/8 0///a//bcdef9x/8 0/9//9/abcdef/x/8 5 undefined 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 true  or 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 5 undefined 0/a/b/ab/x9bc//6 0/9//9/x/bcab/6 0/9//9/x/bcab/6 0/b//b/x9bca//6 0/b//b/x9bca//6 0/b//b/x9bca//6 0/b//b/x9bca//6 if false and x9bc- 0/9//9/x/bcab/6 0///a/x9bc/b/6 0/9//9/x/bcab/6 5 undefined 0/a/b/ab/x9bc//6 0/1//1/foo/o/5 0/1//1/foo/o/5 0/1//1/foo/o/5 0/o//o/foo1//5 0/o//o/foo1//5 0/o//o/foo1//5 if false and foo1o 0/1//1/foo/o/5 0/1//1/foo/o/5 0/1//1/foo/o/5 5 undefined 0/a/b/ab/xx//4 0/a/b/ab/xx//4 2/x//x/x/ab/4 0/b//b/xxa//4 0/b//b/xxa//4 0/b//b/xxa//4 0/b//b/xxa//4 if false and xx- 0/a/b/ab/xx//4 0///a/xx/b/4 0///a/xx/b/4 5 undefined | 0/a/b/ab/x/1c2/6 0/2//2/xab1c//6 0/2//2/xab1c//6 0/b//b/xa/1c2/6 0/b//b/xa/1c2/6 0/b//b/xa/1c2/6 0/b//b/xa/1c2/6 if false and x-1c2 0/2//2/xab1c//6 0///a/x/b1c2/6 0/2//2/xab1c//6 5 undefined 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/e/f/ef///2 0/e/f/ef///2 if false and ef 0/e/f/ef///2 0/e/f/ef///2 0/e/f/ef///2 5 undefined 0/a/b/ab//cdef9x/8 0/9//9/abcdef/x/8 0/9//9/abcdef/x/8 0/b/c/bc/a/def9x/8 0/b/c/bc/a/def9x/8 0/e/f/ef/abcd/9x/8 0/e/f/ef/abcd/9x/8 if false and -cdef9x 0/9//9/abcdef/x/8 0///a//bcdef9x/8 0/9//9/abcdef/x/8 5 undefined 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 true  or 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 5 undefined 0/a/b/ab/x9bc//6 0/9//9/x/bcab/6 0/9//9/x/bcab/6 0/b//b/x9bca//6 0/b//b/x9bca//6 0/b//b/x9bca//6 0/b//b/x9bca//6 if false and x9bc- 0/9//9/x/bcab/6 0///a/x9bc/b/6 0/9//9/x/bcab/6 5 undefined 0/a/b/ab/x9bc//6 0/1//1/foo/o/5 0/1//1/foo/o/5 0/1//1/foo/o/5 0/o//o/foo1//5 0/o//o/foo1//5 0/o//o/foo1//5 if false and foo1o 0/1//1/foo/o/5 0/1//1/foo/o/5 0/1//1/foo/o/5 5 undefined 0/a/b/ab/xx//4 0/a/b/ab/xx//4 2/x//x/x/ab/4 0/b//b/xxa//4 0/b//b/xxa//4 0/b//b/xxa//4 0/b//b/xxa//4 if false and xx- 0/a/b/ab/xx//4 0///a/xx/b/4 0///a/xx/b/4 5 undefined | 0/1/c/1c/xab/2/6 0/1/c/1c/xab/2/6 0/1/c/1c/xab/2/6 0/1/c/1c/xab/2/6 0/9/x/9x/abcdef//8 0/9/x/9x/abcdef//8 0/9/x/9x/abcdef//8 0/9/x/9x/abcdef//8 0/9/b/9b/x/cab/6 0/9/b/9b/x/cab/6 0/1/o/1o/foo//5 0/1/o/1o/foo//5 0/1/o/1o/foo//5 0/1/o/1o/foo//5 | 0/1/o/1o/foo//5 0/1/o/1o/foo//5 0/1/o/1o/foo//5 0/1/o/1o/foo//5 1/a//a//bcdef9x/8 0/a//a//bcdef9x/8 0/a//a//bcdef9x/8 0/a//a//bcdef9x/8 0/a//a//bcdef9x/8 0/a//a//bcdef9x/8 0/a//a//bcdef9x/8 0/a//a//bcdef9x/8 0/a//a//bcdef9x/8 0/a//a//bcdef9x/8 | 0 0 0//////0 TypeError 0/a//a/x/b1c2/6 TypeError 0 30000 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0 0 0//////0 TypeError 0//////0 TypeError 0 30000 0///b/#30000//30001 0///b/#30000//30001 0///b/#30000//30001 0///b/#30000//30001 0 0 0//////0 TypeError 0/a//a//bcdef9x/8 TypeError 0 30000 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0 0 0//////0 TypeError 0//////0 TypeError 0 30000 0///b/#30000//30001 0///b/#30000//30001 0///b/#30000//30001 0///b/#30000//30001 0 0 0//////0 TypeError 0/a//a/x9bc/b/6 TypeError 0 30000 0/a/b/ab/x9bc//6 0/a/b/ab/x9bc//6 0/a/b/ab/x9bc//6 0/a/b/ab/x9bc//6 0 0 0//////0 TypeError 0//////0 TypeError 0 30000 0///b/#30000//30001 0///b/#30000//30001 0///b/#30000//30001 0///b/#30000//30001 0 0 0//////0 TypeError 0/a//a/xx/b/4 TypeError 0 30000 0/a/b/ab/xx//4 0/a/b/ab/xx//4 0/a/b/ab/xx//4 0/a/b/ab/xx//4 calls=57 seen=1136,2256,9968,9916,1135,1136,2256,9968,9916,1135 || 0/a/b/ab/x/1c2/6 0/2//2/xab1c//6 0/2//2/xab1c//6 0/b//b/xa/1c2/6 0/b//b/xa/1c2/6 0/b//b/xa/1c2/6 0/b//b/xa/1c2/6 if false and x-1c2 0/2//2/xab1c//6 0///a/x/b1c2/6 0/2//2/xab1c//6 5 undefined 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/e/f/ef///2 0/e/f/ef///2 if false and ef 0/e/f/ef///2 0/e/f/ef///2 0/e/f/ef///2 5 undefined 0/a/b/ab//cdef9x/8 0/9//9/abcdef/x/8 0/9//9/abcdef/x/8 0/b/c/bc/a/def9x/8 0/b/c/bc/a/def9x/8 0/e/f/ef/abcd/9x/8 0/e/f/ef/abcd/9x/8 if false and -cdef9x 0/9//9/abcdef/x/8 0///a//bcdef9x/8 0/9//9/abcdef/x/8 5 undefined 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 true  or 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 5 undefined 0/a/b/ab/x9bc//6 0/9//9/x/bcab/6 0/9//9/x/bcab/6 0/b//b/x9bca//6 0/b//b/x9bca//6 0/b//b/x9bca//6 0/b//b/x9bca//6 if false and x9bc- 0/9//9/x/bcab/6 0///a/x9bc/b/6 0/9//9/x/bcab/6 5 undefined 0/a/b/ab/x9bc//6 0/1//1/foo/o/5 0/1//1/foo/o/5 0/1//1/foo/o/5 0/o//o/foo1//5 0/o//o/foo1//5 0/o//o/foo1//5 if false and foo1o 0/1//1/foo/o/5 0/1//1/foo/o/5 0/1//1/foo/o/5 5 undefined 0/a/b/ab/xx//4 0/a/b/ab/xx//4 2/x//x/x/ab/4 0/b//b/xxa//4 0/b//b/xxa//4 0/b//b/xxa//4 0/b//b/xxa//4 if false and xx- 0/a/b/ab/xx//4 0///a/xx/b/4 0///a/xx/b/4 5 undefined | 0/a/b/ab/x/1c2/6 0/2//2/xab1c//6 0/2//2/xab1c//6 0/b//b/xa/1c2/6 0/b//b/xa/1c2/6 0/b//b/xa/1c2/6 0/b//b/xa/1c2/6 if false and x-1c2 0/2//2/xab1c//6 0///a/x/b1c2/6 0/2//2/xab1c//6 5 undefined 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/e/f/ef///2 0/e/f/ef///2 if false and ef 0/e/f/ef///2 0/e/f/ef///2 0/e/f/ef///2 5 undefined 0/a/b/ab//cdef9x/8 0/9//9/abcdef/x/8 0/9//9/abcdef/x/8 0/b/c/bc/a/def9x/8 0/b/c/bc/a/def9x/8 0/e/f/ef/abcd/9x/8 0/e/f/ef/abcd/9x/8 if false and -cdef9x 0/9//9/abcdef/x/8 0///a//bcdef9x/8 0/9//9/abcdef/x/8 5 undefined 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 true  or 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 5 undefined 0/a/b/ab/x9bc//6 0/9//9/x/bcab/6 0/9//9/x/bcab/6 0/b//b/x9bca//6 0/b//b/x9bca//6 0/b//b/x9bca//6 0/b//b/x9bca//6 if false and x9bc- 0/9//9/x/bcab/6 0///a/x9bc/b/6 0/9//9/x/bcab/6 5 undefined 0/a/b/ab/x9bc//6 0/1//1/foo/o/5 0/1//1/foo/o/5 0/1//1/foo/o/5 0/o//o/foo1//5 0/o//o/foo1//5 0/o//o/foo1//5 if false and foo1o 0/1//1/foo/o/5 0/1//1/foo/o/5 0/1//1/foo/o/5 5 undefined 0/a/b/ab/xx//4 0/a/b/ab/xx//4 2/x//x/x/ab/4 0/b//b/xxa//4 0/b//b/xxa//4 0/b//b/xxa//4 0/b//b/xxa//4 if false and xx- 0/a/b/ab/xx//4 0///a/xx/b/4 0///a/xx/b/4 5 undefined | 0/1/c/1c/xab/2/6 0/1/c/1c/xab/2/6 0/1/c/1c/xab/2/6 0/1/c/1c/xab/2/6 0/9/x/9x/abcdef//8 0/9/x/9x/abcdef//8 0/9/x/9x/abcdef//8 0/9/x/9x/abcdef//8 0/9/b/9b/x/cab/6 0/9/b/9b/x/cab/6 0/1/o/1o/foo//5 0/1/o/1o/foo//5 0/1/o/1o/foo//5 0/1/o/1o/foo//5 | 0/1/o/1o/foo//5 0/1/o/1o/foo//5 0/1/o/1o/foo//5 0/1/o/1o/foo//5 1/a//a//bcdef9x/8 0/a//a//bcdef9x/8 0/a//a//bcdef9x/8 0/a//a//bcdef9x/8 0/a//a//bcdef9x/8 0/a//a//bcdef9x/8 0/a//a//bcdef9x/8 0/a//a//bcdef9x/8 0/a//a//bcdef9x/8 0/a//a//bcdef9x/8 | 0 0 0//////0 TypeError 0/a//a/x/b1c2/6 TypeError 0 30000 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0 0 0//////0 TypeError 0//////0 TypeError 0 30000 0///b/#30000//30001 0///b/#30000//30001 0///b/#30000//30001 0///b/#30000//30001 0 0 0//////0 TypeError 0/a//a//bcdef9x/8 TypeError 0 30000 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0 0 0//////0 TypeError 0//////0 TypeError 0 30000 0///b/#30000//30001 0///b/#30000//30001 0///b/#30000//30001 0///b/#30000//30001 0 0 0//////0 TypeError 0/a//a/x9bc/b/6 TypeError 0 30000 0/a/b/ab/x9bc//6 0/a/b/ab/x9bc//6 0/a/b/ab/x9bc//6 0/a/b/ab/x9bc//6 0 0 0//////0 TypeError 0//////0 TypeError 0 30000 0///b/#30000//30001 0///b/#30000//30001 0///b/#30000//30001 0///b/#30000//30001 0 0 0//////0 TypeError 0/a//a/xx/b/4 TypeError 0 30000 0/a/b/ab/xx//4 0/a/b/ab/xx//4 0/a/b/ab/xx//4 0/a/b/ab/xx//4 calls=114 seen=1136,2256,9968,9916,1135,1136,2256,9968,9916,1135,1136,2256,9968,9916,1135,1136,2256,9968,9916,1135 || 0/a/b/ab/x/1c2/6 0/2//2/xab1c//6 0/2//2/xab1c//6 0/b//b/xa/1c2/6 0/b//b/xa/1c2/6 0/b//b/xa/1c2/6 0/b//b/xa/1c2/6 if false and x-1c2 0/2//2/xab1c//6 0///a/x/b1c2/6 0/2//2/xab1c//6 5 undefined 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/e/f/ef///2 0/e/f/ef///2 if false and ef 0/e/f/ef///2 0/e/f/ef///2 0/e/f/ef///2 5 undefined 0/a/b/ab//cdef9x/8 0/9//9/abcdef/x/8 0/9//9/abcdef/x/8 0/b/c/bc/a/def9x/8 0/b/c/bc/a/def9x/8 0/e/f/ef/abcd/9x/8 0/e/f/ef/abcd/9x/8 if false and -cdef9x 0/9//9/abcdef/x/8 0///a//bcdef9x/8 0/9//9/abcdef/x/8 5 undefined 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 true  or 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 5 undefined 0/a/b/ab/x9bc//6 0/9//9/x/bcab/6 0/9//9/x/bcab/6 0/b//b/x9bca//6 0/b//b/x9bca//6 0/b//b/x9bca//6 0/b//b/x9bca//6 if false and x9bc- 0/9//9/x/bcab/6 0///a/x9bc/b/6 0/9//9/x/bcab/6 5 undefined 0/a/b/ab/x9bc//6 0/1//1/foo/o/5 0/1//1/foo/o/5 0/1//1/foo/o/5 0/o//o/foo1//5 0/o//o/foo1//5 0/o//o/foo1//5 if false and foo1o 0/1//1/foo/o/5 0/1//1/foo/o/5 0/1//1/foo/o/5 5 undefined 0/a/b/ab/xx//4 0/a/b/ab/xx//4 2/x//x/x/ab/4 0/b//b/xxa//4 0/b//b/xxa//4 0/b//b/xxa//4 0/b//b/xxa//4 if false and xx- 0/a/b/ab/xx//4 0///a/xx/b/4 0///a/xx/b/4 5 undefined | 0/a/b/ab/x/1c2/6 0/2//2/xab1c//6 0/2//2/xab1c//6 0/b//b/xa/1c2/6 0/b//b/xa/1c2/6 0/b//b/xa/1c2/6 0/b//b/xa/1c2/6 if false and x-1c2 0/2//2/xab1c//6 0///a/x/b1c2/6 0/2//2/xab1c//6 5 undefined 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/e/f/ef///2 0/e/f/ef///2 if false and ef 0/e/f/ef///2 0/e/f/ef///2 0/e/f/ef///2 5 undefined 0/a/b/ab//cdef9x/8 0/9//9/abcdef/x/8 0/9//9/abcdef/x/8 0/b/c/bc/a/def9x/8 0/b/c/bc/a/def9x/8 0/e/f/ef/abcd/9x/8 0/e/f/ef/abcd/9x/8 if false and -cdef9x 0/9//9/abcdef/x/8 0///a//bcdef9x/8 0/9//9/abcdef/x/8 5 undefined 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 true  or 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 5 undefined 0/a/b/ab/x9bc//6 0/9//9/x/bcab/6 0/9//9/x/bcab/6 0/b//b/x9bca//6 0/b//b/x9bca//6 0/b//b/x9bca//6 0/b//b/x9bca//6 if false and x9bc- 0/9//9/x/bcab/6 0///a/x9bc/b/6 0/9//9/x/bcab/6 5 undefined 0/a/b/ab/x9bc//6 0/1//1/foo/o/5 0/1//1/foo/o/5 0/1//1/foo/o/5 0/o//o/foo1//5 0/o//o/foo1//5 0/o//o/foo1//5 if false and foo1o 0/1//1/foo/o/5 0/1//1/foo/o/5 0/1//1/foo/o/5 5 undefined 0/a/b/ab/xx//4 0/a/b/ab/xx//4 2/x//x/x/ab/4 0/b//b/xxa//4 0/b//b/xxa//4 0/b//b/xxa//4 0/b//b/xxa//4 if false and xx- 0/a/b/ab/xx//4 0///a/xx/b/4 0///a/xx/b/4 5 undefined | 0/1/c/1c/xab/2/6 0/1/c/1c/xab/2/6 0/1/c/1c/xab/2/6 0/1/c/1c/xab/2/6 0/9/x/9x/abcdef//8 0/9/x/9x/abcdef//8 0/9/x/9x/abcdef//8 0/9/x/9x/abcdef//8 0/9/b/9b/x/cab/6 0/9/b/9b/x/cab/6 0/1/o/1o/foo//5 0/1/o/1o/foo//5 0/1/o/1o/foo//5 0/1/o/1o/foo//5 | 0/1/o/1o/foo//5 0/1/o/1o/foo//5 0/1/o/1o/foo//5 0/1/o/1o/foo//5 1/a//a//bcdef9x/8 0/a//a//bcdef9x/8 0/a//a//bcdef9x/8 0/a//a//bcdef9x/8 0/a//a//bcdef9x/8 0/a//a//bcdef9x/8 0/a//a//bcdef9x/8 0/a//a//bcdef9x/8 0/a//a//bcdef9x/8 0/a//a//bcdef9x/8 | 0 0 0//////0 TypeError 0/a//a/x/b1c2/6 TypeError 0 30000 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0/a/b/ab/x/1c2/6 0 0 0//////0 TypeError 0//////0 TypeError 0 30000 0///b/#30000//30001 0///b/#30000//30001 0///b/#30000//30001 0///b/#30000//30001 0 0 0//////0 TypeError 0/a//a//bcdef9x/8 TypeError 0 30000 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0/a/b/ab//cdef9x/8 0 0 0//////0 TypeError 0//////0 TypeError 0 30000 0///b/#30000//30001 0///b/#30000//30001 0///b/#30000//30001 0///b/#30000//30001 0 0 0//////0 TypeError 0/a//a/x9bc/b/6 TypeError 0 30000 0/a/b/ab/x9bc//6 0/a/b/ab/x9bc//6 0/a/b/ab/x9bc//6 0/a/b/ab/x9bc//6 0 0 0//////0 TypeError 0//////0 TypeError 0 30000 0///b/#30000//30001 0///b/#30000//30001 0///b/#30000//30001 0///b/#30000//30001 0 0 0//////0 TypeError 0/a//a/xx/b/4 TypeError 0 30000 0/a/b/ab/xx//4 0/a/b/ab/xx//4 0/a/b/ab/xx//4 0/a/b/ab/xx//4 calls=171 seen=1136,2256,9968,9916,1135,1136,2256,9968,9916,1135,1136,2256,9968,9916,1135,1136,2256,9968,9916,1135,1136,2256,9968,9916,1135,1136,2256,9968,9916,1135`
 
-// regexpDeadReplaceKindsSrc has a function for each way the tree tier
-// builds a replace whose result nothing reads: of a RegExp an upvalue
-// holds, a global, a local, of a subject that is an element, a local and
-// a property, a RegExp literal given, a sticky RegExp, a template, and
-// one tested for truth.
+// regexpDeadReplaceKindsSrc has a function for each kind of replace whose
+// result nothing reads: of a RegExp an upvalue holds, a global, a local, of
+// a subject that is an element, a local and a property, a RegExp literal
+// given, a sticky RegExp, a template, and one tested for truth.
 const regexpDeadReplaceKindsSrc = `var rkg = /(b)/g, rs = /(a)/y
 function rOuter() { var up = /(a)(b)/g; return function (ss, n) { for (var i = 0; i < n; i++) ss[i % 2].replace(up, '') } }
 var rUp = rOuter()
@@ -341,8 +339,7 @@ function rTpl(s, re, n) { for (var i = 0; i < n; i++) s.replace(re, '[$1]') }
 
 // A replace whose result nothing reads makes the matches, the legacy
 // statics and lastIndex as any other, and calls a replacement function as
-// it would: each answer is Node's, in the tree tier and in the
-// interpreter, with the collector idle.
+// it would: each answer is Node's, with the collector idle.
 func TestRegExpDeadReplace(t *testing.T) {
 	for _, tree := range []bool{true} {
 		gc := debug.SetGCPercent(-1)
@@ -373,9 +370,8 @@ var regexpDeadReplaceKinds = []struct{ call, want, many string }{
 	{"rTpl('a1b2', /([0-9])/g, 3), RegExp.$1 + RegExp.leftContext", "2a1b", "rTpl('a1b2', /([0-9])/g, n)"},
 }
 
-// Each of the tree tier's ways makes the replace's matches, statics and
-// lastIndex as Node has them, in the tree tier and in the interpreter; and
-// in the tree tier a loop of them makes no string for each.
+// Each kind makes the replace's matches, statics and lastIndex as Node has
+// them; and a loop of them makes no string for each.
 func TestRegExpDeadReplaceKinds(t *testing.T) {
 	for _, c := range regexpDeadReplaceKinds {
 		for _, tree := range []bool{true} {
@@ -426,8 +422,7 @@ func regexpDeadMallocs(t *testing.T, r *Runtime, call string, count int) uint64 
 // Where the match fails -- spends the step budget -- a replace whose result
 // nothing reads throws what one whose result is read throws: the
 // SyntaxError, its stack, Error.stackTraceLimit's getter run as often, and
-// lastIndex, global or not, in the tree tier and in the interpreter.
-// (Each match spends the budget: half a second.)
+// lastIndex, global or not. (Each match spends the budget: half a second.)
 func TestRegExpDeadReplaceComplexity(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -561,9 +556,9 @@ var regexpDeadTruth = []struct{ call, want string }{
 }
 
 // A replace whose result is tested for truth alone is as truthy as the
-// string it would have made: in the tree tier and in the interpreter, with
-// the collector idle, each answer is Node's. The subject had stood for the
-// string, and 'a'.replace(/a/g, "") been true.
+// string it would have made: with the collector idle, each answer is
+// Node's. The subject had stood for the string, and 'a'.replace(/a/g, "")
+// been true.
 func TestRegExpDeadReplaceTruth(t *testing.T) {
 	for _, tree := range []bool{true} {
 		gc := debug.SetGCPercent(-1)

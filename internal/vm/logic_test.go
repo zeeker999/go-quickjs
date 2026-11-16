@@ -12,9 +12,8 @@ import (
 // y that runs only where x does not decide and one that throws only then,
 // comparisons, a ternary whose else is an && the then's jump ends at too,
 // which stays blocks, and this read in a derived constructor before super().
-// On the trees -- each function is one, declaring a local, which keeps it
-// from being a pure body pureCall would evaluate instead -- and in the
-// interpreter, three rounds alike.
+// Each function declares a local, which keeps it from being a pure body
+// pureCall would evaluate instead; three rounds alike.
 func TestLogicalExpressions(t *testing.T) {
 	t.Parallel()
 	const src = `

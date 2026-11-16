@@ -275,7 +275,7 @@ func TestJITGenStepStack(t *testing.T) {
 // words through the write barrier): every step resumes the generator
 // natively, a few calls of Go in all. A yield saving operands had been
 // Go's suspension while the collector marked, which left the loop judged
-// slow, to the tree tier, which made no native step.
+// slow, to the interpreter, which made no native step.
 func TestJITGenYieldSavesWhileMarking(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
@@ -320,7 +320,7 @@ func TestJITGenYieldSavesWhileMarking(t *testing.T) {
 // natively, Go applies none of the records, and the calls of Go are as
 // many either way. The records had been Go's while the collector marked,
 // which made each yield Go's suspension and left the loop judged slow, to
-// the tree tier, which made no native step.
+// the interpreter, which made no native step.
 func TestJITGenYieldRecordsWhileMarking(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")

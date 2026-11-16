@@ -6,9 +6,9 @@ import "unsafe"
 // and localAppend say which additions those are, and what makes them safe.
 //
 // The string in the binding is an ordinary one at every moment, a rope that
-// anything may read, so a tier that knows nothing of this is right: only the
-// additions the compiler marked, in the tree tier and native code, come here,
-// and the interpreter's are plain additions.
+// anything may read, so code that knows nothing of this is right: only the
+// additions the compiler marked, in the interpreter and native code, come
+// here, and any other is a plain addition.
 //
 // What is claimed. String.building says that nothing but the binding holds
 // the string, and strAppend sets it only on a rope it has just made and is

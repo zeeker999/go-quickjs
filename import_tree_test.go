@@ -9,11 +9,11 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/vm"
 )
 
-// TestImportInTrees pins that import() and import.meta in functions that
-// run as trees give what they give in the interpreter: modules loaded by a
-// loop, with the referrer each is resolved against, import attributes
-// passed on, a specifier whose toString throws rejecting rather than
-// throwing, and the module's import.meta read in a loop.
+// TestImportInTrees pins what import() and import.meta give in functions
+// with loops: modules loaded by a loop, with the referrer each is resolved
+// against, import attributes passed on, a specifier whose toString throws
+// rejecting rather than throwing, and the module's import.meta read in a
+// loop.
 func TestImportInTrees(t *testing.T) {
 	run := func(tree bool) (string, int64) {
 		rt := quickjs.New()

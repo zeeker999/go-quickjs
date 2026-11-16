@@ -14,9 +14,8 @@ import (
 // chain, Object.prototype included, a prototype replaced, or a receiver
 // that is not extensible each takes the write the long way, and the cache
 // takes it again once the chain is as before. A constructor's additions
-// to its subclasses' instances are made the same way. Node's answers, on
-// the trees and in the interpreter; the site's entry is the cell's, and it
-// has not given up.
+// to its subclasses' instances are made the same way. Node's answers; the
+// site's entry is the cell's, and it has not given up.
 func TestChainStoreFollowsTheCell(t *testing.T) {
 	const src = `'use strict'
 		class A {} class B extends A {} class C extends B {} class D extends C {}

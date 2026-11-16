@@ -3,13 +3,13 @@ package vm
 import "testing"
 
 // An element stored where new Array(n) left a hole is stored in place
-// (fillHole), by the tree tier's set_index and by setIndexed, where the
+// (fillHole), by register code's set_index and by setIndexed, where the
 // store is a new element's: in order and out of order, on a subclass's
 // array and on one whose length is not writable; and not where it is not
 // -- a frozen, a sealed or a non-extensible array, which a strict store
 // throws on, a setter or a read-only element on Array.prototype or
 // Object.prototype, which is asked instead. Each answer is Node's, three
-// rounds alike, on the trees and in the interpreter.
+// rounds alike.
 func TestFillHoles(t *testing.T) {
 	t.Parallel()
 	const src = `

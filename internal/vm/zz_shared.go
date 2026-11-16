@@ -162,8 +162,8 @@ func toInt32(f float64) int32 {
 }
 
 // callRest is callDirect for a callee that is the object o, whose funcData
-// is fd or nil, once a tree's call node has found it is not one
-// planTreeCall has given a tree: callDirect's other cases. A compiled
+// is fd or nil, once the register interpreter's call has found it is not
+// one regPlan has given its register code: callDirect's other cases. A compiled
 // function's comes first, which is callDirect's third: the two before it,
 // a Math function and Function.prototype.call, are built-ins, so no callee
 // is of both, and a pure body's call, the commonest here, asks nothing

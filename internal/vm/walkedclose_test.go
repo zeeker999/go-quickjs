@@ -12,7 +12,7 @@ import (
 // and the method called with an Array Iterator where the walk had got to;
 // a yield* of an array looks its throw and return up as any delegate's.
 // Before, a walked array closed nothing, which V8 and the specification's
-// IteratorClose do not. Each answer is Node's, on both tiers.
+// IteratorClose do not. Each answer is Node's.
 func TestWalkedArrayClose(t *testing.T) {
 	t.Parallel()
 	src := `

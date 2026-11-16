@@ -9,7 +9,7 @@ import (
 
 // TestStringChain pins a + b + c joined in one concat once a string literal
 // has made the additions concatenations: the conversions it makes, and
-// when, are each addition's, on both tiers.
+// when, are each addition's.
 func TestStringChain(t *testing.T) {
 	t.Parallel()
 	const obj = `var log = []; var o = { valueOf() { log.push('v'); return 7 }, toString() { log.push('s'); return 'S' } }; function g() { log.push('g'); return 'G' }; `

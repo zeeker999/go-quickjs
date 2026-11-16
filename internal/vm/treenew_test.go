@@ -5,18 +5,16 @@ import (
 	"testing"
 )
 
-// Constructions of classes are made on their trees (constructTree), base
-// and derived, a derived one's super() calling its parent the same way,
-// with its this binding a cell of the runtime's where nothing can capture
-// it. What every construction does is what runFD's did: the binding
-// unbound until super() and bound once, the errors of this before super(),
-// of no super() and of a return neither an object nor undefined, the
-// parent's own object or a constructor's returned one, fields, a parent
-// that is a function, new.target, and constructions nested 300 deep before
-// and after super() -- the runtime's cells replaced while frames below
-// hold theirs. Each answer is the interpreter's and Node's (Node's
-// messages are its own), from the first construction, made by runFD,
-// through the later ones the plan sends to the trees.
+// Constructions of classes, base and derived, a derived one's super()
+// calling its parent the same way, with its this binding a cell of the
+// runtime's where nothing can capture it. What every construction does is
+// what runFD's did: the binding unbound until super() and bound once, the
+// errors of this before super(), of no super() and of a return neither an
+// object nor undefined, the parent's own object or a constructor's returned
+// one, fields, a parent that is a function, new.target, and constructions
+// nested 300 deep before and after super() -- the runtime's cells replaced
+// while frames below hold theirs. Each answer is the interpreter's and
+// Node's (Node's messages are its own).
 func TestClassConstructionsOnTrees(t *testing.T) {
 	const src = `'use strict'
 		class A { constructor(x) { this.x = x; if (x === 'throw') throw new RangeError('A ' + x) } }
@@ -96,8 +94,8 @@ func TestClassConstructionsOnTrees(t *testing.T) {
 	}
 }
 
-// A construction of a derived class on its tree allocates the object it
-// makes and nothing else: no this binding, which runFD's had been an
+// A construction of a derived class allocates the object it makes and
+// nothing else: no this binding, which runFD's had been an
 // allocation of its own, and no copy of the arguments super() passes on.
 func TestDerivedConstructionAllocations(t *testing.T) {
 	const src = `'use strict'

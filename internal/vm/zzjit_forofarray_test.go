@@ -312,7 +312,7 @@ func TestJITGoTypeOfInstanceOf(t *testing.T) {
 // constructor returning an object or a primitive answers as the
 // interpreter's, and class fields are initialized by super() as there.
 // Before, a derived class's constructor was never compiled: each `new` of
-// one ran it in the tree tier -- AWFY DeltaBlue's constraints, a quarter
+// one ran it in the interpreter -- AWFY DeltaBlue's constraints, a quarter
 // of its time with the JIT -- a quarter that is the construction's
 // machinery, not the constructors' own: compiled, those with only a store
 // after their super() saved nothing measured, and are left to the tree
@@ -368,7 +368,7 @@ func TestJITDerivedConstructor(t *testing.T) {
 		}
 	}
 	// An implicit constructor, super(...arguments) alone, which native
-	// code would only leave for at its super(), is left to the tree tier
+	// code would only leave for at its super(), is left to the interpreter
 	// as any function of host operations alone is (jitcompile's hostOnly).
 	for k, x := range r.jit.cache {
 		if fn := k.Value(); fn != nil && fn.Name == "Imp" && x.ssa != nil {

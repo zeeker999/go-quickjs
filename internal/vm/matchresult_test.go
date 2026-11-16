@@ -64,11 +64,12 @@ true
 	}
 }
 
-// TestReplaceShortResults pins replace and match of the built-in exec, whose
-// matches are kept in the caller's frame, and replace's short ASCII results,
-// written with their String in one allocation, on both tiers: results of 0,
-// 71, 72 and 73 bytes, a template with $, text that is not ASCII, empty
-// matches, and lastIndex and the legacy statics after. The answers are Node's.
+// TestReplaceShortResults pins replace and match of the built-in exec,
+// whose matches are kept in the caller's frame, and replace's short ASCII
+// results, written with their String in one allocation: results of 0, 71,
+// 72 and 73 bytes, a template with $, text that is not ASCII, empty
+// matches, and lastIndex and the legacy statics after. The answers are
+// Node's.
 func TestReplaceShortResults(t *testing.T) {
 	t.Parallel()
 	const src = `function f() {

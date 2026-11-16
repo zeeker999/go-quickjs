@@ -83,7 +83,7 @@ func TestJITWritesSharedLiteral(t *testing.T) {
 	}
 }
 
-// Native code makes a literal of constants' arrays as the tree tier does,
+// Native code makes a literal of constants' arrays as the interpreter does,
 // over its shared storage, taking them whole from a pool (ssa's
 // LiteralSite.Shared): reads of an array that does not escape, its
 // length and elements, are what the literal holds; writes give the array

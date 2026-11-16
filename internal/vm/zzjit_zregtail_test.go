@@ -57,10 +57,9 @@ function self(n, acc) { if (n === 0) return acc; return self(n - 1, acc + n) }
 function deep(n) { var s = 0; for (var i = 0; i < n; i++) s += even(40 + (i & 7), 0) + self(40 + (i & 7), 0); return s }
 `
 
-// regClassConstructSrc constructs classes' objects, of base classes with
-// no field to initialize, from register code's native code: natively, as
-// the stack form's code constructs them (jitConstructs), where Go had
-// constructed each; and a construction that throws, and a class's
+// regClassConstructSrc constructs classes' objects, of base classes with no
+// field to initialize, from register code's native code: natively, where Go
+// had constructed each; and a construction that throws, and a class's
 // constructor called, which throws.
 const regClassConstructSrc = `
 class Vec { constructor(x, y) { this.x = x; this.y = y } add(o) { return new Vec(this.x + o.x, this.y + o.y) } }

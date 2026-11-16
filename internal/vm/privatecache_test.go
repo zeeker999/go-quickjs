@@ -237,7 +237,7 @@ operators 2: 3,4,3,40,41,1,41,0,,0
 throw 2: 3 true`
 
 // Reads and writes of private members answer what Node's do, in a runtime
-// made twice, the tree tier on and off.
+// made four times.
 func TestPrivateMembersAgreeWithNode(t *testing.T) {
 	t.Parallel()
 	for round := range 4 {
@@ -253,7 +253,7 @@ func TestPrivateMembersAgreeWithNode(t *testing.T) {
 	}
 }
 
-// The reads and writes of private fields, in a function the tree tier
+// The reads and writes of private fields, in a function register code
 // runs, are answered by their sites' caches: the caches past the
 // function's PropSites, one for each in the order of the code, remember
 // the object's shape and where in it each member is; a getter's member,
@@ -295,8 +295,8 @@ func TestPrivateSitesCached(t *testing.T) {
 		t.Fatalf("keys %v", keys)
 	}
 	// The code reads #n, writes it, reads #m and reads #g, in that order:
-	// the stack form's sites, or, as register code, the sites of its
-	// get_private and set_private (their Aux's high half).
+	// the sites of its get_private and set_private (their Aux's high
+	// half).
 	sites := make([]uint32, 4)
 	for i := range sites {
 		sites[i] = fn.PropSites + 1 + uint32(i)

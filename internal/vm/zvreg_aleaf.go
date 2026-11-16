@@ -2,18 +2,18 @@ package vm
 
 import "math"
 
-// Leaves: built-ins every tier calls without a frame, where they call
-// nothing and cannot throw (elemOp past elemRandom), as V8's optimized code
-// calls fast API functions with no frame of JavaScript's. A built-in
-// declares its own where it is made (setElemOp); the interpreter's calls
-// and pure bodies apply it before they would make a frame (callDirect,
+// Leaves: built-ins the interpreter and native code call without a frame,
+// where they call nothing and cannot throw (elemOp past elemRandom), as V8's
+// optimized code calls fast API functions with no frame of JavaScript's. A
+// built-in declares its own where it is made (setElemOp); the interpreter's
+// calls and pure bodies apply it before they would make a frame (callDirect,
 // callRest, pureInvoke, by pureElemOp and collectionOp, or a native leaf by
-// its check), and native code's calls of Go do too (jitGoCallPlain), none
-// of them keeping a list of functions. Each is applied as the built-in applies it, and reports false
-// wherever the built-in would throw or do anything else -- a receiver of
-// another kind, a key a weak collection takes none of, an object String
-// would convert by its methods -- which the built-in, called the ordinary
-// way, is left to do.
+// its check), and native code's calls of Go do too (jitGoCallPlain), none of
+// them keeping a list of functions. Each is applied as the built-in applies
+// it, and reports false wherever the built-in would throw or do anything
+// else -- a receiver of another kind, a key a weak collection takes none of,
+// an object String would convert by its methods -- which the built-in,
+// called the ordinary way, is left to do.
 //
 // Its functions are variables, each assigned a closure in init, laid
 // out after every other closure of the package, so that no hot code
@@ -406,7 +406,7 @@ var (
 // anything (as leafPrimitives), each method's results within a string's
 // length. Like leafPrimitives, a closure assigned in init, not a package
 // variable's function literal, which the compiler lays out among the
-// package's other closures, ahead of the tree tier's: 3.5 KB of them moved.
+// package's other closures: 3.5 KB of them moved.
 var initStringLeafChecks func()
 
 // leafPrimitives reports whether each of args is a primitive that converts

@@ -2,11 +2,11 @@ package vm
 
 import "testing"
 
-// TestFastAddAndShortBigInts pins what add's two-strings path and the tree
-// tier's shortcut to shortArith answer, on both tiers: two strings joined,
-// a string beside a number converted as before, BigInts held in their
-// Values on every operator, a result past the int64 range, a division by
-// zero, a negative power, and a BigInt mixed with a number.
+// TestFastAddAndShortBigInts pins what add's two-strings path and its
+// shortcut to shortArith answer: two strings joined, a string beside a
+// number converted as before, BigInts held in their Values on every
+// operator, a result past the int64 range, a division by zero, a negative
+// power, and a BigInt mixed with a number.
 func TestFastAddAndShortBigInts(t *testing.T) {
 	t.Parallel()
 	const src = `function f(a, b) { var r = []; r.push(a + b, a - b, a * b);

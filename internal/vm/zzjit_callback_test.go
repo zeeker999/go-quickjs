@@ -198,7 +198,7 @@ func TestJITCallbackEnteredByGo(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
-	// Each reads an element, which has Go enter it (LowerSSA's hostOnly).
+	// Each reads an element, which has Go enter it (LowerReg's hostOnly).
 	setup := callbackSetup + `
 		function goShapes(at) { let s = nums[0] - 1; objs.forEach((o, i) => { s += (i === at ? odd : o).v }); return s }
 		function goReduce(at) { const z = nums[0] - 1; return objs.reduce((s, o, i) => s + (i === at ? odd : o).v, z) }

@@ -176,8 +176,8 @@ func (g *jitProgram) source() string {
 	return b.String()
 }
 
-// jitDifferential runs src, a test's own program, in the interpreter, the
-// tree tier and the JIT under several stress settings, and reports any
+// jitDifferential runs src, a test's own program, in the interpreter, twice,
+// and with the JIT under several stress settings, and reports any
 // difference. It returns the JIT's counters summed over the stress runs.
 // Each run may take jitTestWindow: a test's program finishes, and one the
 // interpreter takes longer over fails the test, where a generated one
@@ -205,10 +205,10 @@ func jitDifferentialIn(t *testing.T, src string, generated bool) JITStats {
 	t.Helper()
 	run := func(tree, jit bool, c jitStressConfig, within time.Duration) (string, time.Duration, JITStats) {
 		// A generated program can grow a string without bound -- o.x=s;
-		// s+=o.x doubles it -- which takes every tier seconds and gigabytes
+		// s+=o.x doubles it -- which takes every run seconds and gigabytes
 		// to reach the engine's length limit. The memory limit stops it
 		// early and keeps the fuzzer's workers responsive. Where it stops
-		// it is not the same in every tier: the meter measures once the
+		// it is not the same in every run: the meter measures once the
 		// process has allocated enough, the JIT's compiler included, and
 		// a rope that shares itself is written out unmetered, so a run
 		// over the limit may end either way (see outOfMemory).
@@ -216,8 +216,7 @@ func jitDifferentialIn(t *testing.T, src string, generated bool) JITStats {
 		defer func() { r.Close(); r.ReleaseClosed() }()
 		r.jitCallThreshold, r.jitICThreshold = 1, 1
 		r.jitStress = c
-		// Each tier compiles its own bytecode: a function's tree decision is
-		// cached in it.
+		// Each run compiles its own bytecode.
 		got, took := jitRunWithin(t, r, src, within)
 		return got, took, r.JITStats()
 	}
@@ -233,7 +232,7 @@ func jitDifferentialIn(t *testing.T, src string, generated bool) JITStats {
 		{threshold: true, background: true, checks: 1},
 		{threshold: true, background: true, checks: 4, budget: 3, deopt: 7},
 	}
-	// The tree tier's run and the JIT's.
+	// The interpreter's second run and the JIT's.
 	interp, within := jitTestWindow, jitTestWindow
 	if generated {
 		interp, within = jitFuzzWindows(1 + len(stress))

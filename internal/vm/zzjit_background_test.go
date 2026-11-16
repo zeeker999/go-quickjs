@@ -181,7 +181,7 @@ func TestJITBackgroundCallWaitsForItsTarget(t *testing.T) {
 
 // A function with no loop, compiled once hot, in the background: its calls
 // enter the code once it is installed. Refused for the compile's being under
-// way, Go never asked again, and the recursion stayed in the tree tier.
+// way, Go never asked again, and the recursion stayed in the interpreter.
 func TestJITBackgroundHotCodeIsEntered(t *testing.T) {
 	t.Parallel()
 	if !jitSSABackend {

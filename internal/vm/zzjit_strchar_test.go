@@ -7,13 +7,13 @@ import (
 	"testing"
 )
 
-// A string's element, s[i], a string of one character: native code makes
-// an ASCII one from the runtime's strings of one character, once the read
-// has met a string (ssa.OpStringChar), and Go makes any other -- a code
-// unit past ASCII, an index past the end or not an integer, a string that
-// is not flat. Each answer is the interpreter's, in every tier and under
-// every stress setting: ASCII and not, past the end, negative and
-// fractional keys, a rope, and a site whose receivers are an array too.
+// A string's element, s[i], a string of one character: native code makes an
+// ASCII one from the runtime's strings of one character, once the read has
+// met a string (ssa.OpStringChar), and Go makes any other -- a code unit
+// past ASCII, an index past the end or not an integer, a string that is not
+// flat. Each answer is the interpreter's, under every stress setting: ASCII
+// and not, past the end, negative and fractional keys, a rope, and a site
+// whose receivers are an array too.
 func TestJITStringElements(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
@@ -86,7 +86,7 @@ func TestJITStringElementsNative(t *testing.T) {
 // last where its view is in its buffer -- and any other receiver's Go's,
 // which goes on after it once the guard has failed (ssa.OpLength), rather
 // than leave the rest of each invocation to the interpreter. Each answer is
-// the interpreter's, in every tier and under every stress setting: arrays,
+// the interpreter's, under every stress setting: arrays,
 // strings, typed arrays of each kind, a view on a detached buffer, a
 // subarray, and objects with a length of their own.
 func TestJITLengths(t *testing.T) {
@@ -120,8 +120,8 @@ func TestJITLengths(t *testing.T) {
 // compiled again. Not a callee whose frame is more than its arguments in
 // its parameters -- an arguments object, a rest parameter, defaults,
 // destructuring -- which that frame would lose: Go makes those calls. Each
-// answer is the interpreter's, in every tier and under every stress
-// setting, the loop compiled before any callee is called.
+// answer is the interpreter's, under every stress setting, the loop
+// compiled before any callee is called.
 func TestJITCallsLinkedBeforeCode(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
@@ -204,13 +204,13 @@ func TestJITCallsBesideCharCodeAt(t *testing.T) {
 	}
 }
 
-// A call of String.prototype.charCodeAt is made natively by its target,
-// as V8 reduces one, whatever its method's name (ssa's CharCodeFeedback):
-// under another name, and in a callee inlined into the loop calling it. Once compiled, each runs natively at every call, and
-// neither leaves native code nor has Go make a call nearly once a
-// character; and each
-// answer is the interpreter's, in every tier and stress setting, a
-// replaced charCodeAt and receivers that are not strings included.
+// A call of String.prototype.charCodeAt is made natively by its target, as
+// V8 reduces one, whatever its method's name (ssa's CharCodeFeedback):
+// under another name, and in a callee inlined into the loop calling it.
+// Once compiled, each runs natively at every call, and neither leaves
+// native code nor has Go make a call nearly once a character; and each
+// answer is the interpreter's, under every stress setting, a replaced
+// charCodeAt and receivers that are not strings included.
 func TestJITCharCodeAtByTarget(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
@@ -426,7 +426,7 @@ func TestJITFreshViewLengthsNative(t *testing.T) {
 // target (ssa.OpCodeChar, jitFeedback.FromCharCode): the runtime's own
 // string of the character, from the table s[i] reads too, now of 256, with
 // nothing made and no call of Go -- PDF.js's fonts build their strings so,
-// a character at a time. Each answer is the interpreter's in every tier and
+// a character at a time. Each answer is the interpreter's under every
 // stress setting: codes past 255, negative, fractional and NaN, a valueOf,
 // two arguments, and String.fromCharCode replaced, which Go makes. Once
 // compiled, 20 calls of 1,000 characters each make next to no calls of Go.

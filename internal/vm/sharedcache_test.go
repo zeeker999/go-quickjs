@@ -6,8 +6,7 @@ import "testing"
 // cache (sharedProp), of entries in pairs: reads of own properties and of
 // prototypes' at one and two levels, across forty layouts, stay right as
 // a prototype's method is replaced, a property is added to a prototype in
-// front of the one that had it, and one is deleted -- in the interpreter
-// and the trees alike.
+// front of the one that had it, and one is deleted.
 func TestSharedCacheMegamorphic(t *testing.T) {
 	t.Parallel()
 	src := `

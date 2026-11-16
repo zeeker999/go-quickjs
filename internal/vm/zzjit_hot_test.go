@@ -4,9 +4,9 @@ package vm
 
 import "testing"
 
-// Functions of calls and no loop, compiled once hot (LowerSSAHot): a
+// Functions of calls and no loop, compiled once hot (LowerRegHot): a
 // recursion, a mutual one, one constructing, one whose calls throw, each
-// answer the interpreter's in every tier and under every stress setting.
+// answer the interpreter's under every stress setting.
 func TestJITHotCalls(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
@@ -38,7 +38,7 @@ func TestJITHotCalls(t *testing.T) {
 // call site that starts it: a harness's call, decided for one benchmark,
 // taking the next. It had been refused once entered from Go -- a function
 // of calls and no loop -- and AWFY's Towers, run after Sieve, ran its
-// recursion in the tree tier, four times as long as run alone.
+// recursion in the interpreter, four times as long as run alone.
 func TestJITHotCallsAnyOrder(t *testing.T) {
 	t.Parallel()
 	if !jitSSABackend {
@@ -91,7 +91,7 @@ func TestJITHotCallsAnyOrder(t *testing.T) {
 // does when it does not: a recursion runs on natively, no call of Go, and
 // is not judged slow. When Go made the calls then (abi.GoOpMarking), a
 // recursion's had been judged slow on its leaves -- under a collector that
-// marked often, in TestJITHotCallsAnyOrder on Windows -- and the tree tier
+// marked often, in TestJITHotCallsAnyOrder on Windows -- and the interpreter
 // ran it.
 func TestJITHotCallsWhileMarking(t *testing.T) {
 	if !jitSSABackend {
@@ -137,7 +137,7 @@ func TestJITHotCallsWhileMarking(t *testing.T) {
 }
 
 // jitHotForTest is the entry of the global function name's code compiled
-// once hot (LowerSSAHot), nil where it has none: or, where r runs register
+// once hot (LowerRegHot), nil where it has none: or, where r runs register
 // code, its register code's state, the code compiled as the register
 // form's compiles a function of calls and no loop (LowerRegHot).
 func jitHotForTest(r *Runtime, name string) *jitEntry {

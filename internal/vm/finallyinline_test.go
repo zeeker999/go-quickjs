@@ -18,8 +18,7 @@ import (
 // a generator yielding in its clause, run to its end and returned from; a
 // for-of's iterator closed by a break before the clause runs; closures of
 // a block's bindings in the try and in the clause; and the try's value
-// returned before the clause changes what it was read from. On the trees
-// and in the interpreter.
+// returned before the clause changes what it was read from.
 func TestFinallyInline(t *testing.T) {
 	t.Parallel()
 	src := `

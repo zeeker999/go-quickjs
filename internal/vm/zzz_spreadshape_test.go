@@ -131,8 +131,7 @@ bigafter: PE{p1=1:wec p2=2:wec p3=w:wec p4=4:wec p5=5:wec p6=6:wec p7=7:wec p8=8
 log: get b,get b,get b,get b,get b,get b,ownKeys,gopd a,get a,gopd b,get b,ownKeys,gopd a,get a,gopd b,get b,ownKeys,gopd a,get a,gopd b,get b,ownKeys,gopd a,get a,gopd b,get b,ownKeys,gopd a,get a,gopd b,get b,ownKeys,gopd a,get a,gopd b,get b`
 
 // TestSpreadByLayout pins that an object spread made by its layout makes
-// what the definitions made: Node's answer, in the tree tier and in the
-// interpreter.
+// what the definitions made: Node's answer.
 func TestSpreadByLayout(t *testing.T) {
 	t.Parallel()
 	for _, tree := range []bool{true} {

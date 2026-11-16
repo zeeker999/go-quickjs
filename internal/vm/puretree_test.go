@@ -6,11 +6,11 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
 
-// TestPureByTree pins which pure bodies a call from a tree runs as their
-// tree (pureByTree): one of pureTreeCode instructions or more that calls
-// nothing is given its tree's call after its first, framed, call; one that
-// calls, or a short one, stays frameless (pureCall), as does every call
-// from inside another pure body. Each answers the same in both tiers.
+// TestPureByTree pins which pure bodies are called as their register code
+// (pureByTree): one of pureTreeCode instructions or more that calls
+// nothing is given its register code's call (regCall); one that calls, or
+// a short one, stays frameless (pureCall), as does every call from inside
+// another pure body.
 func TestPureByTree(t *testing.T) {
 	t.Parallel()
 	const src = `
@@ -38,7 +38,7 @@ func TestPureByTree(t *testing.T) {
 		if got := res[0].Number(); got != 300+149*3 {
 			t.Errorf("tree=%v: n = %v, want %v", tree, got, 300+149*3)
 		}
-		// What a tree's call is given, where the functions are trees.
+		// Which of them are given their register code's call.
 		if tree {
 			for i, want := range []bool{true, true, false, false} {
 				fd := res[i+1].Object().fn()

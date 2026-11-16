@@ -124,7 +124,7 @@ func (m jitSnapMiss) Error() string {
 
 // get is the answer to a question; nil for one of a PC, asked there, that
 // answered nothing, which its method answers with its results' zero
-// values; or a miss, which the worker's build recovers (jitJob.run): a
+// values; or a miss, which the worker's build recovers (jitRegJob.run): a
 // question of a PC whose op the method is not asked at (jitSnapOpMethods)
 // is a miss too.
 func (s *jitSnapshot) get(m jitSnapMethod, arg int64) []any {
@@ -282,7 +282,7 @@ func jitSnapCopy[T any](s []T) []T { return slices.Clone(s) }
 
 // jitSnapSparse are the methods asked at every PC (jitSnapAsks) whose
 // answer is false but at the few PCs a list of the function's entry, or
-// the tree tier's marks, name: Generic, EntryGeneric and Resumed. They are
+// the interpreter's marks, name: Generic, EntryGeneric and Resumed. They are
 // asked at those alone (askSparse), each other PC answering its zero value
 // as a PC asked that answered nothing does. Asked at every PC, they were
 // half the questions a snapshot asked, three answering in 10,000 in the

@@ -6,21 +6,16 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/jit"
 )
 
-// jitRegCodeForTest reports whether the global function name runs register
-// code in r, which r's JIT compiles: r runs register code, and its closure
-// was given its function's. A function given the old tiers' -- one the
-// register form does not cover, or loaded while a test had the register
-// interpreter or the tree tier off -- has the stack form's code, entry
-// and link, whatever r runs.
+// jitRegCodeForTest reports whether the global function name's closure
+// was given its function's register code, which r's JIT compiles.
 func jitRegCodeForTest(r *Runtime, name string) bool {
 	return r.global.getOwn(r.atoms.intern(name)).value().Object().fn().closure.reg != nil
 }
 
 // jitRegLifeForTest is the state of the global function name's register
 // code that outlives its compiles (jitRegLifeOf), if the cache holds code
-// compiled from it, and nil otherwise: the register form's counterpart of
-// its stack form's entry, whose counts -- entries, hosts, guards, deopts --
-// and learning the register code's runs keep.
+// compiled from it, and nil otherwise: its counts -- entries, hosts,
+// guards, deopts -- and what the register code's runs learn.
 func jitRegLifeForTest(r *Runtime, name string) *jitEntry {
 	cl := r.global.getOwn(r.atoms.intern(name)).value().Object().fn().closure
 	if r.jit == nil || cl.closureCode == nil {

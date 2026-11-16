@@ -12,7 +12,7 @@ import (
 // The element types of the typed arrays an element read or write of a
 // number has met, as V8's feedback keeps a keyed access's elements kind,
 // are learned as native code runs, which is where most such reads run: the
-// existing tiers keep nothing of a site's. Each site has a cell, its
+// interpreter keeps nothing of a site's. Each site has a cell, its
 // function's lowering's (jitLowering's typedCells), whose number word has
 // bit 1<<k for each element type k it met. Code compiled with the cell
 // reads it as it reads a typed array's element the site's code was not
@@ -46,8 +46,7 @@ func (r *Runtime) jitTypedSeen(ctx *abi.Context) bool {
 		cell.num = math.Float64frombits(bits | bit)
 		if e := r.jitRegCtxEntry(ctx); e != nil {
 			// Register code's: compiled again as what its calls of Go
-			// learn has it (jitRegReopt), the stack form's entry not
-			// the code that runs.
+			// learn has it (jitRegReopt).
 			r.jitRegReopt(nil, e)
 		} else if e := r.jitRunEntry(ctx); e != nil && e.ssa != nil {
 			e.reopt = true

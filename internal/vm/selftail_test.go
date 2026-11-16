@@ -3,18 +3,18 @@ package vm
 import "testing"
 
 // A function calling itself in tail position deeper than tailCallDepth is
-// started again in its own frame (selfRestart, Runtime.treeRestart): its
+// started again in its own frame (regTailInPlace, regRestartRun): its
 // parameters rebound, its other locals undefined, its first block run
-// again. Each case recurses past the depth, so that it is started again
-// or, where it may not be, given frames. It answers as Node does -- a var
-// and a let made anew at each start, parameters with defaults (which take
-// their values from the call's arguments, and so are given a frame each),
-// fewer arguments than parameters and more, a method calling itself on
-// another object, a binding a closure keeps open (given a frame each, the
-// closures seeing their own) and one it takes the value of, two closures of one function (not each
-// other's self), a ternary's tail call -- and a recursion a million deep
-// runs in its frame. Node, which makes no tail call, is asked 5,000 deep.
-// On the trees and in the interpreter, three rounds alike.
+// again. Each case recurses past the depth, so that it is started again or,
+// where it may not be, given frames. It answers as Node does -- a var and a
+// let made anew at each start, parameters with defaults (which take their
+// values from the call's arguments, and so are given a frame each), fewer
+// arguments than parameters and more, a method calling itself on another
+// object, a binding a closure keeps open (given a frame each, the closures
+// seeing their own) and one it takes the value of, two closures of one
+// function (not each other's self), a ternary's tail call -- and a
+// recursion a million deep runs in its frame. Node, which makes no tail
+// call, is asked 5,000 deep. Three rounds alike.
 func TestSelfTailCalls(t *testing.T) {
 	t.Parallel()
 	const src = `

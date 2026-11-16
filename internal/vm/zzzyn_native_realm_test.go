@@ -25,8 +25,7 @@ const nativeInRealmSrc = `
 	function f(o) { var n = 0; for (var i = 0; i < 200; i++) if ("x" in o) n++; return n; }
 	f({x: 1}) + f({y: 1});`
 
-// nativeRealmFn compiles src in the register form, with the register tier
-// and the native handlers on for the test.
+// nativeRealmFn compiles src, with the native handlers on for the test.
 func nativeRealmFn(t *testing.T, src string) *bytecode.Function {
 	t.Helper()
 	fn := compileForTest(t, src)

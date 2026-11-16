@@ -78,7 +78,7 @@ func jitTierRuntimeWithForTest(t *testing.T, threshold uint16, setup string, ins
 // compiled again once they have spent a fresh budget -- as many
 // invocations as it took to compile it first (jitCallThreshold), each its
 // length (jitTierBudget) -- for what its caches learned meanwhile: f,
-// compiled for A, meets B, runs in the tree tier for three calls, and is
+// compiled for A, meets B, runs in the interpreter for three calls, and is
 // compiled again at the fourth, for both, never deoptimizing again. Each
 // answer is the interpreter's.
 func TestJITDeoptInvalidates(t *testing.T) {
@@ -118,7 +118,7 @@ func TestJITDeoptInvalidates(t *testing.T) {
 
 // A change of a function's caches' feedback while its invalidated code waits
 // for the existing tiers' budget delays the compile by a fresh budget, as
-// V8's NotifyICChanged does: f, invalidated by B, meets C in the tree tier
+// V8's NotifyICChanged does: f, invalidated by B, meets C in the interpreter
 // at its second call, and is compiled at the eighth, not the fourth, for
 // all three shapes. The caches filled again with what they held -- the
 // same entries, in another order -- delay nothing (jitFeedbackMark).
@@ -168,7 +168,7 @@ func TestJITFeedbackChangeDelaysTierUp(t *testing.T) {
 
 // A function that keeps deoptimizing is compiled no more past jitMaxDeopts
 // eager deoptimizations, as V8 gives up optimizing one: f, at the limit,
-// deoptimizes once more, and the tree tier runs it from then on, however
+// deoptimizes once more, and the interpreter runs it from then on, however
 // many budgets it spends.
 func TestJITDeoptLimit(t *testing.T) {
 	t.Parallel()
@@ -299,7 +299,7 @@ func v8TierRuntimeForTest(t *testing.T, setup string) (*Runtime, func(src string
 // NotifyICChanged does: g, the same, meeting a second shape at its 100th
 // call, is compiled at its 900th, the change found when its budget was
 // spent at its 400th, not before. Neither has a loop, whose back edges
-// would spend their budget too (jitTierWork).
+// would spend their budget too.
 func TestJITV8Budgets(t *testing.T) {
 	t.Parallel()
 	if !jitSSABackend {
@@ -517,7 +517,7 @@ func TestJITFrequentLongCalleeCompiledForCaller(t *testing.T) {
 // invocation, whose loop proves it long, goes on natively. sum, judged
 // slow, runs a call of a million iterations natively from its loop.
 // DeltaBlue's forEach, judged slow on its many short calls, had run its
-// plan's, thousands of constraints long, in the tree tier.
+// plan's, thousands of constraints long, in the interpreter.
 func TestJITSlowCodeEnteredByOSR(t *testing.T) {
 	t.Parallel()
 	if !jitSSABackend {
