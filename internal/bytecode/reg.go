@@ -982,8 +982,6 @@ type RegLater struct {
 	// make compiles the code, holding what the compiler recorded until
 	// then; it is dropped once it has run.
 	make func() *RegCode
-	// old is the mark KeepOldTiers sets and OldTiers reads.
-	old atomic.Bool
 }
 
 // RegNone is a RegLater with no code: top-level code's that the register
@@ -992,20 +990,6 @@ func RegNone() *RegLater {
 	l := &RegLater{}
 	l.done.Store(true)
 	return l
-}
-
-// KeepOldTiers marks f (OldTiers). Nothing acts on the mark: every
-// runtime runs register code.
-func (f *Function) KeepOldTiers() {
-	if l := f.Reg; l != nil && !l.old.Load() {
-		l.old.Store(true)
-	}
-}
-
-// OldTiers reports whether KeepOldTiers marked f.
-func (f *Function) OldTiers() bool {
-	l := f.Reg
-	return l != nil && l.old.Load()
 }
 
 // NewRegLater returns the register code that make compiles when first
