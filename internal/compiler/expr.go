@@ -941,7 +941,6 @@ func (c *compiler) compileObjectLit(n *ast.ObjectLit) {
 		}
 	}
 	c.emit(bytecode.OpNewObject, uint32(fields), 0)
-	c.noteLiteralKeys(n)
 	for _, p := range n.Props {
 		switch p.Kind {
 		case ast.PropSpread:
@@ -1020,28 +1019,6 @@ func (c *compiler) compileObjectLit(n *ast.ObjectLit) {
 		}
 		c.emit(bytecode.OpDefineField, c.nameIdx(key), 0)
 	}
-}
-
-// noteLiteralKeys records the keys of n, the object literal whose site is the
-// last made, if it has nothing else (bytecode.Function.LiteralKeys), by their
-// hash (bytecode.HashLiteralKeys).
-func (c *compiler) noteLiteralKeys(n *ast.ObjectLit) {
-	if len(n.Props) == 0 || len(n.Props) > bytecode.MaxLiteralKeys {
-		return
-	}
-	var keys [bytecode.MaxLiteralKeys]string
-	for i, p := range n.Props {
-		if p.Computed || p.Kind == ast.PropSpread || p.Kind == ast.PropGet || p.Kind == ast.PropSet {
-			return
-		}
-		key := propKeyName(p.Key)
-		if key == "__proto__" || slices.Contains(keys[:i], key) {
-			return
-		}
-		keys[i] = key
-	}
-	h := bytecode.HashLiteralKeys(keys[:len(n.Props)])
-	c.fn.LiteralKeys = append(c.fn.LiteralKeys, bytecode.LiteralKeys{Site: c.fn.PropSites, Keys: h})
 }
 
 // isAnonymousFnDef reports whether an expression is an AnonymousFunctionDefinition,

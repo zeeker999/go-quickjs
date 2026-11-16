@@ -25,6 +25,9 @@ import (
 var stackFields = map[string]bool{
 	"Code": true, "Lines": true, "MaxStack": true, "ParamEnd": true,
 	"PropSites": true, "PrivateSites": true, "Names": true, "Constants": true,
+	// The stack form's literals' keys, which the register code's
+	// ObjKeysHash says.
+	"LiteralKeys": true,
 	// The leaf, which regLeaf writes for both sides.
 	"Leaf": true, "PureCalls": true, "PureTail": true,
 }
@@ -60,12 +63,6 @@ func (d *writer) regFields(path string, fn *bytecode.Function) {
 		case f.Name == "Reg":
 			d.regLeaf(fn)
 			d.regSymbolic(fn)
-			continue
-		case f.Name == "LiteralKeys":
-			// The keys alone: their sites are the stack form's numbers.
-			for _, lk := range fn.LiteralKeys {
-				fmt.Fprintf(d.w, "literal keys %q\n", lk.Keys)
-			}
 			continue
 		case f.Name == "Debug":
 			d.regDebug(v.Field(i))

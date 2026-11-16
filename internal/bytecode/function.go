@@ -275,23 +275,15 @@ type SourceLoc struct {
 //
 // A template is immutable once compiled and is shared by every closure created
 // from it; the per-call state lives in the virtual machine's frame.
-// MaxLiteralKeys is the most keys of a literal Function.LiteralKeys says.
+// MaxLiteralKeys is the most keys of a literal RegCode.ObjKeysHash says.
 const MaxLiteralKeys = 64
 
-// LiteralKeys says of the object literal of a site what keys it defines: Keys
-// is a hash of them and their order, never 0, which is the same for the same
-// keys in any function of any runtime. It only identifies them: two lists of
-// keys of one hash, as rare as they come, are only slower.
-type LiteralKeys struct {
-	Site uint32
-	Keys uint64
-}
-
-// HashLiteralKeys is LiteralKeys' Keys of a literal whose keys are keys,
-// in their order: FNV-1a, 64 bits, which takes no seed, so that a
-// function shared by runtimes says its literals of the same keys alike.
-// Each key's length goes into the hash, so that ab then c is not a then
-// bc. It is never 0.
+// HashLiteralKeys is RegCode.ObjKeysHash's hash of the keys of an object
+// literal, in their order: FNV-1a, 64 bits, which takes no seed, so that a
+// function shared by runtimes says its literals of the same keys alike, in
+// any function of any runtime. It only identifies them: two lists of keys
+// of one hash, as rare as they come, are only slower. Each key's length
+// goes into the hash, so that ab then c is not a then bc. It is never 0.
 func HashLiteralKeys(keys []string) uint64 {
 	const (
 		start = 14695981039346656037
@@ -484,10 +476,6 @@ type Function struct {
 	// Text is the original source text of the function, which
 	// Function.prototype.toString returns.
 	Text string
-	// LiteralKeys says the keys of the function's object literals that have
-	// nothing else -- no spread, accessor, computed key or __proto__, no key
-	// twice, and no more than MaxLiteralKeys -- in the order of their sites.
-	LiteralKeys []LiteralKeys
 	// TraceName is what a stack trace calls a function the language leaves
 	// anonymous, as V8's name inferrer calls it: a.b for
 	// `a.b = function () {}` (see the compiler's traceJoin). Only traces read

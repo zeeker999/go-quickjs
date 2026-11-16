@@ -1129,7 +1129,7 @@ const jitLiteralRoom = 64
 // code makes its objects from a pool of the shape its site's objects start
 // with (shapeTree.siteRoot).
 func (r *Runtime) jitObjectLiteral(e *jitEntry, cl *closure, pc int, site uint32, n int) *jitLiteral {
-	keySite[struct{}](r, cl, site)
+	keySite[struct{}](r, cl, pc, site)
 	root := r.shapes.siteRoot(&cl.ic[site], r.proto.object)
 	if root == nil {
 		return nil

@@ -263,8 +263,7 @@ func generate(fn *bytecode.Function, own bool, s *scratch, mk func(*gen)) (*gen,
 
 // moveStackSites renumbers the stack form's cache sites past the nsites
 // the register form numbered from 1: every instruction that has one in its
-// B (the compiler's emit and its array literal of constants) and the
-// object literals' keys (LiteralKeys). The two forms index one closure's
+// B (the compiler's emit and its array literal of constants). The two forms index one closure's
 // caches, and the register form's 16-bit operands reach only the first.
 func (g *gen) moveStackSites() {
 	n := g.nsites
@@ -280,9 +279,6 @@ func (g *gen) moveStackSites() {
 				in.B += n
 			}
 		}
-	}
-	for i := range fn.LiteralKeys {
-		fn.LiteralKeys[i].Site += n
 	}
 	fn.PropSites += n
 }
