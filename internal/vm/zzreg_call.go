@@ -1094,7 +1094,7 @@ func (r *Runtime) regConstruct(calls []regCallCache, site uint16, callee Value, 
 				// A derived class's, which the native handler enters with
 				// its this binding (nativeNew); its construction here is
 				// construct's, as before.
-				calls[site] = regCallCache{callee: o, cl: cl, rc: rc, kind: regCallConstruct}
+				regCtorNote(&calls[site], o, cl, rc)
 			}
 		}
 		return r.construct(callee, args)
@@ -1109,7 +1109,7 @@ func (r *Runtime) regConstruct(calls []regCallCache, site uint16, callee Value, 
 			if p := o.getOwnVisible(atomPrototype); p.ok() && p.flags()&propAccessor == 0 && p.value().IsObject() {
 				if root := r.shapes.ctorRoot(fd, p.value().Object()); root == nil || root.tracked() {
 					if ecl, rc, ok := r.regCtorEntered(o, fd); ok {
-						calls[site] = regCallCache{callee: o, cl: ecl, rc: rc, kind: regCallConstruct}
+						regCtorNote(&calls[site], o, ecl, rc)
 					}
 				}
 			}
@@ -1137,10 +1137,10 @@ func (r *Runtime) regConstruct(calls []regCallCache, site uint16, callee Value, 
 		return Undefined, err
 	}
 	root := r.shapes.ctorRoot(fd, proto)
-	if (root == nil || root.tracked()) && fd.fieldInit() == nil && uint(site) < uint(len(calls)) {
+	if uint(site) < uint(len(calls)) && (root == nil || root.tracked()) && fd.fieldInit() == nil {
 		// Its objects' room settled and nothing to give them but what its
 		// body stores: the site's to construct with from now on.
-		calls[site] = regCallCache{callee: o, cl: cl, rc: rc, kind: regCallConstruct}
+		regCtorNote(&calls[site], o, cl, rc)
 	}
 	obj := newOrdinary[struct{}](fd, root, proto, root.roomFor(int(cl.fn.ThisProps)))
 	this := Obj(obj)
@@ -1165,6 +1165,17 @@ func (r *Runtime) regConstruct(calls []regCallCache, site uint16, callee Value, 
 		return res, nil
 	}
 	return this, nil
+}
+
+// regCtorNote makes e, a new_w site's cache, the construction's with o, of
+// closure cl and register code rc (regCallConstruct), written only where
+// it holds something else: a construction the native handler leaves to Go
+// passes here each time, and the three pointers' stores, barriers and all,
+// had been made at every one.
+func regCtorNote(e *regCallCache, o *Object, cl *closure, rc *regCode) {
+	if e.callee != o || e.cl != cl || e.rc != rc || e.kind != regCallConstruct {
+		*e = regCallCache{callee: o, cl: cl, rc: rc, kind: regCallConstruct}
+	}
 }
 
 // regCtorBase reports whether o, of funcData fd with a closure, is a base
