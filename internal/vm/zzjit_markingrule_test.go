@@ -40,6 +40,14 @@ func TestJITSameWorkWhileMarking(t *testing.T) {
 		t.Skip("no SSA backend on this architecture")
 	}
 	src, names := jitMarkingCorpus(t)
+	// The cache's clocks stopped, for both runs alike (jitFlushForTest):
+	// they run on the program's time, which the marking runs' calls of the
+	// barrier lengthen, and the corpus fills the JIT's budget -- register
+	// code's state counted in it (regAccount), the top-level code's literal
+	// pools among it -- where which code is old enough to make room
+	// depends on them: a compile refused room in one run and not the other
+	// is no path's work while marking.
+	jitFlushForTest(t)
 	plain := jitMarkingRun(t, src, names, false)
 	marking := jitMarkingRun(t, src, names, true)
 	// And each run by native code made from its register code

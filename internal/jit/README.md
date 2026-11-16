@@ -2907,10 +2907,7 @@ least recently used first (`regVictims`, `regReclaim`); and `flush` drops
 code unused between two of its looks (`regFlush`) -- code used is code that
 ran, and the callees of code used, inlined there (its keep's `inlined`, what
 it learned of its calls) or called natively (its keep's `links`), whose own
-uses do not count those runs, as `flush` finds the stack form's. An entry
-counts its code's footprint and what describes it: itself, its keep's
-compiled lists (`compiledBytes`), its tables by register pc
-(`jitRegEntryFixed`, `jitRegPlace`).
+uses do not count those runs, as `flush` finds the stack form's.
 
 A function's state (`regLearned`, a `jitEntry`) counts too, as the stack
 form's entry's `measure` counts what it learned: the entry and what it

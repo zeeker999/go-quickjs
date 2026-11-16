@@ -178,11 +178,6 @@ func (e *jitRegEntry) ipc(rpc int) int {
 	return e.p.At(uint32(rpc))
 }
 
-// jitRegEntryFixed is what the JIT counts for an entry of register code
-// apart from its code and the slices it holds: itself, and its place in
-// the cache (jitMapSlot).
-var jitRegEntryFixed = int(unsafe.Sizeof(jitRegEntry{})) + jitMapSlot
-
 // jitRegFor is cl's register code c compiled, from the cache or anew; nil
 // where the JIT has no memory for it now. An entry with no code holds the
 // refusal.
@@ -589,13 +584,12 @@ func regLoopAround(c *regCode, rpc int) int {
 func (s *jitState) jitRegRoomAhead(cl *closure, life *jitEntry, old *jitRegEntry) bool {
 	if !life.regCounted {
 		// Its state, kept with no room for it (regLearnedOf), counted from
-		// now on, in the room its compile asks for besides.
-		if !s.makeRoom(len(cl.fn.Code)*s.perInstr + jitEntryFixed + life.learnedBytes()) {
+		// now on, in the room made for it first.
+		if !s.makeRoom(jitEntryFixed + life.learnedBytes()) {
 			return false
 		}
 		life.regCounted = true
 		s.regAccount(life)
-		return true
 	}
 	if old == nil {
 		return s.makeRoom(len(cl.fn.Code) * s.perInstr)
@@ -759,12 +753,6 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 	// Its code calls through its links from now on, until it is closed
 	// (regClose).
 	s.regHoldLinks(e.keep, 1)
-	// What describes the code besides, counted with it, as the stack
-	// form's entry's measure counts what its code was compiled with
-	// (compiledBytes): the entry, what it reads by address, its tables by
-	// register pc.
-	e.bytes += jitRegEntryFixed + e.keep.compiledBytes() + jitCapBytes(e.at) + jitCapBytes(e.loops) +
-		jitCapBytes(e.unresumed) + jitCapBytes(e.unentered) + jitCapBytes(e.kept) + jitCapBytes(e.targets)
 	if JITCodeHook != nil {
 		// -jitcode's record of the code, as the stack form's compiles
 		// make it (jitInstall).
@@ -880,9 +868,13 @@ func (s *jitState) regAge(now uint64) {
 		if u := regLifeUses(l); u != l.seen {
 			l.seen, l.used = u, now
 		}
-		// One kept with no room for it (regLearnedOf) counted from now
-		// on, the room made among it (makeRoom).
-		l.regCounted = true
+		if !l.regCounted {
+			// One kept with no room for it (regLearnedOf) counted from now
+			// on, the room made among it (makeRoom): what may be reclaimed
+			// has grown, past the floor noted before.
+			l.regCounted = true
+			s.floorAt = 0
+		}
 		s.regAccount(l)
 	}
 	for key, l := range s.regLowered {
@@ -1004,11 +996,33 @@ func (s *jitState) regUnlink(l *jitLink) {
 		}
 	}
 	for _, j := range s.regPendingJobs {
-		if j.rf != nil && slices.Contains(j.rf.fb.keep().links, l) {
+		if j.holdsLink(l) {
 			return
 		}
 	}
 	s.regDropLink(l)
+}
+
+// holdsLink reports whether j, a compile in the background, may call
+// through l once installed: its feedback asked for l, which its keep holds
+// or its snapshot's questions took back, to be put back at the install
+// (jitSnapshot's effects).
+func (j *jitRegJob) holdsLink(l *jitLink) bool {
+	if j.rf != nil && slices.Contains(j.rf.fb.keep().links, l) {
+		return true
+	}
+	if j.snap == nil {
+		return false
+	}
+	root := j.snap.s
+	for _, s := range append([]*jitSnapshot{root}, mapValues(root.callees)...) {
+		for _, x := range s.effects {
+			if slices.Contains(x.own.links, l) || slices.Contains(x.kept.links, l) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // regBuilding notes *rf, the feedback of a register compile under way,
@@ -1075,7 +1089,7 @@ func (s *jitState) regHoldLinks(fb *jitFeedback, d int) {
 func (s *jitState) regVictims(v []jitVictim, now uint64) []jitVictim {
 	for key, l := range s.regLowered {
 		if n := s.regLoweringSpare(key, l); n > 0 {
-			v = append(v, jitVictim{key: key, l: l, reg: true, class: jitVictimLowering, used: l.used, bytes: n})
+			v = append(v, jitVictim{key: key, l: l, reg: true, class: jitVictimLowering, used: l.used, serial: s.regVictimSerial(key, 0), bytes: n})
 		}
 	}
 	called := s.regCalledFns()
@@ -1103,7 +1117,11 @@ func (s *jitState) regVictims(v []jitVictim, now uint64) []jitVictim {
 				n += max(l.bytes-jitEntryFixed, 0) / 2
 			}
 		}
-		v = append(v, jitVictim{key: key, re: e, reg: true, class: class, used: e.used, serial: uint64(e.serial), bytes: n})
+		serial := uint64(e.serial)
+		if class == jitVictimRefusal {
+			serial = s.regVictimSerial(key, serial)
+		}
+		v = append(v, jitVictim{key: key, re: e, reg: true, class: class, used: e.used, serial: serial, bytes: n})
 	}
 	// The state kept of functions the cache holds nothing for -- warming
 	// up, or their code let go of -- as the stack form's entries with no
@@ -1115,6 +1133,21 @@ func (s *jitState) regVictims(v []jitVictim, now uint64) []jitVictim {
 		v = append(v, jitVictim{key: key, e: l, reg: true, class: jitVictimRefusal, used: l.used, serial: l.serial, bytes: l.bytes})
 	}
 	return v
+}
+
+// regVictimSerial is the serial makeRoom orders a victim of the function
+// whose key is key by, among those of its class and epoch: its state's
+// (regLearned), numbered as the states are made, with refusals and
+// lowerings, which share their classes with the states and with each
+// other; or, with none, or, the cache's own, its own. Ties had been broken
+// by the order the cache's maps gave them, which is the process's, and
+// which of two programs or two warming states went first had a full
+// budget's compiles differ from one run to the next.
+func (s *jitState) regVictimSerial(key jitKey, own uint64) uint64 {
+	if l := s.regLearned[key]; l != nil && l.serial != 0 {
+		return l.serial
+	}
+	return own
 }
 
 // regLoweringHeld is the kind of l's program that the code the cache holds
