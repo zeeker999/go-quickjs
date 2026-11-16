@@ -70,7 +70,7 @@ func TestOutputIsWhole(t *testing.T) {
 		"Debug: & {",
 		// The register code of the arrow, compiled as its first call
 		// would, an instruction a line.
-		"\nReg: <nil>\nr    0 ", " get_upval ", "\nreg SrcPC: [",
+		"\nReg: <nil>\nr    0 ", " get_upval ", "\nreg Lines: [",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("no %q in\n%s", want, got)

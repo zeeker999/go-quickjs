@@ -4668,7 +4668,7 @@ func (g *gen) finish() *bytecode.RegCode {
 	lines := g.s.table[:0]
 	last := int32(-1)
 	for i, p := range g.pos {
-		if p != last {
+		if i == 0 || p != last {
 			lines = append(lines, bytecode.SourceLoc{PC: uint32(i), Pos: p})
 			last = p
 		}
