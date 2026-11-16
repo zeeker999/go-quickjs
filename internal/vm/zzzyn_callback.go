@@ -47,8 +47,10 @@ type regCallback struct {
 // a runtime of Node's quirks or a debugger, a stack with no room for its
 // window. A leaf is callDirect's as before in a runtime that runs the JIT,
 // which counts it there, and where the Go table runs register frames
-// (QJS_NONATIVE), whose loop is slower than the frameless evaluators. The
-// caller ends it (end).
+// (QJS_NONATIVE), whose loop is slower than the frameless evaluators --
+// until they have given up on its body (pureMiss), as a BigInt sum makes
+// them, from when the callback enters it with a frame. The caller ends it
+// (end).
 func (r *Runtime) regCallbackOf(fn, this Value) *regCallback {
 	if !fn.IsObject() || r.nodeQuirks || r.debug != nil {
 		return nil
@@ -68,10 +70,16 @@ func (r *Runtime) regCallbackOf(fn, this Value) *regCallback {
 		// Answered with no frame and no evaluator (regDirect).
 		return nil
 	default:
-		if jitBuilt && r.jitOn() || !regNativeOn {
-			// The JIT's runtime counts its leaves in callDirect; and the
-			// Go table's loop, entered for each call, is slower than the
-			// frameless evaluators.
+		if jitBuilt && r.jitOn() {
+			// The JIT's runtime counts its leaves in callDirect.
+			return nil
+		}
+		if !regNativeOn && fd.closure.pureMiss < pureMissLimit {
+			// The Go table's loop, entered for each call, is slower than
+			// the frameless evaluators while they answer the body; once
+			// they have given up on it (pureMiss), every call through
+			// callDirect would try them again and then enter a frame
+			// there, which the callback enters itself.
 			return nil
 		}
 	}
