@@ -243,3 +243,20 @@ func TestJITRegInlinedReceiverInStack(t *testing.T) {
 		{"setters", []float64{30}, 8, "225:Box.set [as add],setters"},
 	})
 }
+
+// A construction with a class that has no constructor of its own, made
+// with its parent's code while the class's prototype is still that
+// parent (ssa.CallSite's Parent), is not inlined, which would not check
+// the parent: given another by Object.setPrototypeOf, the class had gone
+// on constructing with the old one's code (TestJITDerivedDefaultConstruct's
+// case 7, h for q).
+func TestJITRegDefaultDerivedParentChanged(t *testing.T) {
+	regWrongCheck(t, `class P { constructor(h) { this.h = h } }
+	class D extends P {}
+	class Q { constructor(h) { this.q = h } }
+	function make(n, q) { Object.setPrototypeOf(D, q ? Q : P); let o, s = 0; for (let i = 0; i < n; i++) { o = new D(i); s += o.h === i ? 1 : o.q === i ? 100 : 0 } return Object.keys(o).join() + s }`, []regWrongCase{
+		{"make", []float64{50, 0}, 4, "h50"},
+		{"make", []float64{5, 1}, 0, "q500"},
+		{"make", []float64{5, 0}, 0, "h5"},
+	})
+}

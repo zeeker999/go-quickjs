@@ -819,6 +819,16 @@ func (f *jitRegFeedback) inline(pc int) (ssa.InlineSite, bool) {
 	if cl.fn == f.fb.fn || cl.fn == f.fb.keep().fn || jitNoInline != nil && jitNoInline(cl.fn) {
 		return ssa.InlineSite{}, false
 	}
+	if site.Parent != 0 {
+		// A construction with a class that has no constructor of its own,
+		// run with its parent's code while the class's prototype is still
+		// that parent, which the native call checks (ssa.CallSite's
+		// Parent, mir's constructGuards) and an inlined frame does not:
+		// inlined, a class given another parent by Object.setPrototypeOf
+		// went on constructing with the old one's code, its objects given
+		// h for q.
+		return ssa.InlineSite{}, false
+	}
 	kind, reads, forwards := jitLowerInline, false, false
 	if site.FrameArgs {
 		// A callee that keeps its arguments (ssa.CallSite's FrameArgs),
