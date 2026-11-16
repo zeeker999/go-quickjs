@@ -112,9 +112,12 @@ type jitRegEntry struct {
 	// this, osrOf in it the code it was compiled beside; osrMiss and
 	// osrMissPC the frame, by its address, and the header a loop's check
 	// last found no entry at, as the stack form's entry has them
-	// (jitLearnLoopEntry).
+	// (jitLearnLoopEntry); osrJob that code's compile in the background,
+	// which the frames waiting at the loop wait out in the interpreter, as
+	// the stack form's wait out its entry's pending (jitRegInstallOSR).
 	unentered  []int
 	osr, osrOf *jitRegEntry
+	osrJob     *jitRegJob
 	// kept are the register pcs of the loops' headers it has entries at
 	// only for the frame its compile was asked for at (ssa.Func's
 	// EntryKept), which a function called again gives up (jitRegKeptGone),
@@ -336,7 +339,10 @@ func (r *Runtime) jitRegCached(key jitKey, e *jitRegEntry) {
 //
 // frameAt, where not 0, is the register pc of a loop's header whose entry
 // a frame waits at (ssa.Func's FrameAt, which escape analysis keeps): code
-// for on-stack replacement there (jitRegLoopCode), compiled on the spot.
+// for on-stack replacement there (jitRegLoopCode), compiled in the
+// background where the function's code is, as the stack form's is
+// (jitLearnLoopEntry's jitReoptimize) and V8's concurrent OSR: the frame
+// goes on in the interpreter until it is installed (jitRegInstallOSR).
 // Where it is 0, it is the loop a frame of the function waits at for this
 // compile, if any (jitRegFrameAt), as the stack form's compiles ask
 // (jitFrameAt).
@@ -351,7 +357,7 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 		// finds it (jitCompiles): no room, at every ask.
 		return nil
 	}
-	background := osrAt == 0 && r.jitInBackground(cl.fn)
+	background := r.jitInBackground(cl.fn)
 	if background && s.jobsFull() {
 		// As many compiles in the background as there may be: asked again
 		// at a later sample, as the stack form's compile waits.
@@ -419,6 +425,12 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 		if !snap.s.bad {
 			j := &jitRegJob{cl: cl, c: c, key: key, realm: r.Realm, callee: callee, e: e, p: p, rf: rf, snap: snap, deopts: e.life.deopts, frameAt: frameAt,
 				w: jit.GetWorkspace(), enc: jitEncoding, opts: mir.Settings(), miss: r.jitStress.miss}
+			if osrAt != 0 {
+				// The code kept beside the cache's for a loop
+				// (jitRegLoopCode), installed beside that code if it is
+				// still the function's then.
+				j.osrAt, j.osrBeside = osrAt, s.regCache[key]
+			}
 			r.jitRegSubmit(j)
 			return nil
 		}
