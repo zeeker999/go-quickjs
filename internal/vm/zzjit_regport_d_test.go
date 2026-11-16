@@ -3,6 +3,7 @@
 package vm
 
 import (
+	"fmt"
 	"slices"
 	"sync"
 	"testing"
@@ -329,4 +330,53 @@ func jitEntryNamedForTest(r *Runtime, name string) *jitEntry {
 		return regLifeNamedForTest(r, name)
 	}
 	return jitCallbackEntry(r, name)
+}
+
+// jitCachedForTest is what r's JIT's cache holds for the global function
+// name, in either form, nil for nothing: the stack form's entry, or, where
+// runtimes run register code, its register code's entry (regCache) --
+// compared by identity, as a test asks whether the cache still holds the
+// same; code says whether it holds code.
+func jitCachedForTest(r *Runtime, name string) (held any, code bool) {
+	cl := jitGlobalClosure(r, name)
+	if regJITForTest() {
+		if e := r.jit.regCache[r.jitRegKeyOf(cl)]; e != nil {
+			return e, e.code != nil
+		}
+		return nil, false
+	}
+	if e := r.jit.cache[r.jitKeyOf(cl.fn)]; e != nil {
+		return e, e.ssa != nil
+	}
+	return nil, false
+}
+
+// regLinksHeldForTest is jitLinksHeld for register code: every link native
+// callers call through calls into the code the cache holds for its
+// function (regLinks, regCache).
+func regLinksHeldForTest(s *jitState) error {
+	for key, l := range s.regLinks {
+		if l.entry == 0 {
+			continue
+		}
+		switch e := s.regCache[key]; {
+		case e == nil || e.code == nil:
+			return fmt.Errorf("a link calls %#x, of code the cache does not hold", l.entry)
+		case !e.code.Contains(l.entry):
+			return fmt.Errorf("a link calls %#x, outside its function's code", l.entry)
+		}
+	}
+	return nil
+}
+
+// regEntriesFoundForTest is jitEntriesFound for register code: every
+// entry the cache holds is marked held (jitRegEntry's cached), not let go
+// of, and is the one its key names.
+func regEntriesFoundForTest(s *jitState) error {
+	for key, e := range s.regCache {
+		if !e.cached || e.dropped || e.key != key {
+			return fmt.Errorf("the cache holds an entry let go of, or not its key's: cached %v, dropped %v", e.cached, e.dropped)
+		}
+	}
+	return nil
 }
