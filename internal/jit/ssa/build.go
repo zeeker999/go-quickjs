@@ -4488,7 +4488,9 @@ func (b *builder) unmadeAlone() error {
 		}
 		// The local it is kept in, the instruction after it: an entry's
 		// load of it is the closure too, made by the interpreter, as
-		// calledClosures has it, and so is its dead zone's marker.
+		// calledClosures has it, and so is its dead zone's marker; and,
+		// in register code, a copy of it an entry after an operation Go
+		// ran loads (resumeCopies).
 		p := b.root.p
 		home := calledHome(p, pc0, b.f.FrameLocals)
 		set, also := map[*Value]bool{}, map[*Value]bool{}
@@ -4508,6 +4510,7 @@ func (b *builder) unmadeAlone() error {
 		for _, v := range phis {
 			set[v] = true
 		}
+		copies := newResumeCopies(b.f, p)
 		for changed := true; changed; {
 			changed = false
 			for _, v := range phis {
@@ -4515,7 +4518,7 @@ func (b *builder) unmadeAlone() error {
 					continue
 				}
 				for _, a := range v.Args {
-					if !set[a] && !also[a] {
+					if !set[a] && !also[a] && !copies.holds(a, set) {
 						delete(set, v)
 						changed = true
 						break

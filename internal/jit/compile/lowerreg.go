@@ -1894,8 +1894,9 @@ func liveRegs(p *ir.Program, rc *bytecode.RegCode) {
 			for _, r := range writes {
 				kill(r)
 			}
-			if w := rc.Code[p.Origin[i]]; w.Op() == bytecode.RCallW || w.Op() == bytecode.RCallWT {
-				// The receiver the plain call writes (RegAccess).
+			if w := rc.Code[p.Origin[i]]; w.Op() == bytecode.RCallW || w.Op() == bytecode.RCallWT || w.Op() == bytecode.RNewW {
+				// The receiver the plain call or the construction writes
+				// (RegAccess).
 				kill(int(w.A()) + 1)
 			}
 			all[i] = a
@@ -2165,7 +2166,15 @@ func RegAccess(rc *bytecode.RegCode, pc int) (reads, writes []int, all bool) {
 		// live from the function's start, loaded at its entries and
 		// carried round its loops (liveRegs, which kills it).
 		return append([]int{a}, span(a+2, int(w.X()))...), []int{b}, false
-	case bytecode.RCallMW, bytecode.RNewW, bytecode.RCallMWT:
+	case bytecode.RNewW:
+		// A construction's receiver register, R[A+1], is the same: the
+		// construction writes the object it makes there (the VM's
+		// regConstruct), where nothing put a value. A read had kept it
+		// live round a loop that constructs, as a phi of the last turn's
+		// object with the slot the function's entry loads, which escape
+		// analysis cannot leave unmade (liveRegs kills it).
+		return append([]int{a}, span(a+2, int(w.X()))...), []int{b}, false
+	case bytecode.RCallMW, bytecode.RCallMWT:
 		return span(a, 2+int(w.X())), []int{b}, false
 	case bytecode.RGetPrivate:
 		return []int{b, c}, []int{a}, false
