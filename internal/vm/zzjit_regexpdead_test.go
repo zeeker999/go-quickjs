@@ -137,3 +137,59 @@ func TestJITRegExpDeadReplaceTruth(t *testing.T) {
 		debug.SetGCPercent(gc)
 	}
 }
+
+// Native code's calls of Go of a string's replace whose result nothing
+// reads (zzz_regexpdead.go) tell it so by the bytecode after the call:
+// each answer is the interpreter's and Node's, with the collector idle and
+// while it marks, the calls made natively, and none leaves replace told of
+// a call.
+func TestJITRegExpDeadReplace(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	names := []string{"rUp", "rGlobal", "rLocal", "rProp", "rLit", "rIf", "rSticky", "rTpl"}
+	for _, marking := range []bool{false, true} {
+		runtime.GC()
+		gc := debug.SetGCPercent(-1)
+		if marking {
+			jitMarkingForTest(t)
+		}
+		var rounds []string
+		for range 6 {
+			for _, c := range regexpDeadReplaceKinds {
+				rounds = append(rounds, c.call)
+			}
+		}
+		r := jitAgreesForTest(t, regexpDeadReplaceKindsSrc, rounds...)
+		for i, c := range regexpDeadReplaceKinds {
+			e := jitNativeForTest(t, r, names[i])
+			entries := e.ssaStats.entries
+			v, err := r.Run(compileForTest(t, "''+("+c.call+")"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := v.String().Go(); got != c.want {
+				t.Errorf("marking %v: %s = %s, want Node's %s", marking, c.call, got, c.want)
+			}
+			if e.ssaStats.entries == entries {
+				t.Errorf("marking %v: %s did not run natively", marking, c.call)
+			}
+			if *r.strReplaceDead != nil {
+				t.Errorf("marking %v: %s left replace told of a call", marking, c.call)
+			}
+		}
+		// The source's own answer, three runs of all(), the later two
+		// natively, from a runtime of its own.
+		r = jitRuntimeForTest(t, Config{JIT: true})
+		v, err := r.Run(compileForTest(t, regexpDeadReplaceTestSrc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := v.String().Go(); got != regexpDeadReplaceTestWant {
+			t.Errorf("marking %v: all() differs from Node's:\ngot  %s\nwant %s", marking, got, regexpDeadReplaceTestWant)
+		}
+		jitNativeForTest(t, r, "blk")
+		debug.SetGCPercent(gc)
+	}
+
+}

@@ -316,6 +316,10 @@ func (r *Runtime) jitRegCached(key jitKey, e *jitRegEntry) {
 	}
 }
 
+// jitCompileNote, where a test sets it (recordJITCompilesForTest), is
+// told of each closure whose register code r compiles.
+var jitCompileNote func(r *Runtime, cl *closure)
+
 // jitRegCompile is jitRegFor's compile: LowerReg, the SSA build with
 // jitRegFeedback, Optimize, the backend, the code placed in the JIT's
 // arena. A refusal is an entry with no code; nil is no room, or a compile
@@ -394,6 +398,9 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 	e.p = p
 	s.regSerial++
 	e.serial = s.regSerial
+	if jitCompileNote != nil {
+		jitCompileNote(r, cl)
+	}
 	r.jitRegSeenFeedback(cl, c)
 	rf := r.jitRegFeedbackFor(cl, p)
 	if background {
