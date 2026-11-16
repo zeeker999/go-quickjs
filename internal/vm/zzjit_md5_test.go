@@ -98,7 +98,10 @@ func TestJITStringBoundaries(t *testing.T) {
 			for _, enabled := range []bool{false, true} {
 				r := jitRuntimeForTest(t, Config{JIT: enabled})
 				source := tc.setup + `let a=new Array(6).fill(0),good=false;function f(s,a){for(let i=0;i<6;i++){` + tc.body + `}return a[0]}try{f(s,a)}catch(e){good=e instanceof TypeError&&e.message==='stop'};` + tc.check
-				v, err := r.Run(compileForTest(t, source))
+				// f, called once, compiled at its first call (jitRunFirstForTest):
+				// the throw's loop turns too few times for its back edges to
+				// compile it.
+				v, err := jitRunFirstForTest(r, compileForTest(t, source))
 				if err != nil || !v.IsBool() || !v.Truthy() || enabled && r.JITStats().SSAEntries == 0 {
 					t.Fatalf("JIT %v: %v (true %v), %v; %d entries of native code", enabled, v.IsBool(), v.Truthy(), err, r.JITStats().SSAEntries)
 				}

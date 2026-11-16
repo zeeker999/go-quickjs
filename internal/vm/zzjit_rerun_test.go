@@ -26,6 +26,7 @@ func TestJITProgramRerunsKeepLayouts(t *testing.T) {
 	}
 	r := jitRuntimeForTest(t, Config{JIT: true})
 	fn := compileForTest(t, rerunJITSource)
+	compared := 0
 	for run := 1; run <= 6; run++ {
 		if got := runProgramForTest(t, r, fn).Number(); got != 4506000 {
 			t.Fatalf("run %d: got %v", run, got)
@@ -43,7 +44,16 @@ func TestJITProgramRerunsKeepLayouts(t *testing.T) {
 				}
 				found++
 				site := uint32(cl.fn.RegCode().Code[l.pc].C())
-				if root := cl.ic[site].shape; root != l.root {
+				// A run whose objects of the literal native code made,
+				// every one, leaves the interpreter's site unmade
+				// (siteRoot), which it takes the realm's root for once
+				// it makes one.
+				root := cl.ic[site].shape
+				if root == noShape {
+					continue
+				}
+				compared++
+				if root != l.root {
 					t.Fatalf("run %d: native code makes objects of root %p, the site's is %p", run, l.root, root)
 				}
 			}
@@ -51,6 +61,9 @@ func TestJITProgramRerunsKeepLayouts(t *testing.T) {
 		if found == 0 {
 			t.Fatalf("run %d: no native code makes make's literal", run)
 		}
+	}
+	if compared == 0 {
+		t.Fatal("no run's interpreter made make's literal")
 	}
 }
 
