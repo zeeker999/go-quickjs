@@ -55,23 +55,11 @@ func Compile(lit *ast.FuncLit, fn *bytecode.Function, rec *Record) *bytecode.Reg
 // refuses it at once. The record and the AST are kept until then. The
 // code compiled so adds nothing to fn, whose tables are shared by the
 // runtimes running it by then: its names, constants and sites are the
-// RegCode's (RegCode.Names), the sites numbered past the private members'
-// so that the stack form's numbering stays as it is.
-//
-// A function whose stack form alone has lazySites sites or more is
-// compiled at once, while fn is still the compiler's own: its register
-// form may need the stack form's sites moved past its own (generate),
-// which code running fn's stack form could not see happen.
+// RegCode's (RegCode.Names).
 func Later(lit *ast.FuncLit, fn *bytecode.Function, rec *Record) *bytecode.RegLater {
 	if w := why(fn); w != "" && !(w == "arguments" && simpleArguments(fn)) {
 		Refuse(fn, w)
 		return nil
-	}
-	if fn.PropSites+fn.PrivateSites >= lazySites {
-		sc := getScratch()
-		rc := compile(lit, fn, rec, fn, sc)
-		putScratch(sc)
-		return bytecode.NewRegLater(func() *bytecode.RegCode { return rc })
 	}
 	return bytecode.NewRegLater(func() *bytecode.RegCode {
 		sc := getScratch()
@@ -84,7 +72,6 @@ func Later(lit *ast.FuncLit, fn *bytecode.Function, rec *Record) *bytecode.RegLa
 		sc.viewNames = append(sc.viewNames[:0], fn.Names...)
 		sc.viewConsts = append(sc.viewConsts[:0], fn.Constants...)
 		view.Names, view.Constants = sc.viewNames, sc.viewConsts
-		view.PropSites = fn.PropSites + fn.PrivateSites
 		rc := compile(lit, view, rec, fn, sc)
 		if rc != nil {
 			// Never nil, which says the code was compiled with its
@@ -102,7 +89,7 @@ func Later(lit *ast.FuncLit, fn *bytecode.Function, rec *Record) *bytecode.RegLa
 // are those of orig, the function refusals are recorded for, or a view of
 // them that the code's additions go to, in scratch sc.
 func compile(lit *ast.FuncLit, fn *bytecode.Function, rec *Record, orig *bytecode.Function, sc *scratch) *bytecode.RegCode {
-	g, ok := generate(fn, fn == orig, sc, func(g *gen) {
+	g, ok := generate(fn, sc, func(g *gen) {
 		*g = gen{lit: lit, fn: fn, rec: rec, orig: orig}
 		// A derived constructor's this, and an arrow's written inside
 		// one, is the binding super() binds, read through the frame
@@ -198,27 +185,10 @@ func putScratch(sc *scratch) {
 // its bindings had a layout. A function with more cache sites than 16 bits
 // number (errSites) is compiled a second time with the sites of one key
 // shared, what the first made of the function's names, constants and
-// sites dropped; and where the stack form alone has nearly as many, a
-// third time with the register form's sites numbered first, from 1, and
-// the stack form's moved past them. That third time is only for own, a
-// function the compiler still holds; compiled at its first call
-// (Later), a function has fewer than lazySites sites in its stack form.
-func generate(fn *bytecode.Function, own bool, s *scratch, mk func(*gen)) (*gen, bool) {
+// sites dropped.
+func generate(fn *bytecode.Function, s *scratch, mk func(*gen)) (*gen, bool) {
 	sites, names, consts := fn.PropSites, len(fn.Names), len(fn.Constants)
-	last := 1
-	if own {
-		last = 2
-	}
 	far, nearCap := false, 0
-	// Room for the code at once, rather than a doubling at a time: the
-	// register form has about as many instructions as the stack form,
-	// five in six over the suites and test262, a few past it.
-	if n := len(fn.Code) + len(fn.Code)/4; cap(s.code) < n {
-		// Twice what it held at least, as a load's functions are
-		// compiled, each a little larger than the last that grew it.
-		n = max(n, 2*cap(s.code))
-		s.code, s.pos = make([]bytecode.RInstr, 0, n), make([]int32, 0, n)
-	}
 	for try := 0; ; try++ {
 		g := &s.g
 		mk(g)
@@ -227,7 +197,6 @@ func generate(fn *bytecode.Function, own bool, s *scratch, mk func(*gen)) (*gen,
 		// none (bytecode.RegCode.Lines).
 		g.cur = -1
 		g.shareSites = try > 0
-		g.ownSites = try > 1
 		g.farJumps = far
 		g.nearCap = nearCap
 		if !g.layout() {
@@ -251,36 +220,11 @@ func generate(fn *bytecode.Function, own bool, s *scratch, mk func(*gen)) (*gen,
 			fn.PropSites, fn.Names, fn.Constants = sites, fn.Names[:names], fn.Constants[:consts]
 			continue
 		}
-		if g.err != errSites || try == last {
-			if g.ownSites && g.err == "" {
-				g.moveStackSites()
-			}
+		if g.err != errSites || try == 1 {
 			return g, true
 		}
 		fn.PropSites, fn.Names, fn.Constants = sites, fn.Names[:names], fn.Constants[:consts]
 	}
-}
-
-// moveStackSites renumbers the stack form's cache sites past the nsites
-// the register form numbered from 1: every instruction that has one in its
-// B (the compiler's emit and its array literal of constants). The two forms index one closure's
-// caches, and the register form's 16-bit operands reach only the first.
-func (g *gen) moveStackSites() {
-	n := g.nsites
-	fn := g.fn
-	for i := range fn.Code {
-		in := &fn.Code[i]
-		switch in.Op {
-		case bytecode.OpGetProp, bytecode.OpGetPropThis, bytecode.OpSetProp,
-			bytecode.OpNewObject, bytecode.OpInstanceOf, bytecode.OpGetGlobal,
-			bytecode.OpSetGlobal, bytecode.OpCheckGlobalRef, bytecode.OpSetGlobalStrict,
-			bytecode.OpNewArray:
-			if in.B != 0 {
-				in.B += n
-			}
-		}
-	}
-	fn.PropSites += n
 }
 
 // trace prints why a function has no register code (QJS_REGTRACE).
@@ -299,11 +243,6 @@ type gen struct {
 	// (site16).
 	shareSites bool
 	shared     map[siteKey]uint16
-	// ownSites says the stack form alone has more sites than 16 bits
-	// number: the register form numbers its own from 1 (nsites of them),
-	// and the stack form's move past them (moveStackSites).
-	ownSites bool
-	nsites   uint32
 	// farJumps says a jump of a 16-bit offset did not reach: the function
 	// is compiled again with each such jump far (jump).
 	farJumps bool
@@ -596,11 +535,7 @@ func (g *gen) layout() bool {
 		}
 	}
 	g.caps = zeroed(&g.s.caps, len(fn.Constants))
-	if g.ownSites {
-		g.siteName = zeroed(&g.s.siteName, 1)
-	} else {
-		g.siteName = zeroed(&g.s.siteName, int(fn.PropSites)+1)
-	}
+	g.siteName = zeroed(&g.s.siteName, int(fn.PropSites)+1)
 	return true
 }
 
@@ -846,11 +781,6 @@ func (g *gen) jump(w bytecode.RInstr, m *mark, short bool) {
 }
 
 func (g *gen) site(name uint32) uint32 {
-	if g.ownSites {
-		g.nsites++
-		g.siteName = append(g.siteName, name)
-		return g.nsites
-	}
 	g.fn.PropSites++
 	s := g.fn.PropSites
 	g.siteName = append(g.siteName, 0)
@@ -861,12 +791,6 @@ func (g *gen) site(name uint32) uint32 {
 // errSites is the failure of a site past 16 bits, which Compile meets
 // by compiling the function again with its sites shared (gen.shareSites).
 const errSites = "a site past 16 bits"
-
-// lazySites is the number of sites in a function's stack form from which
-// Later compiles its register form at once: half of what 16 bits number,
-// which leaves a function compiled at its first call the other half for
-// its register form's shared sites.
-const lazySites = 1 << 15
 
 // errJumps is the failure of a jump past a 16-bit offset, which Compile
 // meets by compiling the function again with its jumps far (farJumps).

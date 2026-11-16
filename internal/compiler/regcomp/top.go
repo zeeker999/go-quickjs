@@ -21,7 +21,7 @@ import (
 func CompileTop(body []ast.Stmt, fn *bytecode.Function, rec *Record) *bytecode.RegCode {
 	sc := getScratch()
 	defer putScratch(sc)
-	g, ok := generate(fn, true, sc, func(g *gen) {
+	g, ok := generate(fn, sc, func(g *gen) {
 		*g = gen{lit: &ast.FuncLit{Body: body}, fn: fn, rec: rec, orig: fn, thisRef: rec.ThisRef}
 	})
 	if !ok {

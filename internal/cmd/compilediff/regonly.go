@@ -37,6 +37,9 @@ var stackFields = map[string]bool{
 // (RegCode.Leaf), and whether a pure one calls; PureTail is a pc of
 // either form, and is left out.
 func (d *writer) regLeaf(fn *bytecode.Function) {
+	if noLeaf {
+		return
+	}
 	var leaf, calls reflect.Value
 	if v := reflect.ValueOf(fn).Elem(); v.FieldByName("Leaf").IsValid() {
 		leaf, calls = v.FieldByName("Leaf"), v.FieldByName("PureCalls")
@@ -112,6 +115,10 @@ func (d *writer) regDebug(v reflect.Value) {
 // noPos leaves the positions out of -reg's output (-nopos), so that a
 // comparison shows the code's other differences alone.
 var noPos bool
+
+// noLeaf leaves out which leaf a function's body is (-noleaf), which the
+// stack form and the register code decide each by its own instructions.
+var noLeaf bool
 
 // regTables are the names and constants an instruction's operands index:
 // the code's own where it was compiled at the function's first call

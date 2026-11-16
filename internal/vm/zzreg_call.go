@@ -1407,10 +1407,10 @@ func (r *Runtime) regThrowDeadZone(f *frame, c *regCode, next int) error {
 // layout of the global object the site found the slot in noted,
 // for the loop's check.
 func (r *Runtime) regGetGlobal(f *frame, cl *closure, c *regCode, pc int, w bytecode.RInstr) (Value, error) {
-	in := bytecode.Instr{Op: bytecode.OpGetGlobal, A: regNameIdx(c, pc, w.B()), B: uint32(w.C())}
-	v, err := r.getGlobalAt(f, cl, in)
+	at := regNameIdx(c, pc, w.B())
+	v, err := r.getGlobalAt(f, cl, at, uint32(w.C()))
 	if err == nil {
-		if name := cl.names[in.A]; r.lexShadows(name) {
+		if name := cl.names[at]; r.lexShadows(name) {
 			r.regNoteGlobalLex(f, cl, w.C(), name, false)
 		} else {
 			r.regNoteGlobal(cl, w.C(), name, false)
@@ -1421,16 +1421,15 @@ func (r *Runtime) regGetGlobal(f *frame, cl *closure, c *regCode, pc int, w byte
 
 // regSetGlobal is set_global's, or set_global_strict's, slow path.
 func (r *Runtime) regSetGlobal(f *frame, cl *closure, c *regCode, pc int, w bytecode.RInstr, v Value) error {
-	in := bytecode.Instr{Op: bytecode.OpSetGlobal, A: regNameIdx(c, pc, w.B()), B: uint32(w.C())}
+	at := regNameIdx(c, pc, w.B())
 	var err error
 	if w.X() != 0 {
-		in.Op = bytecode.OpSetGlobalStrict
-		err = r.setGlobalStrict(f, cl, in, v)
+		err = r.setGlobalStrict(f, cl, at, uint32(w.C()), v)
 	} else {
-		err = r.setGlobalIn(f, cl, in, v)
+		err = r.setGlobalIn(f, cl, at, uint32(w.C()), v)
 	}
 	if err == nil {
-		if name := cl.names[in.A]; r.lexShadows(name) {
+		if name := cl.names[at]; r.lexShadows(name) {
 			r.regNoteGlobalLex(f, cl, w.C(), name, true)
 		} else {
 			r.regNoteGlobal(cl, w.C(), name, true)

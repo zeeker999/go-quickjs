@@ -62,12 +62,12 @@ func regTopCode(body []ast.Stmt, fn *bytecode.Function, rec *regcomp.Record) {
 	}
 }
 
-// regWith records the probe at pc, if any, that the stack form compiled
-// for name id before its static access (regcomp.Record.Withs).
-func (c *compiler) regWith(id *ast.Ident, pc int) {
-	if pc < 0 || c.reg == nil {
+// regWith records the probe, if any -- where probe, withProbe's, is not
+// negative, the last emitProbe noted -- that name id has before its static
+// access (regcomp.Record.Withs).
+func (c *compiler) regWith(id *ast.Ident, probe int) {
+	if probe < 0 || c.reg == nil {
 		return
 	}
-	in := c.fn.Code[pc]
-	c.reg.NoteWith(id, regcomp.WithProbe{Op: in.Op, Limit: uint16(in.A >> bytecode.WithLimitShift)})
+	c.reg.NoteWith(id, c.probe)
 }

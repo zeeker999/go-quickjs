@@ -127,6 +127,7 @@ func run(cmd string, args []string) (same bool, err error) {
 	fs.BoolVar(&o.perFunc, "perfunc", false, "dump: a line for each function of each compile")
 	fs.BoolVar(&o.reg, "reg", false, "the register code alone, its operands as what they name")
 	fs.BoolVar(&noPos, "nopos", false, "-reg: no positions")
+	fs.BoolVar(&noLeaf, "noleaf", false, "-reg: no leaf kinds")
 	fs.Parse(args)
 	roots := fs.Args()
 	if len(roots) == 0 {
@@ -161,6 +162,9 @@ func (o options) flags() []string {
 	}
 	if noPos {
 		f = append(f, "-nopos")
+	}
+	if noLeaf {
+		f = append(f, "-noleaf")
 	}
 	return f
 }

@@ -362,7 +362,9 @@ type compiler struct {
 	// reg is the record of the function's resolution the register backend
 	// reads (regcomp), where it is on, and regIdent the declaration whose
 	// store storeVar is making, for the record.
-	reg      *regcomp.Record
+	reg *regcomp.Record
+	// probe is the with probe emitProbe made last (regWith).
+	probe    regcomp.WithProbe
 	regIdent *ast.Ident
 	// finallys is the stack of enclosing finally clauses, which return, break
 	// and continue all have to account for.
@@ -816,7 +818,6 @@ func (c *compiler) recordFacts() (f codeFacts) {
 		}
 		switch k &^ (factStores | factStoresA) {
 		case factPrivate:
-			fn.PrivateSites++
 		case factSuperRef:
 			callee, reads = true, true
 		case factPushCallee:
@@ -994,18 +995,6 @@ func (c *compiler) isTarget(pc int) bool {
 
 // emit appends an instruction and returns its program counter.
 func (c *compiler) emit(op bytecode.Op, a, b uint32) int {
-	if (op == bytecode.OpGetProp || op == bytecode.OpGetPropThis || op == bytecode.OpSetProp ||
-		op == bytecode.OpNewObject || op == bytecode.OpInstanceOf || op == bytecode.OpGetGlobal ||
-		op == bytecode.OpSetGlobal || op == bytecode.OpCheckGlobalRef) && b == 0 {
-		// Each property read and write has a cache of its own, numbered
-		// here, and so does each object literal, which keeps the shape its
-		// objects start from in it, each instanceof, for its read of the
-		// constructor's Symbol.hasInstance, and each global read, write and
-		// strict mode's check before a write, for where in the global object
-		// its name was.
-		c.fn.PropSites++
-		b = c.fn.PropSites
-	}
 	if op == bytecode.OpGetLocal && c.lazyArguments && a == c.lazyArgumentsSlot {
 		// Every read of an arguments object made on demand makes it, but for
 		// the one a call of apply fuses with.

@@ -3,6 +3,7 @@ package compiler
 import (
 	"github.com/go-quickjs/go-quickjs/internal/ast"
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
+	"github.com/go-quickjs/go-quickjs/internal/compiler/regcomp"
 )
 
 // The `with` statement.
@@ -58,7 +59,14 @@ func (c *compiler) withProbe(op bytecode.Op, name string) int {
 	if limit == 0 {
 		return -1
 	}
-	return c.emit(op, c.nameIdx(name)|uint32(limit)<<bytecode.WithLimitShift, 0xFFFFFFFF)
+	return c.emitProbe(op, name, limit, 0xFFFFFFFF)
+}
+
+// emitProbe emits the probe op of the innermost limit with objects for
+// name, with B b, and notes it for the register form (regWith).
+func (c *compiler) emitProbe(op bytecode.Op, name string, limit int, b uint32) int {
+	c.probe = regcomp.WithProbe{Op: op, Limit: uint16(limit)}
+	return c.emit(op, c.nameIdx(name)|uint32(limit)<<bytecode.WithLimitShift, b)
 }
 
 // withLimit is how many of the innermost `with` objects a reference to a name
@@ -133,8 +141,7 @@ func (c *compiler) patchWithProbe(pc int) {
 func (c *compiler) beginWithRef(n *ast.Ident) {
 	limit := c.withLimit(n.Name)
 	c.emit(bytecode.OpPushUndef, 0, 0)
-	probe := c.emit(bytecode.OpWithGetUnder,
-		c.nameIdx(n.Name)|uint32(limit)<<bytecode.WithLimitShift, 0xFFFFFFFF)
+	probe := c.emitProbe(bytecode.OpWithGetUnder, n.Name, limit, 0xFFFFFFFF)
 	c.regWith(n, probe)
 	c.compileIdentReadStatic(n)
 	c.patchWithProbe(probe)
@@ -146,8 +153,7 @@ func (c *compiler) beginWithRef(n *ast.Ident) {
 func (c *compiler) resolveWithRef(n *ast.Ident) {
 	limit := c.withLimit(n.Name)
 	c.emit(bytecode.OpPushUndef, 0, 0)
-	c.regWith(n, c.emit(bytecode.OpWithResolve,
-		c.nameIdx(n.Name)|uint32(limit)<<bytecode.WithLimitShift, 0))
+	c.regWith(n, c.emitProbe(bytecode.OpWithResolve, n.Name, limit, 0))
 }
 
 // endWithRef writes the value on top back through the reference beginWithRef

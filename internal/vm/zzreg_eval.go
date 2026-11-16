@@ -247,7 +247,7 @@ func (r *Runtime) regDebug(f *frame, c *regCode, pc int, w bytecode.RInstr, regs
 	idx := regAuxAt(c, pc)
 	f.pc = uint32(pc) + 1
 	regSyncThis(f, regs)
-	return r.debugStatement(f, bytecode.Instr{Op: bytecode.OpDebugStmt, A: idx, B: uint32(w.B())})
+	return r.debugStatement(f, int(idx), w.B() != 0)
 }
 
 // regDebugFrame is the register code and window of frame f where it runs

@@ -460,14 +460,7 @@ type Function struct {
 	// Lines are positions in, and Start is where in it the function begins.
 	Script *Script
 	Start  int32
-	// PrivateSites is how many reads and writes of private members --
-	// get_private and set_private -- the code has, each with a cache of its
-	// own past the PropSites ones, numbered from PropSites+1 in the order of
-	// the code. Their instructions have no room for the number; the
-	// register compiler gives each its site. It is beside Start, in what was padding on a 64-bit
-	// machine, so that the fields a call reads stay where they were.
-	PrivateSites uint32
-	Lines        []SourceLoc
+	Lines  []SourceLoc
 	// Debug is what code compiled for a debugger has of its own, and nil
 	// for any other code, which pays one pointer for it. Such code is
 	// compiled for the one runtime that runs it, so it is not shared as

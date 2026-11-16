@@ -52,10 +52,10 @@ func TestRegisterBackendCode(t *testing.T) {
 		"fib": `
    0  jnlt_imm r2, 2 -> 2
    1  ret r2
-   2  get_global r3, name0 @3
+   2  get_global r3, name0 @1
    3  sub_imm r5, r2, 1
    4  call_w r3 = r3(1)
-   5  get_global r4, name0 @4
+   5  get_global r4, name0 @2
    6  sub_imm r6, r2, 2
    7  call_w r4 = r4(1)
    8  add r3, r3, r4
