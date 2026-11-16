@@ -2222,7 +2222,10 @@ func RegAccess(rc *bytecode.RegCode, pc int) (reads, writes []int, all bool) {
 	case bytecode.RObjectRest:
 		return append([]int{b}, span(c, int(rc.Aux[pc]))...), []int{a}, false
 	case bytecode.RCopyDataProps, bytecode.RSetProtoOf, bytecode.RArrayPush, bytecode.RArraySpread, bytecode.RNewClass,
-		bytecode.RSetHomeObject, bytecode.RDefineMethod, bytecode.RSetFieldInit:
+		bytecode.RSetHomeObject, bytecode.RDefineMethod, bytecode.RSetFieldInit,
+		// A literal's accessor's half, made by Go on its operands as the
+		// stack form's define_getter (jitDefinition), not a host exit.
+		bytecode.RDefineGetter, bytecode.RDefineSetter:
 		return []int{a, b}, nil, false
 	case bytecode.RDefineIndex:
 		return []int{a, b, c}, nil, false

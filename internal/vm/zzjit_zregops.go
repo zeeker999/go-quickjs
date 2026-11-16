@@ -386,7 +386,8 @@ func (f *jitRegFeedback) CellsPool() (uintptr, []int32, bool) {
 // RegAccess), in their order, the stack form's operands'; its result goes
 // to the call's keep cell, which the code reads where the instruction
 // writes a register. A class's or a literal's member made -- a method's
-// home object set, a method defined, a class's field initializer given --
+// home object set, a method defined, a literal's getter or setter defined,
+// a class's field initializer given --
 // it makes of cl's names, c its register code, as the stack form's
 // jitGoHostPlain makes them (jitDefinition's cases). It reports whether it
 // made it; what it does not make, Go makes on the frame (jitRegOpMade,
@@ -395,12 +396,19 @@ func (r *Runtime) jitRegFrameless(ctx *abi.Context, cl *closure, c *regCode, rpc
 	var in bytecode.Instr
 	n := int(ctx.GoOp >> abi.GoOpArgcShift & 0xff)
 	switch op {
-	case bytecode.RSetHomeObject, bytecode.RSetFieldInit, bytecode.RDefineMethod:
+	case bytecode.RSetHomeObject, bytecode.RSetFieldInit, bytecode.RDefineMethod, bytecode.RDefineGetter, bytecode.RDefineSetter:
 		if n != 2 || cl == nil {
 			return false
 		}
 		a, b := jitGoArg(ctx, 0), jitGoArg(ctx, 1)
 		switch op {
+		case bytecode.RDefineGetter, bytecode.RDefineSetter:
+			// A literal's accessor's half, as regDefineAccessor defines it
+			// and the stack form's jitGoHostPlain (jitDefinition's
+			// define_getter).
+			if a.IsObject() && b.IsObject() {
+				r.defineHalfAccessor(a.Object(), regName(cl, c, rpc, regAt(c.code, rpc).C()), b.Object(), op == bytecode.RDefineGetter, memberFlags(0))
+			}
 		case bytecode.RSetHomeObject:
 			if a.IsObject() && b.IsObject() {
 				if fd := a.Object().fn(); fd != nil {

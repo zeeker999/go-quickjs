@@ -3003,6 +3003,18 @@ func (r *Runtime) jitRegWhole(ctx *abi.Context, idx int, run jitRegRun, rpc int)
 		// not would go on alike.
 		return false
 	}
+	if own && ctx.Cells != nil {
+		// Code whose captured registers are in cells of their own: a cell
+		// native code gave a register at a scope's end (mir's cellsClose)
+		// is open on no register, which holds what the register held at
+		// the scope's start, not what the cell holds now. The instruction
+		// reads and writes the frame's registers, as the interpreter's
+		// does: the cells open on them again first, holding what they
+		// hold, as Go has them before it runs the frame at an exit
+		// (jitRegReopenCells) -- read from the register, a let of a loop's
+		// turn had been the one the frame held when native code entered.
+		r.jitRegReopenCells(f, e, wb, ctx, true)
+	}
 	var regs [4]int
 	var saved [4]Value
 	n := 0
