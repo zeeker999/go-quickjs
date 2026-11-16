@@ -973,12 +973,14 @@ func jitRegCallOp(op bytecode.ROp) bytecode.ROp {
 func (f *jitRegFeedback) GoCalls() bool { return true }
 
 // NativeCalls is ssa.Feedback's: a call -- call_w's, call_method_w's or
-// new_w's, its operands no more than a call of Go takes -- of the function
+// new_w's, of any number of operands -- of the function
 // its site's cache holds (regCalls), or of one its code learned it calls,
 // a construction's with a pool of its objects, where that runs register
 // code native callers may call, is a native call of it (regCallSites); any
-// other is a call of Go (ssa.GoCall), which makes it on the register frame
-// without leaving native code (jitRegGoCall). A call in tail position is
+// other of no more operands than a call of Go takes is a call of Go
+// (ssa.GoCall), which makes it on the register frame without leaving
+// native code (jitRegGoCall), and one of more leaves. A call in tail
+// position is
 // neither, which the interpreter makes in constant space at a host exit.
 //
 // Asked once a compile for each instruction, as Inline is.
@@ -1073,10 +1075,12 @@ func (f *jitRegFeedback) nativeCalls(pc int) []ssa.CallSite {
 	if method {
 		n++
 	}
-	if n > abi.MaxGoArgs {
-		return nil
-	}
-	if site, ok := f.regAllocSite(rpc, w, argc); ok {
+	// More operands than a call of Go takes in the context: a native call
+	// all the same, its window holding them, where Go reads them when it
+	// makes the call (mir's windowGoCall) -- not a call of Go alone, which
+	// has nowhere else to take them from, nor a built-in's.
+	wide := n > abi.MaxGoArgs
+	if site, ok := f.regAllocSite(rpc, w, argc); ok && !wide {
 		return []ssa.CallSite{site}
 	}
 	if sites := f.regCallSites(pc, w, argc, method); len(sites) != 0 {
@@ -1089,6 +1093,9 @@ func (f *jitRegFeedback) nativeCalls(pc int) []ssa.CallSite {
 			sites[0].GenericEnv, sites[0].GenericRealm = uintptr(unsafe.Pointer(f.fb.cl.env)), uintptr(unsafe.Pointer(f.fb.cl.realm))
 		}
 		return sites
+	}
+	if wide {
+		return nil
 	}
 	if site, ok := f.regBuiltinSite(w, argc, method); ok {
 		return []ssa.CallSite{site}

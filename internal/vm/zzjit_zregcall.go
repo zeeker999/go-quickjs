@@ -932,7 +932,7 @@ func (r *Runtime) jitRegViaSeen(f *frame, e *jitRegEntry, rpc int, callee, recv 
 		return false
 	}
 	cl := fd.closure
-	if cl.reg == nil || cl.reg.args || !r.jitRegCallable(o, cl, cl.reg, argc-1) {
+	if cl.reg == nil || !r.jitRegCallable(o, cl, cl.reg, argc-1) {
 		return false
 	}
 	l := r.jitRegLearnedFor(f, e)
@@ -1115,9 +1115,11 @@ func (f *jitRegFeedback) regCallSite(pc int, o *Object, cl *closure, rc *regCode
 		// G.call(x, ...) through the realm's Function.prototype.call, a
 		// method call's (ssa.CallSite's Via): G called natively with x its
 		// receiver and the rest its arguments, as the stack form's
-		// (jitCalledVia) -- not one that keeps its arguments, nor an arrow
-		// reading its this, nor a construction.
-		if !method || argc < 1 || pool != nil || byCode || r.callFn == nil || rc.args || o.fn().arrow && cl.fn.UsesThis ||
+		// (jitCalledVia) -- one that keeps its arguments given them past
+		// the receiver in its context (FrameArgs, mir's windowArgs), as the
+		// stack form's call gives them -- not an arrow reading its this,
+		// nor a construction.
+		if !method || argc < 1 || pool != nil || byCode || r.callFn == nil || o.fn().arrow && cl.fn.UsesThis ||
 			!r.jitRegCallable(o, cl, rc, argc-1) {
 			return ssa.CallSite{}, false
 		}
@@ -1132,7 +1134,8 @@ func (f *jitRegFeedback) regCallSite(pc int, o *Object, cl *closure, rc *regCode
 			Window: f.p.Code[pc].Left.Slot + 1, Via: uintptr(unsafe.Pointer(r.callFn)),
 			// x may be a primitive, which a sloppy G's this is coerced
 			// from by Go.
-			Coerce: rc.coerceThis,
+			Coerce:    rc.coerceThis,
+			FrameArgs: rc.args,
 		}
 		if cl.fn.HasTailCall {
 			site.Tail, site.TailFrame = true, true

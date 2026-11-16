@@ -1602,6 +1602,7 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 			}
 			seen := r.jitRegHostSeen(f, c, wb, exitPC)
 			r.jitRegPrivateSeen(f, c, e, wb, exitPC)
+			r.jitRegParseIntSeen(f, c, e, wb, exitPC)
 			if r.jitRegBigIntExit(f, e, wb, int(int64(ctx.ExitSite))) {
 				// A generic operator that met BigInts, which the code
 				// compiled again calls Go for (ssa.GoArith).
@@ -2264,7 +2265,7 @@ func (r *Runtime) jitRegGoCall(ctx *abi.Context, idx int) bool {
 		return true
 	}
 	rpc := int(ctx.ExitPC)
-	judged := run.osr && run.e != nil && run.e.life != nil && jitRegGoSettled(ctx, run.c, rpc)
+	judged := run.osr && run.e != nil && run.e.life != nil && r.jitRegGoSettled(ctx, run.c, rpc)
 	run.leave = judged && r.jitRegRunGoProfit(run.e, run, rpc)
 	ok := r.jitRegGoCallOn(ctx, idx, *run)
 	if s := r.jit; judged && idx < len(s.regRuns) {
@@ -2293,7 +2294,7 @@ func (r *Runtime) jitRegPlainWhole(ctx *abi.Context, cl *closure, c *regCode) bo
 // a call of a function, which the code may make natively once it has
 // learned the call (jitRegCallSeen), as the stack form judges none that
 // is unsettled (jitCallUnsettled).
-func jitRegGoSettled(ctx *abi.Context, c *regCode, rpc int) bool {
+func (r *Runtime) jitRegGoSettled(ctx *abi.Context, c *regCode, rpc int) bool {
 	if rpc >= len(c.rc.Code) {
 		return false
 	}
@@ -2307,7 +2308,13 @@ func jitRegGoSettled(ctx *abi.Context, c *regCode, rpc int) bool {
 		if op.MethodCall() {
 			at = 1
 		}
-		callee := jitGoArg(ctx, at)
+		var callee Value
+		if jitRegWideCall(w) {
+			// In the callee's window (jitRegGoCallOn).
+			callee = r.stack[r.stackTop]
+		} else {
+			callee = jitGoArg(ctx, at)
+		}
 		if !callee.IsObject() {
 			return true
 		}
@@ -2315,6 +2322,23 @@ func jitRegGoSettled(ctx *abi.Context, c *regCode, rpc int) bool {
 		return fd == nil || fd.native != nil
 	}
 	return true
+}
+
+// jitRegWideCall reports whether the call of Go native code makes of
+// register call w has its operands in the callee's window past the VM's
+// stack's top (mir's windowGoCall), not in the context's: more than it
+// holds (abi.MaxGoArgs).
+func jitRegWideCall(w bytecode.RInstr) bool {
+	switch w.Op() {
+	case bytecode.RCallW, bytecode.RCallMW, bytecode.RNewW, bytecode.RCallWT, bytecode.RCallMWT:
+	default:
+		return false
+	}
+	n := int(w.X()) + 1
+	if w.Op().MethodCall() {
+		n++
+	}
+	return n > abi.MaxGoArgs
 }
 
 // jitRegGoCallOn is jitRegGoCall on run's frame, the run's own or a level's
@@ -2459,16 +2483,31 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 	}
 	at := 0
 	this := Undefined
-	if op.MethodCall() {
-		this, at = jitGoArg(ctx, 0), 1
+	var callee, first Value
+	if jitRegWideCall(w) {
+		// More operands than the context holds: native code wrote them to
+		// the callee's window past the stack's top (mir's windowGoCall),
+		// the frame the call is made of.
+		if op.MethodCall() {
+			this = r.stack[top+1]
+		}
+		callee, first = r.stack[top], r.stack[top+2]
+		r.stack[top+1] = this
+	} else {
+		if op.MethodCall() {
+			this, at = jitGoArg(ctx, 0), 1
+		}
+		callee = jitGoArg(ctx, at)
+		if argc != 0 {
+			first = jitGoArg(ctx, at+1)
+		}
+		r.stack[top] = callee
+		r.stack[top+1] = this
+		for i := range argc {
+			r.stack[top+2+i] = jitGoArg(ctx, at+1+i)
+		}
 	}
-	callee := jitGoArg(ctx, at)
 	r.noteRegGoCall(w, false, callee)
-	r.stack[top] = callee
-	r.stack[top+1] = this
-	for i := range argc {
-		r.stack[top+2+i] = jitGoArg(ctx, at+1+i)
-	}
 	r.stackTop, r.stackHigh = end, max(r.stackHigh, end)
 	s.goCalls++
 	f.pc = regSrc(c, rpc) + 1
@@ -2536,7 +2575,7 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 			// new Array(n), its length the call's operand (jitRegAllocLength).
 			n := Undefined
 			if argc == 1 {
-				n = jitGoArg(ctx, at+1)
+				n = first
 			}
 			r.jitRegAllocLength(f, run.e, rpc, w, callee.Object(), n)
 		} else {
@@ -2550,7 +2589,7 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 		if op == bytecode.RCallMW {
 			// G.call(x, ...), G native callers may call (jitRegViaSeen).
 			r.jitRegViaSeen(f, run.e, rpc, callee, this, argc)
-			r.jitRegForEachSeen(f, run.e, rpc, callee, this, jitGoArg(ctx, at+1), argc)
+			r.jitRegForEachSeen(f, run.e, rpc, callee, this, first, argc)
 			// A generator's next, which the code may call natively
 			// (jitRegGenCallSeen).
 			r.jitRegGenCallSeen(f, run.e, rpc, this, callee, argc)

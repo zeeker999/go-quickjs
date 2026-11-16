@@ -1110,7 +1110,17 @@ refills. So too a replace's leaf of the RegExp a `call_method_w` marked
 window's register on the way to the call alone (the VM's
 `regConstOperand`). A call in tail position is made as any call while the
 stack is shallow (`ssa.OpTailRoom` guarding it), and leaves for the
-interpreter deeper, which makes it in constant space.
+interpreter deeper, which makes it in constant space. A call of more
+operands than the context's operands hold (`abi.MaxGoArgs`) is a native
+call all the same, and where it does not make its call natively -- a
+callee with no code, one past those it calls, a context past the deepest
+-- a call of Go whose operands it writes to the callee's window past the
+VM's stack's top rather than to the context, the room checked first, the
+window's layout the frame Go makes the call of (`mir`'s `windowGoCall`,
+the VM's `jitRegWideCall`): the stack form's left native code at its
+checks, and had Go run a callee with no code from its start
+(`abi.ExitEnter`), which register code has no need of. Such a call with no
+native callee is left to an exit.
 
 **Steps.** A loop's step (`iter_next`) writes its register only where the
 loop goes on: the builder assigns the step's value in the block after it
@@ -2277,7 +2287,9 @@ method call of the realm's `Function.prototype.call`, `G.call(x, ...)` --
 TypeScript's `_super.call(this, ...)` -- calls G natively, as the stack
 form's (`jitCalledVia`): learned at its calls of Go (`jitRegViaSeen`), the
 call checks the method is `call` and its receiver G (`ssa.CallSite`'s
-`Via`) and writes G's window from G, x and the rest; never inlined. A
+`Via`) and writes G's window from G, x and the rest, a G that keeps its
+arguments given them past x in its context (`FrameArgs`, `windowArgs`), as
+the stack form's call gives them; never inlined. A
 receiver to coerce at a register call -- a sloppy G given null -- has Go
 make the call from native code rather than leave. A call that meets any other function leaves
 native code for Go, which learns there what to call next -- a call in tail

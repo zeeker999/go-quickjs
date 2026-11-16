@@ -121,7 +121,11 @@ func (f *jitRegFeedback) IndexOf(pc int) (uintptr, int, bool) {
 // (jitParseInts).
 func (f *jitRegFeedback) ParseInt(pc int) (uintptr, bool) {
 	o, n, ok := f.methodCall(pc, false)
-	if !ok || n != 1 || o == nil || o != f.fb.r.jitParseInt {
+	if !ok || n != 1 || o == nil || o != f.fb.r.jitParseInt || f.Generic(pc) {
+		// Not where its argument was met not a number (jitRegParseIntSeen),
+		// which the stack form's makes natively only once seen a number
+		// (jitParseInts): a call of Go there, which had been a host exit
+		// at every call -- parseInt('7').
 		return 0, false
 	}
 	f.fb.keep().holders = append(f.fb.keep().holders, o)
@@ -139,6 +143,33 @@ func (f *jitRegFeedback) BigString(pc int) (uintptr, bool) {
 	}
 	f.fb.keep().holders = append(f.fb.keep().holders, o)
 	return uintptr(unsafe.Pointer(o)), true
+}
+
+// jitRegParseIntSeen learns from a host exit of e's code at register pc
+// rpc of c, its frame's window at wb, before Go runs the instruction: a
+// call of parseInt, the realm's, that native code makes of a number
+// (ParseInt), met an argument that is none -- built generic, a call of
+// Go, from the next compile on (jitNumberMissed), compiled again from here
+// (jitRegReopt), as the stack form learns a parseInt only of a number
+// (jitParseInts).
+func (r *Runtime) jitRegParseIntSeen(f *frame, c *regCode, e *jitRegEntry, wb, rpc int) {
+	if rpc < 0 || rpc >= len(c.rc.Code) || r.jitParseInt == nil {
+		return
+	}
+	w := c.rc.Code[rpc]
+	if op := jitRegCallOp(w.Op()); op != bytecode.RCallW || w.X() != 1 || wb+int(w.A())+2 >= len(r.stack) {
+		return
+	}
+	callee, arg := r.stack[wb+int(w.A())], r.stack[wb+int(w.A())+2]
+	if !callee.IsObject() || callee.Object() != r.jitParseInt || arg.IsNumber() {
+		return
+	}
+	l := r.jitRegLearnedFor(f, e)
+	if slices.Contains(l.failed, int32(rpc)) {
+		return
+	}
+	jitNumberMissed(l, rpc)
+	r.jitRegReopt(f.cl, e)
 }
 
 var (

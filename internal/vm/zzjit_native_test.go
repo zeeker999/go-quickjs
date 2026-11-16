@@ -8875,10 +8875,15 @@ func TestJITSSAEntersCalleesWithoutCode(t *testing.T) {
 			if got, want := gv.String().Go(), wv.String().Go(); got != want {
 				t.Fatalf("got %s, interpreter %s", got, want)
 			}
+			// Register code's call of more operands than a call of Go
+			// takes in the context is Go's all the same, its operands in
+			// the callee's window (mir's windowGoCall): made as the others
+			// are, no callee run from its start.
+			entersFromStart := tc.entered && !regJITForTest()
 			switch {
-			case tc.entered && r.jit.entered == entered:
+			case entersFromStart && r.jit.entered == entered:
 				t.Fatalf("no native call ran its callee from its start: %+v", r.JITStats())
-			case !tc.entered && (r.jit.goCalls == goCalls || r.jit.entered != entered):
+			case !entersFromStart && (r.jit.goCalls == goCalls || r.jit.entered != entered):
 				t.Fatalf("Go made %d of the calls, %d ran from their callees' start: %+v", r.jit.goCalls-goCalls, r.jit.entered-entered, r.JITStats())
 			}
 		})
