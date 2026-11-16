@@ -2598,22 +2598,6 @@ func jitCalleeMakes(f *frame, c Value) bool {
 	return t == nil || t.fn.Kind != bytecode.KindArrow || f.cl.fn.Kind != bytecode.KindDerivedConstructor || !f.this.IsUninitialized()
 }
 
-// jitEntryOf is the entry of cl's function: the one cl's hint names, or,
-// missing that, the cache's, which cl's hint then names. A call of Go from a
-// native callee finds each level's so, at every call: by the cache's weak
-// key, a tenth of RegExp's time went to finding them.
-func (r *Runtime) jitEntryOf(cl *closure) *jitEntry {
-	s := r.jit
-	if e := s.hint(cl); e != nil {
-		return e
-	}
-	e := s.entryFor(cl.fn)
-	if e != nil && e.ssa != nil {
-		cl.setHint(hintFor(e))
-	}
-	return e
-}
-
 // jitLevels is the frames the last call of Go from a native callee made
 // for its levels (jitRegGoCallNested), which the next call from the same
 // levels, or from those of them it shares, takes as they are, but for

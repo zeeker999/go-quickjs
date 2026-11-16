@@ -98,7 +98,7 @@ func (r *Runtime) jitGoCallPlain(ctx *abi.Context) bool {
 		}
 		pc := int(ctx.ExitPC)
 		if st := jitGoCallState(ctx); st != nil && st.Inline != 0 {
-			cl, pc = r.jitGoInlined(ctx, cl, st.Inline), int(st.InlinePC)
+			cl, pc = r.jitGoInlined(ctx, st.Inline), int(st.InlinePC)
 		}
 		if cl == nil || !jitGoPropertyAt(cl.fn, pc, in) || !r.jitPlainWrite(cl, cl.fn.Code[pc], jitGoArg(ctx, 0), jitGoArg(ctx, 1)) {
 			return false
@@ -110,7 +110,7 @@ func (r *Runtime) jitGoCallPlain(ctx *abi.Context) bool {
 			return false
 		}
 		if st := jitGoCallState(ctx); st == nil || st.Inline == 0 {
-			r.jitLeafSeen(ctx, in)
+			r.jitLeafSeen(ctx)
 		}
 	default:
 		return false
@@ -137,17 +137,11 @@ func jitGoInline(ctx *abi.Context) bool {
 }
 
 // jitGoInlined is the closure at addr, an inlined callee's, among those
-// the code making the call of Go in ctx inlines: the run's code's, or, for
-// level's closure cl, a native callee's -- or nil.
-func (r *Runtime) jitGoInlined(ctx *abi.Context, cl *closure, addr uintptr) *closure {
+// the code making the call of Go in ctx inlines, the run's code's, or nil.
+func (r *Runtime) jitGoInlined(ctx *abi.Context, addr uintptr) *closure {
 	var inlined []*closure
-	switch s, idx := r.jit, int(ctx.Level); {
-	case ctx.Live == 0 && idx < len(s.goRuns):
+	if s, idx := r.jit, int(ctx.Level); ctx.Live == 0 && idx < len(s.goRuns) {
 		inlined = s.goRuns[idx].inlined
-	case ctx.Live == abi.LiveCall && cl != nil:
-		if e := r.jitEntryOf(cl); e != nil {
-			inlined = e.ssaInlined
-		}
 	}
 	for _, x := range inlined {
 		if uintptr(unsafe.Pointer(x)) == addr {
@@ -449,60 +443,13 @@ func (r *Runtime) jitLeafCall(ctx *abi.Context) bool {
 	return true
 }
 
-// jitLeafSeen notes, once a call (abi.GoCallState's LeafSeen), the call of
-// a leaf jitGoCallPlain has just made, at its function's PC, for its code's
-// next compile (jitFeedback.Leaf), which makes it a call of Go of its own
-// (ssa.GoLeaf): a call of the function the code runs, the run's frame's or
-// a native callee's, not one inlined in it.
-func (r *Runtime) jitLeafSeen(ctx *abi.Context, in bytecode.Instr) {
+// jitLeafSeen marks a call of a leaf jitGoCallPlain has just made seen
+// (abi.GoCallState's LeafSeen): register code learns its calls' leaves
+// from its sites' caches (jitRegFeedback's Leaf), not at its calls of Go.
+func (r *Runtime) jitLeafSeen(ctx *abi.Context) {
 	if ctx.GoLast == 0 {
 		return
 	}
 	st := (*abi.GoCallState)(*(*unsafe.Pointer)(unsafe.Pointer(&ctx.GoLast)))
-	if st.LeafSeen {
-		return
-	}
 	st.LeafSeen = true
-	s, idx := r.jit, int(ctx.Level)
-	if idx >= len(s.ssaCtxs) || s.ssaCtxs[idx] != ctx || r.jitRegCodeIn(ctx, idx) {
-		// Register code learns its calls' leaves from its sites' caches
-		// (jitRegFeedback's Leaf), not at its calls of Go by stack pc.
-		return
-	}
-	var cl *closure
-	switch ctx.Live {
-	case 0:
-		if idx >= len(s.goRuns) || s.goRuns[idx].f == nil {
-			return
-		}
-		cl = s.goRuns[idx].f.cl
-	case abi.LiveCall:
-		cl = (*closure)(ctx.Closure)
-	}
-	pc := int(ctx.ExitPC)
-	if cl == nil || pc >= len(cl.fn.Code) || cl.fn.Code[pc].Op != in.Op || cl.fn.Code[pc].A != in.A {
-		return
-	}
-	e := r.jit.entryFor(cl.fn)
-	first := 1
-	if in.Op == bytecode.OpCallMethod {
-		first = 2
-	}
-	callee := jitGoArg(ctx, first-1)
-	if e == nil || !callee.IsObject() {
-		return
-	}
-	o := callee.Object()
-	if o.fn() == nil || o.fn().elemOp == 0 {
-		// Function.prototype.call's of a leaf (jitPlainCall), which a
-		// leaf's call of Go of its own does not make.
-		return
-	}
-	for _, x := range jitTargets(e) {
-		if int(x.pc) == pc && x.leaf {
-			return
-		}
-	}
-	e.nativeCalls = append(e.nativeCalls, jitInline{pc: int32(pc), obj: o, leaf: true})
-	e.inlinePending = true
 }

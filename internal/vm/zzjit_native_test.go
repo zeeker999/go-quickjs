@@ -1433,7 +1433,7 @@ func TestJITReferenceMemoryRefusal(t *testing.T) {
 			t.Fatalf("reference memory refusal: %v, %v", v, err)
 		}
 		if limit == 256<<10 {
-			if r.jitCodeBytes() != 0 {
+			if jitCodeBytesForTest(r) != 0 {
 				t.Fatal("compiled native code beyond optional allowance")
 			}
 		} else if r.jit == nil || r.jit.entries == 0 || r.jit.hosts != 0 {
@@ -2566,8 +2566,8 @@ func benchJITCacheIn(b *testing.B, cfg Config, source, call string) {
 		b.ReportMetric(float64(s.compiled-compiled), "compiles/op")
 		b.ReportMetric(float64(s.evicted-evicted), "evicted/op")
 		b.ReportMetric(float64(s.refusedRoom-refused), "refused/op")
-		b.ReportMetric(float64(len(s.cache)), "entries")
-		b.ReportMetric(float64(r.jitCodeBytes()), "code-B")
+		b.ReportMetric(float64(len(s.regCache)), "entries")
+		b.ReportMetric(float64(jitCodeBytesForTest(r)), "code-B")
 		b.ReportMetric(float64(r.jitHeldBytes()), "held-B")
 		mapped, _ := s.arena.Mapped()
 		b.ReportMetric(float64(mapped), "mapped-B")

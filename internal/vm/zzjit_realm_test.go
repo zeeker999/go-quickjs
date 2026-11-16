@@ -208,7 +208,7 @@ func TestJITRealmsWithinTheBudget(t *testing.T) {
 				t.Fatal(err)
 			}
 			if s := r.jit; s != nil && s.held() > s.budget {
-				t.Fatalf("limit %d KB, realm %d: held %d, %d entries", limit>>10, i, s.held(), len(s.cache))
+				t.Fatalf("limit %d KB, realm %d: held %d, %d entries", limit>>10, i, s.held(), len(s.regCache))
 			}
 		}
 		r.Close()
@@ -294,7 +294,7 @@ func TestJITDroppedRealmsLeaveTheCache(t *testing.T) {
 			t.Error(err)
 		}
 		if n := realmsAlive(r, refs); n != 0 {
-			t.Errorf("%+v: %d of %d realms alive with %d entries in the cache", c, n, len(refs), len(s.cache)+len(s.regCache))
+			t.Errorf("%+v: %d of %d realms alive with %d entries in the cache", c, n, len(refs), len(s.regCache))
 		}
 		for round := range 3 {
 			jitRealmCheck(t, r, quiet, fn, 1000, jitRealmSay(c, round, 9))

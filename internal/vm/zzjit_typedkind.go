@@ -82,15 +82,11 @@ func (r *Runtime) jitTypedView(ctx *abi.Context) bool {
 var jitTypedViewMade func()
 
 // jitRunEntry is the entry of the code a call of Go was made from, with
-// ctx: the run's, at its own level, which may be a loop's (osrOf), or
-// else, at a native callee's level, its function's.
+// ctx: the run's, at its own level, which may be a loop's (osrOf).
 func (r *Runtime) jitRunEntry(ctx *abi.Context) *jitEntry {
 	s := r.jit
 	if idx := int(ctx.Level); ctx.Live == 0 && idx < len(s.goRuns) && idx < len(s.ssaCtxs) && s.goRuns[idx].f != nil && s.ssaCtxs[idx] == ctx {
 		return s.goRuns[idx].e
-	}
-	if cl := (*closure)(ctx.Closure); cl != nil {
-		return s.entryFor(cl.fn)
 	}
 	return nil
 }

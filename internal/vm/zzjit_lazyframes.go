@@ -81,7 +81,7 @@ func (r *Runtime) jitMakeLazyFrames() {
 				*f = frame{openUpvalues: f.openUpvalues[:0], handlers: f.handlers[:0]}
 				continue
 			}
-			r.jitLevelFrameFill(f, c, lcl, r.jitEntryOf(lcl), nil, callPC, prevPC, callerFn)
+			r.jitLevelFrameFill(f, c, lcl, nil, nil, callPC, prevPC, callerFn)
 			prevPC, callerFn = callPC, lcl.fn
 		}
 	}

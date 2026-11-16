@@ -260,16 +260,11 @@ func (fb *jitFeedback) megamorphicOf(pc int, c *propCache, write bool, site ssa.
 	}
 	e := fb.e
 	if fb.root != nil && (e == nil || !e.reg) {
-		// An inlined callee's of the stack form, whose feedback holds no
-		// entry: what its own code learned. A register callee's holds
-		// what its code learned (regLearned), which a deoptimization of
-		// the code inlining it learns in too: asked of the stack form's
-		// cache, which holds nothing of it, a write it learned was
-		// megamorphic was compiled for its one shape again at every
-		// compile of its callers, each deoptimizing there --
-		// Typescript's returnResolutionData, rd.actuals.length = 0,
-		// twelve compiles of its caller.
-		e = fb.r.jit.entryFor(fb.fn)
+		// An inlined callee's whose feedback holds no register entry:
+		// nothing its own code learned. A register callee's holds what
+		// its code learned (regLearned), which a deoptimization of the
+		// code inlining it learns in too.
+		return false
 	}
 	if e != nil {
 		for i := range e.poly {

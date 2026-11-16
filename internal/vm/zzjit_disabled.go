@@ -66,7 +66,6 @@ func (*Runtime) JITBackground() bool { return false }
 func (*Runtime) initJIT(bool, int64)      {}
 func (*Runtime) jitCountPure()            {}
 func (*Runtime) jitCountsCaller(int) bool { return false }
-func (*Runtime) jitCodeBytes() int64      { return 0 }
 func (*Runtime) releaseJIT()              {}
 
 // jitFramesDue makes no frames: no native code puts one off.

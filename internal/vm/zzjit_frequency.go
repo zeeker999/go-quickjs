@@ -165,19 +165,8 @@ func (r *Runtime) jitCountCallAt(d int) {
 		// counted (jitCountRun).
 		return
 	}
-	e := s.hint(g.cl)
-	if e == nil || !jitCounting(e) {
-		// Its code compiled since: the template's calls are counted no
-		// more, till they are again.
-		g.cl.jitCounting = false
-		return
-	}
-	c := e.calls
-	if i := c.at(int32(g.pc) - 1); i >= 0 {
-		if c.calls[i]++; c.calls[i] >= jitCountsHalved {
-			c.halve()
-		}
-	}
+	// No entry counts them: the template's calls are counted no more.
+	g.cl.jitCounting = false
 }
 
 // jitCountsEnough is how many of a function's invocations the existing

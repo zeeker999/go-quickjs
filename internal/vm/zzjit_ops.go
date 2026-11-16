@@ -68,7 +68,7 @@ func (r *Runtime) jitOpCode(ctx *abi.Context, in bytecode.Instr) (*frame, *closu
 	}
 	pc := int(ctx.ExitPC)
 	if st := jitGoCallState(ctx); st != nil && st.Inline != 0 {
-		cl, pc, f = r.jitGoInlined(ctx, cl, st.Inline), int(st.InlinePC), nil
+		cl, pc, f = r.jitGoInlined(ctx, st.Inline), int(st.InlinePC), nil
 	}
 	if cl == nil || pc >= len(cl.fn.Code) || cl.fn.Code[pc] != in {
 		return nil, nil

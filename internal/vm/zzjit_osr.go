@@ -3,8 +3,6 @@
 package vm
 
 import (
-	"slices"
-
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	jitcompile "github.com/go-quickjs/go-quickjs/internal/jit/compile"
 )
@@ -161,42 +159,3 @@ const jitKeptStarts = 4
 // for its loops before it is asked whether most of its calls do
 // (jitRegFramesLeave): past a compile's worth of what leaving costs.
 const jitFramesLeaving = 256
-
-// osrInUse reports whether what e's entry for on-stack replacement holds
-// may not go: its code runs, or it is being compiled.
-func (e *jitEntry) osrInUse() bool {
-	oe := e.osr
-	return oe != nil && (oe.ssaRuns != 0 || oe.busy != 0 || oe.pending != nil)
-}
-
-// osrBytes is what e's entry for on-stack replacement holds, which its
-// function's entry counts: what the function learned, they share.
-func (e *jitEntry) osrBytes() int {
-	oe := e.osr
-	if oe == nil {
-		return 0
-	}
-	return jitEntryFixed + oe.ssa.Footprint() + oe.compiledBytes() + jitCapBytes(oe.osrLoops)
-}
-
-// dropOSR closes the code of e's entry for on-stack replacement, which no
-// run may then go on in or compile for, reporting false if the OS would
-// not release it.
-func (s *jitState) dropOSR(e *jitEntry) bool {
-	oe := e.osr
-	oe.link.owner = nil
-	oe.link.clearCode()
-	if s.closeSSA(oe.ssa, oe) != nil {
-		oe.link.owner = oe
-		return false
-	}
-	// As for its function's code (dropEntry).
-	for _, l := range oe.ssaLinks {
-		if ce := l.owner; ce != nil {
-			ce.nativeCallers = slices.DeleteFunc(ce.nativeCallers, func(c *jitEntry) bool { return c == oe })
-		}
-	}
-	s.setLinks(oe, nil)
-	e.osr, oe.osrOf = nil, nil
-	return true
-}

@@ -89,16 +89,6 @@ func TestJITElementStoresNative(t *testing.T) {
 		}
 		function build(n) { for (let i = 0; i < 3; i++) piles[i] = null; for (let i = n; i > 0; i--) push(new Disk(i), 0); return n }`
 	r := jitAgreesForTest(t, setup, `build(50)`, `move(2000)`, `move(2000)`, `move(2000)`)
-	for _, name := range []string{"push", "pop"} {
-		cl := r.global.getOwn(r.atoms.intern(name)).value().Object().fn().closure
-		// Inlined in move, or called natively from it: never left to Go by
-		// its native callers. (Go's own calls of it, made while move's code
-		// was invalidated and the interpreter ran it, may have judged it
-		// slow for Go to enter, which is Go's alone: entrySlow.)
-		if e := r.jitEntryOf(cl); e != nil && e.notNative {
-			t.Fatalf("%s does not run natively: %+v", name, e)
-		}
-	}
 	e := jitNativeForTest(t, r, "move")
 	hosts := e.ssaStats.hosts
 	if _, err := r.Run(compileForTest(t, `move(2000)`)); err != nil {
