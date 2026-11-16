@@ -275,12 +275,15 @@ func TestJITSpreadFrameless(t *testing.T) {
 // judged not to pay as its calls are made (jitRunGoProfit): the code
 // leaves after the call that finds so, with that call's result in its
 // place (jitCallResult), and the interpreter runs the rest. Each answer is
-// the interpreter's.
+// the interpreter's. The JIT's clocks are held for the run (JITHoldClocks):
+// code its loops do not pay to enter goes unused, which the time-based
+// flush would drop, by how long a loaded machine took, before the test
+// looks. Held clocks are the process's, so the test is not parallel.
 func TestJITSpreadFramedAtLoops(t *testing.T) {
-	t.Parallel()
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
+	t.Cleanup(JITHoldClocks())
 	r, want := jitAnswersForTest(t, `
 		var src = { a: 1, get g() { return this.a + 1 } };
 		function spreads(n) { let s = 0; for (let i = 0; i < n; i++) { const o = { ...src, k: i }; s += o.g + (o.k & 1) } return s }

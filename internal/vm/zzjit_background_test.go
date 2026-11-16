@@ -3,6 +3,7 @@
 package vm
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -24,6 +25,13 @@ func jitBackgroundForTest(t *testing.T, checks uint16) *Runtime {
 		t.Fatal(err)
 	}
 	return r
+}
+
+// jitBackgroundStateForTest says what decides whether r compiles cl's
+// function in the background (jitInBackground), for a test's failure.
+func jitBackgroundStateForTest(r *Runtime, cl *closure) string {
+	return fmt.Sprintf("background %v, stress %+v, compiling %d, timing %v, repeat %d, SSA hook %v, jobs %d, top level %v",
+		r.jitBackground, r.jitStress, r.jit.compiling, mir.Timing != nil, JITCompileRepeat, jitSSAOptimized != nil, len(r.jit.regJobs), cl.fn.TopLevel)
 }
 
 // jitCallForTest runs src, a script, and checks its value is want.
@@ -65,7 +73,7 @@ func TestJITBackgroundFirstCompile(t *testing.T) {
 			continue
 		}
 		if j == nil {
-			t.Fatalf("call %d: code %v, native %v, its compile never seen pending", call, code, native)
+			t.Fatalf("call %d: code %v, native %v, its compile never seen pending (%s)", call, code, native, jitBackgroundStateForTest(r, cl))
 		}
 		if j.checks != k || !code || !native {
 			t.Fatalf("call %d: its compile's checks %d, code %v, native %v: want the code installed at check %d and run", call, j.checks, code, native, k)
@@ -248,7 +256,7 @@ func TestJITBackgroundCalleeCompile(t *testing.T) {
 	c, key := r.regOf(cl), r.jitRegKeyOf(cl)
 	r.jitRegNativeCallee(cl, c, nil)
 	if jitHasCodeOfForTest(r, cl) || cl.closureCode.jitReg != nil {
-		t.Fatal("code at once")
+		t.Fatalf("code at once (%s)", jitBackgroundStateForTest(r, cl))
 	}
 	if r.jit.regPendingJobs[key] == nil {
 		t.Fatal("want its compile pending")
