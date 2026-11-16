@@ -2319,32 +2319,47 @@ func TestJITRuntimeGuardReentry(t *testing.T) {
 
 func TestJITRuntimeCancellation(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	p := compileForTest(t, `function forever() { let i=0; for(;;) i++ } forever()`)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
-	defer cancel()
-	r.SetContext(ctx)
-	_, err := r.Run(p)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("cancel = %v", err)
-	}
-	if r.jit == nil || r.jit.entries == 0 || r.jit.budgets == 0 {
-		t.Fatal("loop never entered native code")
+	entries, hosts, budgets := jitCancelledNativeForTest(t, r,
+		`function spin(n) { for (let i = 0; i !== n; i++); }`, `spin(1000)`, `spin(-1)`)
+	if entries == 0 || budgets == 0 {
+		t.Fatalf("loop never checked its budget natively: %d entries, %d host exits, %d budgets", entries, hosts, budgets)
 	}
 }
 
 func TestJITPropertyLoopCancellation(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	p := compileForTest(t, `function forever(o){for(;;){o.x=(o.x+1)|0}}forever({x:0})`)
+	entries, hosts, budgets := jitCancelledNativeForTest(t, r,
+		`function spin(o, n) { for (let i = 0; i !== n; i++) o.x = (o.x + 1) | 0 }`, `spin({x: 0}, 1000)`, `spin({x: 0}, -1)`)
+	if entries == 0 || hosts != 0 || budgets == 0 {
+		t.Fatalf("native property loop did not check its budget: %d entries, %d host exits, %d budgets", entries, hosts, budgets)
+	}
+}
+
+// jitCancelledNativeForTest runs src and then warm, which compiles and
+// runs a loop natively, and then forever, the loop that never ends, under
+// a deadline, which must stop it; it returns what the JIT counted of
+// forever's run: native entries, host exits and budget checks. The
+// deadline begins once the loop has code: begun before, a first compile
+// slower than it -- a cold process on arm64 under emulation, or under
+// checkptr on a loaded runner -- had the context done before native code
+// was entered, which left at its first check of it, no budget spent.
+func jitCancelledNativeForTest(t *testing.T, r *Runtime, src, warm, forever string) (entries, hosts, budgets uint64) {
+	t.Helper()
+	if _, err := r.Run(compileForTest(t, src+"; "+warm)); err != nil {
+		t.Fatal(err)
+	}
+	if r.jit == nil || r.jit.entries == 0 {
+		t.Fatalf("%s never entered native code", warm)
+	}
+	p := compileForTest(t, forever)
+	entries0, hosts0, budgets0 := r.jit.entries, r.jit.hosts, r.jit.budgets
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
 	r.SetContext(ctx)
-	_, err := r.Run(p)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("property loop cancellation: %v", err)
+	if _, err := r.Run(p); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("%s: cancel = %v", forever, err)
 	}
-	if r.jit == nil || r.jit.entries == 0 || r.jit.hosts != 0 || r.jit.budgets == 0 {
-		t.Fatal("native property loop did not check its budget")
-	}
+	return r.jit.entries - entries0, r.jit.hosts - hosts0, r.jit.budgets - budgets0
 }
 
 func TestJITRuntimeCloseAfterGuard(t *testing.T) {
