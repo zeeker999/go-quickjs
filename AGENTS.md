@@ -339,7 +339,7 @@ time or about code that is missing, not a wrong answer. There are three
 kinds:
 
 - Tests that compare elapsed times or have a deadline:
-  `TestJITCompileLinear/time`, `TestRegExpLeafFailsAgainWithFrame`,
+  `TestJITCompileLinear/time`, `TestRegExpLeafSpentOnceNested`,
   `TestNativeLoopsAreInterruptible`, and the JIT's cancellation tests under
   qemu. Run them as a step of their own (`-run '^Name$' -count=3`), not
   beside other heavy tests.
