@@ -395,12 +395,31 @@ func (r *Runtime) jitRegFrameless(ctx *abi.Context, cl *closure, c *regCode, rpc
 	var in bytecode.Instr
 	n := int(ctx.GoOp >> abi.GoOpArgcShift & 0xff)
 	switch op {
-	case bytecode.RSetHomeObject, bytecode.RSetFieldInit, bytecode.RDefineMethod:
+	case bytecode.RSetHomeObject, bytecode.RSetFieldInit, bytecode.RDefineMethod, bytecode.RDefineGetter, bytecode.RDefineSetter,
+		bytecode.RClassGetter, bytecode.RClassSetter, bytecode.RSetFuncName:
 		if n != 2 || cl == nil {
 			return false
 		}
 		a, b := jitGoArg(ctx, 0), jitGoArg(ctx, 1)
 		switch op {
+		case bytecode.RDefineGetter, bytecode.RDefineSetter, bytecode.RClassGetter, bytecode.RClassSetter:
+			// An accessor's half, a literal's or a class's, as
+			// regDefineAccessor and regClassAccessor define it and the
+			// stack form's jitGoHostPlain (jitDefinition's define_getter).
+			if a.IsObject() && b.IsObject() {
+				getter := op == bytecode.RDefineGetter || op == bytecode.RClassGetter
+				flags := memberFlags(0)
+				if op == bytecode.RClassGetter || op == bytecode.RClassSetter {
+					flags = memberFlags(1)
+				}
+				r.defineHalfAccessor(a.Object(), regName(cl, c, rpc, regAt(c.code, rpc).C()), b.Object(), getter, flags)
+			}
+		case bytecode.RSetFuncName:
+			if a.IsObject() {
+				if fd := a.Object().fn(); fd != nil {
+					fd.name = functionNameFromKey(b, uint32(regAt(c.code, rpc).C()))
+				}
+			}
 		case bytecode.RSetHomeObject:
 			if a.IsObject() && b.IsObject() {
 				if fd := a.Object().fn(); fd != nil {
@@ -539,7 +558,13 @@ func (r *Runtime) jitRegReadSeen(f *frame, c *regCode, run jitRegRun, rpc int, r
 	l := r.jitRegLearnedFor(f, run.e)
 	if !r.jitRegSiteMegamorphic(f.cl, c, l, rpc) {
 		if op.plain() && recv.IsObject() {
+			// Its prototype's too, for a key the receiver lacks, as the
+			// stack form fills a pattern's read (jitPropertySeen's
+			// get_prop_under): register code's pattern reads are plain
+			// reads, each absent key -- an option's default -- a call
+			// of Go at every read.
 			r.jit.megaFill(recv.Object(), op.key)
+			r.jitMegaFillProto(recv.Object(), op.key)
 		}
 		return
 	}

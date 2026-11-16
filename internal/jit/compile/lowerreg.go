@@ -838,7 +838,10 @@ func regStringParts(p *ir.Program) {
 				for next < len(p.Code) && p.Origin[next] == p.Origin[k] {
 					next++
 				}
-				if next < len(p.Code) && !p.LiveAt(next, d) {
+				// A concat whose result is the part's own register writes
+				// it: what is live there after it is the result, not the
+				// part (str_part r7; concat r7 = r7..r9; ret r7).
+				if next < len(p.Code) && (c.Dest == d || !p.LiveAt(next, d)) {
 					p.Code[pc] = ir.Instruction{Op: ir.StringPart, Left: ir.Slot(d), Dest: d}
 				}
 				break
@@ -1676,6 +1679,11 @@ func (l *regLowering) lowerCold(pc int, w bytecode.RInstr) {
 		l.emit(ir.Instruction{Op: ir.StringConcat, Dest: int(a), Extra: 1}, false)
 	case bytecode.RCheckGlobalRef:
 		l.emit(ir.Instruction{Op: ir.BindingCheck, Dest: int(a), Key: l.name(b)}, false)
+	case bytecode.RAssertResolved:
+		// R[A], check_global_ref's answer, checked natively, as the stack
+		// form's assert_resolved (ir.Resolved): Go throws the
+		// ReferenceError from an exit where it is false. R[A] keeps it.
+		l.emit(ir.Instruction{Op: ir.Resolved, Left: reg(a), Right: reg(a), Dest: int(a), Key: l.name(b)}, false)
 	case bytecode.RGetUpvalCheck:
 		l.emit(ir.Instruction{Op: ir.UpvalueRead, Dest: int(a), Key: w.BC(), Check: true}, false)
 	case bytecode.RSetUpvalCheck:
@@ -2215,9 +2223,14 @@ func RegAccess(rc *bytecode.RegCode, pc int) (reads, writes []int, all bool) {
 	case bytecode.RObjectRest:
 		return append([]int{b}, span(c, int(rc.Aux[pc]))...), []int{a}, false
 	case bytecode.RCopyDataProps, bytecode.RSetProtoOf, bytecode.RArrayPush, bytecode.RArraySpread, bytecode.RNewClass,
-		bytecode.RSetHomeObject, bytecode.RDefineMethod, bytecode.RSetFieldInit:
+		bytecode.RSetHomeObject, bytecode.RDefineMethod, bytecode.RSetFieldInit,
+		// An accessor's definition, a literal's or a class's, and a
+		// function named after its key, made by Go on their operands as
+		// the stack form's (frameDefinition), not a host exit.
+		bytecode.RDefineGetter, bytecode.RDefineSetter, bytecode.RClassGetter, bytecode.RClassSetter, bytecode.RSetFuncName:
 		return []int{a, b}, nil, false
-	case bytecode.RDefineIndex:
+	case bytecode.RDefineIndex, bytecode.RDefineGetterIndex, bytecode.RDefineSetterIndex, bytecode.RClassGetterIndex,
+		bytecode.RClassSetterIndex, bytecode.RClassIndex:
 		return []int{a, b, c}, nil, false
 	case bytecode.RCallSpread:
 		return span(a, 3), []int{b}, false

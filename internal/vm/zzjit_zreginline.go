@@ -398,7 +398,9 @@ func (r *Runtime) jitRegInlineLeft(f *frame, x *jitRegInlineLevel, owner *jitReg
 		}
 		learned = true
 	case abi.ExitHost:
-		s.hosts++
+		// Counted once, where the run left (jitRegLeft), as the stack
+		// form counts an inlined callee's exit (runSSALoop): counted here
+		// too, each such exit had been two.
 		f.pc = regSrc(c, pc) + 1
 		s.noteRegHost(c, pc)
 		if miss {

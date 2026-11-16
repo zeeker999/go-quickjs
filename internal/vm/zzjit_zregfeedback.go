@@ -666,9 +666,29 @@ func (f *jitRegFeedback) regLitFed(pc int) bool {
 // Resumed is ssa.ResumeFeedback's: Go has gone on at register pc rpc, after
 // a call the code had no entry after (jitRegResumeSeen), which the next
 // compile has one at. The builder asks it by the state's PC, a register
-// pc.
+// pc. After a call of the function itself, which its recursion's outer
+// runs are all suspended at, it has one too, as the stack form's
+// (jitFeedback's Resumed): one leaving deep in the recursion has Go go on
+// after the call in each, which had run the rest of each outer level in
+// the interpreter.
 func (f *jitRegFeedback) Resumed(rpc int) bool {
-	return f.fb.e != nil && slices.Contains(f.fb.e.resumed, uint32(rpc))
+	fb := f.fb
+	e := fb.e
+	if e == nil {
+		return false
+	}
+	if slices.Contains(e.resumed, uint32(rpc)) {
+		return true
+	}
+	if !fb.selfKnown {
+		fb.selfKnown = true
+		for _, x := range jitTargets(e) {
+			if x.cl != nil && x.cl.fn == fb.fn {
+				fb.selfCalls = append(fb.selfCalls, x.pc)
+			}
+		}
+	}
+	return slices.Contains(fb.selfCalls, int32(rpc-1))
 }
 
 // EntryGeneric is ssa.Feedback's: an entry at register pc pc whose
@@ -819,6 +839,13 @@ func (f *jitRegFeedback) inline(pc int) (ssa.InlineSite, bool) {
 	if cl.fn == f.fb.fn || cl.fn == f.fb.keep().fn || jitNoInline != nil && jitNoInline(cl.fn) {
 		return ssa.InlineSite{}, false
 	}
+	if f.regCallCold(pc, rpc, cl) {
+		// One made too seldom to be inlined is called natively, as the
+		// stack form's (jitCallCold): V8's heuristic, which the builder
+		// applies only past its small callees, refuses it whatever its
+		// size.
+		return ssa.InlineSite{}, false
+	}
 	if site.Parent != 0 {
 		// A construction with a class that has no constructor of its own,
 		// run with its parent's code while the class's prototype is still
@@ -901,6 +928,29 @@ func (f *jitRegFeedback) inline(pc int) (ssa.InlineSite, bool) {
 		l.inlines = append(l.inlines, jitInline{pc: rpc, cl: cl, obj: o})
 	}
 	return in, true
+}
+
+// regCallCold is the stack form's jitCallCold for register code: whether
+// the call at the program's instruction pc, register pc rpc, of cl's
+// function, which the existing tiers count every call of, is made too
+// seldom for each invocation of the frame's function to be inlined
+// (ssa.MinInliningFrequency) -- not where the code learned a call there
+// they do not count.
+func (f *jitRegFeedback) regCallCold(pc int, rpc int32, cl *closure) bool {
+	if cl == nil || !jitCountedCallee(cl) {
+		return false
+	}
+	if l := f.fb.e; l != nil {
+		for _, list := range [...][]jitInline{l.inlines, l.nativeCalls} {
+			for _, x := range list {
+				if x.pc == rpc && !jitFramed(x) {
+					return false
+				}
+			}
+		}
+	}
+	fr, ok := f.Frequency(pc)
+	return ok && fr < ssa.MinInliningFrequency
 }
 
 // jitRegCallOp is op with a call in tail position's opcode as the

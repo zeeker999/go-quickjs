@@ -311,7 +311,10 @@ func (r *Runtime) jitRegCached(key jitKey, e *jitRegEntry) {
 			s.compiled++
 		} else {
 			s.reoptimized++
-			if life.reopts < ^uint8(0) {
+			// A compile asked for what the code learned (jitRegReopt), as
+			// the stack form counts one (jitInstallSSA's e.reopt): not a
+			// deoptimization's, which its deoptimizations count.
+			if life.reopt && life.reopts < ^uint8(0) {
 				life.reopts++
 			}
 		}
