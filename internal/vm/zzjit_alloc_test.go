@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// Object literals (zzz_zliteral.go), additions to captured bindings, push
+// Object literals, additions to captured bindings, push
 // and pop (pureElemOp, which native code's growth of an array calls too), a
 // for...in's cursors used again (zzz_forincursor.go) and arrays grown past
 // 16,384 elements (zzz_growelems.go) answer as the interpreter does with

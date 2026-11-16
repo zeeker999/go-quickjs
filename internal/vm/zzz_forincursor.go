@@ -35,10 +35,10 @@ package vm
 // each time the collector has run and when its turn ends
 // (clearReturnedFrames), as it does a stale slot's value.
 //
-// The code here is generic, instantiated with struct{}, as zzz_zliteral.go's,
-// and newForInObject checks the last in place: 32 bytes off it for the 32
-// clearReturnedFrames gains, so that the hot paths, past both, stay where
-// they were.
+// The code here is generic, instantiated with struct{}, laid out after
+// every function and closure of the package, and newForInObject checks
+// the last in place: 32 bytes off it for the 32 clearReturnedFrames gains,
+// so that the hot paths, past both, stay where they were.
 
 // forInCursor is newForInObject's new cursor over in, kept unless it is
 // made done.
