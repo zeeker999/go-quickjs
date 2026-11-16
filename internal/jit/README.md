@@ -2820,6 +2820,16 @@ realms warms up and compiles twice, and a call of another realm's function
 leaves native code for Go to switch the realm. Code never meets a realm it
 was not compiled for, so that nothing in it checks.
 
+A realm a host drops is reachable from what the JIT keeps of it -- the pools
+of its functions' code, what they learned, the closures their calls met --
+however its key holds it, so the flush lets go of it (`regFlush`), as
+`jitFlushRealms` does the stack form's: a realm none of whose code was used
+and none of whose functions ran since the flush's last look (their
+`regLifeUses`) has its functions' state let go of, with their entries with
+no code and their programs (`regLetGoLife`); its code goes as any unused
+code does. One that has only gone quiet warms up again if it runs again.
+Its key gone, the rest goes with it (`regAge`).
+
 **Refusals.** A refusal is an entry with no code, and marks the template
 refused (`closureCode`'s `jitRegRefused`), so that its samples ask nothing
 more -- but a function of host operations alone, which is lowered again once
@@ -2918,7 +2928,31 @@ it went on in, native callers' calls -- date it (`regAge`), and a compile
 makes it young (`jitRegEntry`'s `used`, its epoch); `makeRoom` reclaims it
 with theirs, refusals first, then code unused this epoch and the one before,
 least recently used first (`regVictims`, `regReclaim`); and `flush` drops
-code unused between two of its looks (`regFlush`). Code let go of so has its
+code unused between two of its looks (`regFlush`) -- code used is code that
+ran, and the callees of code used, inlined there (its keep's `inlined`, what
+it learned of its calls) or called natively (its keep's `links`), whose own
+uses do not count those runs, as `flush` finds the stack form's.
+
+A function's state (`regLearned`, a `jitEntry`) counts too, as the stack
+form's entry's `measure` counts what it learned: the entry and what it
+learned, its pools' objects among it (`regAccount`, `regCounted`), counted
+as it grows where its code joins a callee's callers (`regJoinCallers`), as a
+compile caches its code, and at every look of the cache's. It is made in the
+room for it (`regLearnedOf`), as the stack form's entry is (`jitWarmFor`);
+where there is none it is kept all the same, uncounted, and counted once its
+function's compile asks for its room with the code's (`jitRegRoomAhead`) or
+at the cache's next look, which then makes the room among it -- the stack
+form's entry is made at its function's first call, this at its first
+sample, after its first run, and refused, a loop driving a program's phases
+had had no code once the first phase filled the budget. The state of a
+function the cache holds nothing for is reclaimed with the refusals, least
+recently made first (its `serial`, which orders its function's refusal
+and programs among theirs too, `regVictimSerial`: ties left to the cache's
+maps had a full budget's compiles differ from run to run), and so is a
+refusal's with it; a state
+reclaimed when listed leaves the floor as it was, which a stream of
+functions each taking another's room had otherwise made every compile list
+the cache again. Code let go of so has its
 function warm up anew (`regLetGo`), and compiled again it is compiled with
 what its function learned that holds no object, which outlives its code
 (`regLearned`): the sites whose speculation failed, the reads and the
@@ -2957,6 +2991,20 @@ program, which native callers call -- is let go of for a compile asked under
 another program's native frame, or flushed there. Code replaced while a run
 or a call is in it is closed once the last leaves it (`dropped`,
 `regClose`).
+
+A link (`regLinks`) is counted by the code that calls through it
+(`jitLink`'s `refs`, `regHoldLinks`: once for each entry's keep, as it is
+placed and as it is closed), and is let go of once its function has nothing
+in the cache, no code calls through it and no compile under way -- on the
+runtime's goroutine (`regBuilds`) or in the background -- asked for it
+(`regUnlink`), as the stack form's `unlink`; a call Go makes for a native
+caller gives a function a link, for a generic call to find it by its hint
+(`regHint`), only if the cache holds something of it (`regLinkIfCached`).
+A link let go of frees its slot of the hint table but leaves the slot its
+function (`regUnhint`): a template of the function, of the link's realm,
+may still name the slot, and a generic call compares the function and its
+own realm alone, so the slot is given to no link of the same function after
+(`regFreeHint`), whose realm's code that template's closures would call.
 
 A function's programs (`regLowered`, one lowering of each kind it was
 asked for) are a cache its compiles are made from, which the budget can

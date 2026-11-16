@@ -60,11 +60,25 @@ func (s *jitState) regLinkOf(cl *closure, c *regCode) *jitLink {
 	return l
 }
 
+// regLinkIfCached gives cl's function its link (regLinkOf), and so the
+// slot of the hint table a generic call finds it by, if the cache holds
+// code of it, a refusal or none: as the stack form's entries have their
+// slots (remember). A link of a function the cache holds nothing for,
+// which a generic call would leave to Go all the same, is not made: Go's
+// next call of it, once it has code, gives it one. Made at every such
+// call of Go, the links of a program's stream of functions called once
+// outnumbered the functions the cache held.
+func (s *jitState) regLinkIfCached(cl *closure) {
+	if s.regCache[s.rt.jitRegKeyOf(cl)] != nil {
+		s.regLinkOf(cl, cl.reg)
+	}
+}
+
 // regLinkFor is the link native callers call e's function's code through,
 // nil where none has asked for one (regLinkOf), as regLinks has it by e's
 // key.
 func (s *jitState) regLinkFor(e *jitRegEntry) *jitLink {
-	if e.life != nil {
+	if e.life != nil && e.life.regLink != nil {
 		return e.life.regLink
 	}
 	return s.regLinks[e.key]
@@ -103,7 +117,8 @@ func (r *Runtime) jitRegLinkFlags(cl *closure, c *regCode) uint64 {
 // regHint gives cl's template a slot of the hint table holding l, its
 // function's link, as the stack form's entries have one (remember): what
 // a generic call finds a function's link by (mir's genericCheck). A link
-// keeps its slot until its function is gone (regBytes, regUnhint). A
+// keeps its slot until its function is gone or the link is let go of
+// (regPruneLinks, regUnhint). A
 // table full is grown once room is made for its growth (hintGrowth), as
 // the stack form's entry is made only in the room for it and its slot
 // (jitWarmFor, jitCompileForIn's hintRoom); where there is none, the
@@ -114,7 +129,8 @@ func (r *Runtime) jitRegLinkFlags(cl *closure, c *regCode) uint64 {
 // 262,144 once a realm's run was done.
 func (s *jitState) regHint(cl *closure, l *jitLink) {
 	if l.hint == 0 {
-		if g := s.hintGrowth(); g != 0 {
+		k := s.regFreeHint(cl.fn)
+		if g := s.regHintGrowth(k); g != 0 {
 			// The room made may free a slot (regUnhint), taken below.
 			s.budget = s.rt.jitBudget()
 			if !s.makeRoom(g) {
@@ -123,12 +139,15 @@ func (s *jitState) regHint(cl *closure, l *jitLink) {
 				}
 				return
 			}
+			k = s.regFreeHint(cl.fn)
 		}
 		var i uint32
-		if n := len(s.hintFree); n != 0 {
-			i, s.hintFree = s.hintFree[n-1], s.hintFree[:n-1]
+		if k >= 0 {
+			i = s.hintFree[k]
+			s.hintFree = slices.Delete(s.hintFree, k, k+1)
 		} else {
-			if n := s.hintsCap(); n != cap(s.hints) {
+			if g := s.regHintGrowth(k); g != 0 {
+				n := cap(s.hints) + g/int(unsafe.Sizeof(jitHintSlot{}))
 				s.hints = append(make([]jitHintSlot, 0, n), s.hints...)
 			}
 			if len(s.hints) == 0 {
@@ -147,13 +166,51 @@ func (s *jitState) regHint(cl *closure, l *jitLink) {
 	}
 }
 
-// regUnhint frees l's slot of the hint table, its function gone.
+// regHintGrowth is what the hint table grows by for a link given no free
+// slot, k the slot regFreeHint found, -1 for none: as hintGrowth, but with
+// free slots there may be none a link of the function may take.
+func (s *jitState) regHintGrowth(k int) int {
+	if k >= 0 {
+		return 0
+	}
+	n := len(s.hints) + 1
+	if len(s.hints) == 0 {
+		n++
+	}
+	if n <= cap(s.hints) {
+		return 0
+	}
+	return (max(n, 2*cap(s.hints), 16) - cap(s.hints)) * int(unsafe.Sizeof(jitHintSlot{}))
+}
+
+// regUnhint frees l's slot of the hint table, its function gone, or its
+// link let go of (regPruneLinks). The slot keeps its function, with no
+// link, which a generic call finds no link in: the templates whose hint
+// it was may live on -- the link's realm's, its function's code let go
+// of -- and the slot is given to no link of the same function after
+// (regFreeHint), whose realm's code their closures' generic calls,
+// which compare the function and their realm alone, would call.
 func (s *jitState) regUnhint(l *jitLink) {
 	if l.hint != 0 {
-		s.hints[l.hint] = jitHintSlot{}
+		s.hints[l.hint] = jitHintSlot{fn: s.hints[l.hint].fn}
 		s.hintFree = append(s.hintFree, l.hint)
 		l.hint = 0
 	}
+}
+
+// regFreeHint is the index in hintFree of a free slot of the hint table
+// that may be given to a link of fn, the last freed first, -1 for none:
+// not one a link of fn held (regUnhint), which a template of fn of
+// another realm may still name. A few are looked at; past them a slot is
+// added.
+func (s *jitState) regFreeHint(fn *bytecode.Function) int {
+	addr := uintptr(unsafe.Pointer(fn))
+	for k := len(s.hintFree) - 1; k >= 0 && k >= len(s.hintFree)-4; k-- {
+		if s.hints[s.hintFree[k]].fn != addr {
+			return k
+		}
+	}
+	return -1
 }
 
 // regSet has native callers call e's code through l: its call entry, and
@@ -550,10 +607,10 @@ func (r *Runtime) jitRegCallSeenOf(f *frame, c *regCode, e *jitRegEntry, rpc int
 				// anew at each call of its maker, the fifth a call made --
 				// AWFY's Havlak's Vector.forEach's of stepD's arrow -- was
 				// made by Go at every call.
-				if w.Op() != bytecode.RNewW {
-					r.jitState().regLinkOf(cl, cl.reg)
-				}
 				r.jitRegKnownCallee(cl, f.cl)
+				if w.Op() != bytecode.RNewW {
+					r.jitState().regLinkIfCached(cl)
+				}
 				return false
 			}
 			x.byCode = true
@@ -570,10 +627,10 @@ func (r *Runtime) jitRegCallSeenOf(f *frame, c *regCode, e *jitRegEntry, rpc int
 				// regCallTargets fills with the site's cache's first: a
 				// generic call calls it through its link, which it finds
 				// by its hint (regHint), given it here as below.
-				if w.Op() != bytecode.RNewW {
-					r.jitState().regLinkOf(cl, cl.reg)
-				}
 				r.jitRegKnownCallee(cl, f.cl)
+				if w.Op() != bytecode.RNewW {
+					r.jitState().regLinkIfCached(cl)
+				}
 				return false
 			}
 			n++
@@ -587,8 +644,8 @@ func (r *Runtime) jitRegCallSeenOf(f *frame, c *regCode, e *jitRegEntry, rpc int
 			// callers may call, as the stack form's generic calls have
 			// their functions compiled (jitCallTarget). Go had made every
 			// call of one no site was compiled for.
-			r.jitState().regLinkOf(cl, cl.reg)
 			r.jitRegKnownCallee(cl, f.cl)
+			r.jitState().regLinkIfCached(cl)
 		}
 		return false
 	}
@@ -852,6 +909,7 @@ func (r *Runtime) jitRegForwardSeen(f *frame, c *regCode, e *jitRegEntry, rpc in
 // calling through links, join the native callers of each link's function
 // (jitEntry's regCallers), as the stack form's setLinks has its code join
 // theirs: not its own, nor one there already, nor past jitNativeCallers.
+// What each holds is counted as its list grows (regAccount).
 func (s *jitState) regJoinCallers(key jitKey, links []*jitLink) {
 	for _, l := range links {
 		if l.key == key {
@@ -862,6 +920,9 @@ func (s *jitState) regJoinCallers(key jitKey, links []*jitLink) {
 			continue
 		}
 		ce.regCallers = append(ce.regCallers, key)
+		// Counted as it grows, as the stack form's setLinks counts its
+		// callees' nativeCallers: the compile's settle makes the room.
+		s.regAccount(ce)
 	}
 }
 

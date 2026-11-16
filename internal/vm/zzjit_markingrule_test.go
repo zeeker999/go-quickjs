@@ -41,12 +41,26 @@ func TestJITSameWorkWhileMarking(t *testing.T) {
 		t.Skip("no SSA backend on this architecture")
 	}
 	src, names := jitMarkingCorpus(t)
-	plain := jitMarkingRun(t, src, names, false)
-	marking := jitMarkingRun(t, src, names, true)
+	// Each run holds the collector's count and the cache's clocks, in a
+	// JIT memory that holds all it compiles (jitMarkingHeldForTest,
+	// jitMarkingBudget), so that its cache keeps, flushes and reclaims
+	// alike whether native code sees the collector marking or not.
+	plain, plainCache := jitMarkingRun(t, src, names, false)
+	marking, markingCache := jitMarkingRun(t, src, names, true)
 	// And each run by native code made from its register code
 	// (jitRegRun), named "reg:" and the test's name.
-	regPlain := jitMarkingRegRun(t, src, names, false)
-	regMarking := jitMarkingRegRun(t, src, names, true)
+	regPlain, regPlainCache := jitMarkingRegRun(t, src, names, false)
+	regMarking, regMarkingCache := jitMarkingRegRun(t, src, names, true)
+	for _, c := range [][2]jitMarkingCache{{plainCache, markingCache}, {regPlainCache, regMarkingCache}} {
+		switch p, m := c[0], c[1]; {
+		case p != m:
+			t.Errorf("the JIT's cache differs from run to run (%s): %+v, and while marking %+v: a run's work depends on more than the marking", p.form, p, m)
+		case p.evicted != 0 || p.refused != 0:
+			t.Errorf("the JIT's cache ran out of room (%s): %+v; jitMarkingBudget is to hold all the runs compile", p.form, p)
+		default:
+			t.Logf("the JIT's cache, %s, in both runs: %+v", p.form, p)
+		}
+	}
 	all := names
 	for _, name := range names {
 		all = append(all, "reg:"+name)
@@ -115,7 +129,7 @@ func jitMarkingCorpus(t *testing.T) (string, []string) {
 
 // jitMarkingRun warms each test up and counts what its next run does, in a
 // fresh runtime, native code seeing the collector marking if marking.
-func jitMarkingRun(t *testing.T, src string, names []string, marking bool) map[string]jitMarkingWork {
+func jitMarkingRun(t *testing.T, src string, names []string, marking bool) (map[string]jitMarkingWork, jitMarkingCache) {
 	t.Helper()
 	defer jitMarkingHeldForTest()()
 	if marking {
@@ -157,14 +171,14 @@ func jitMarkingRun(t *testing.T, src string, names []string, marking bool) map[s
 	if n := after.TotalAlloc - before.TotalAlloc; n > jitMarkingAllocLimit {
 		t.Errorf("the micro-benchmarks allocated %d MB with the collector off: a test's n should be small work", n>>20)
 	}
-	return work
+	return work, jitMarkingCacheOf(r, "stack form")
 }
 
 // jitMarkingRegRun is jitMarkingRun for native code made from register
 // code: the corpus compiled in register form, each test's function called
 // natively (RegNativeCall) three times from its first call, from its start,
 // and then once more counted.
-func jitMarkingRegRun(t *testing.T, src string, names []string, marking bool) map[string]jitMarkingWork {
+func jitMarkingRegRun(t *testing.T, src string, names []string, marking bool) (map[string]jitMarkingWork, jitMarkingCache) {
 	t.Helper()
 	defer jitMarkingHeldForTest()()
 	if marking {
@@ -210,7 +224,7 @@ func jitMarkingRegRun(t *testing.T, src string, names []string, marking bool) ma
 	} else {
 		t.Logf("register code, marking %v: %d entries, %d host exits, %d deoptimizations, %d polls", marking, st.Entries, st.Hosts, st.Guards, st.Polls)
 	}
-	return work
+	return work, jitMarkingCacheOf(r, "register code")
 }
 
 // jitMarkingAllocLimit is how much jitMarkingRun's tests may allocate: about
@@ -224,7 +238,8 @@ const jitMarkingAllocLimit = 8 << 30
 // count (jitGCEpoch) has settled -- a finalizer counts a cycle at some time
 // after it, and a count landing in one run emptied the megamorphic cache
 // there (flush) -- and the clocks the JIT's cache ages and flushes code by
-// held (JITHoldClocks), which otherwise run on wall time: code flushed, or
+// held (JITHoldClocks), which otherwise run on the program's time, and the
+// marking runs' calls of the barrier lengthen it: code flushed, or
 // reclaimed for room, in one run and not the other was compiled again in
 // that run alone. Run so on arm64 under emulation, two rounds of the
 // register runs differed, in the first in carried_exit_500 and
@@ -249,6 +264,30 @@ func jitMarkingHeldForTest() (restore func()) {
 	}
 }
 
-// jitMarkingBudget is the JIT's memory for jitMarkingRun's runtimes: the
-// register runs hold 12 MB of it at their end.
+// jitMarkingBudget is the JIT's memory for jitMarkingRun's runtimes. The
+// corpus fills the default budget -- register code's state is counted in
+// it (regAccount), the top-level code's literal pools among it -- and
+// which code makes room for a compile, or whether there is room, then
+// depends on the clocks; with them held none is old, and a compile
+// refused room in one run and not the other is no path's work while
+// marking. So each run's cache must not run out (jitMarkingCacheOf).
 const jitMarkingBudget = 256 << 20
+
+// jitMarkingCache is what a run's JIT cache did that decides what it
+// compiled: what it held at the end, the code it reclaimed for room and
+// the compiles it found none for, and the code it flushed. Two runs that
+// differ in it do not differ in the marking alone.
+type jitMarkingCache struct {
+	form                      string
+	held                      int64
+	evicted, refused, flushed uint64
+}
+
+// jitMarkingCacheOf is r's jitMarkingCache.
+func jitMarkingCacheOf(r *Runtime, form string) jitMarkingCache {
+	c := jitMarkingCache{form: form}
+	if s := r.jit; s != nil {
+		c.held, c.evicted, c.refused, c.flushed = int64(s.held()), s.evicted, s.refusedRoom, s.flushed
+	}
+	return c
+}

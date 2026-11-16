@@ -298,6 +298,9 @@ func (s *jitState) jitRegAbandonJobs() {
 // the code, as jitRegHot gives it, where it has none meanwhile.
 func (r *Runtime) jitRegInstall(j *jitRegJob) {
 	s := r.jit
+	// The links the job's feedback asked for are let go of by none until
+	// its code holds them (regUnlink).
+	defer s.regBuilding(&j.rf)()
 	defer func() {
 		if cc := j.cl.closureCode; cc != nil {
 			// Its calls enter it if it has code, installed or not.
@@ -406,6 +409,10 @@ func (r *Runtime) jitRegInstall(j *jitRegJob) {
 		return
 	}
 	r.jitRegCached(j.key, e)
+	// No more than the budget held after, as after a compile on the spot
+	// (jitRegCompileFor): what the code describes, and what its callees
+	// learned of it as callers joined them, count past the room it asked.
+	defer s.settle()
 	if cc := j.cl.closureCode; cc != nil && j.cl.reg == j.c {
 		switch {
 		case e.code == nil:

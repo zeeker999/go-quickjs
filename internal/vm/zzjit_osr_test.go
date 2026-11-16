@@ -1076,11 +1076,17 @@ func TestJITOSRCounted(t *testing.T) {
 		if oe.bytes < oe.code.Footprint() {
 			t.Fatalf("%d bytes counted for %d of code", oe.bytes, oe.code.Footprint())
 		}
+		// With what each function's state holds (regAccount).
 		held := 0
 		for _, x := range s.regCache {
 			held += x.bytes
 			if x.osr != nil {
 				held += x.osr.bytes
+			}
+		}
+		for _, l := range s.regLearned {
+			if l.regCounted {
+				held += l.bytes
 			}
 		}
 		if s.regHeld != held {
