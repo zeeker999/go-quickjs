@@ -1558,7 +1558,15 @@ accumulator a loop replaces each turn (`sum = sum.add(v)`) is its properties
 alone. Another phi's use of one is at the end of the predecessor it comes
 from (`liveAt`): a register loop's end, which the copy of its test before
 the loop reaches too, merges the object the loop began with from that way
-alone, which no turn of the loop is on. A use that needs an object made -- a call's operand, a store into an
+alone, which no turn of the loop is on. A register loop's header is its
+body's first block, where an object the turn makes is taken anew past the
+header's phis: one taken in the merge's own block is used past it only by
+another phi there (`liveAt`), every other path making it again first. And a
+construction's receiver register, `new_w`'s R[A+1], is the construction's
+to write, read by nothing, as a plain call's is (`RegAccess`, `liveRegs`):
+were it live, it had carried the last turn's object round the loop to the
+function's entry, which loads it, and no such object could be left unmade.
+A use that needs an object made -- a call's operand, a store into an
 object that is made, a return -- has the code make it there, from its pool,
 its properties defined along the additions that made its state, and it is
 that object past there. An object made on every path anyway is made where it
@@ -1620,7 +1628,14 @@ a derived constructor, whose this may not be bound yet. A scope's end that
 closes a register it captures (`close_regs`, lowered to `ir.CloseUpvalues`
 of its registers) has the build inline no call of the closure past it, as
 past a stack form's `CloseUpvalues`. A call is found to call the closure by its window's
-register 0 in the call's state (`calledClosures`); one of a callee given it
+register 0 in the call's state (`calledClosures`). That register is a copy
+of the closure's (`move r5, r4; call_w r5 = r5(1)`), which an entry after
+an operation Go ran before the call -- a call before it whose inlined
+callee left to Go -- loads: such a load is the closure too where every
+state of that operation names one of its values in the register, which the
+operation does not write, Go having made the frame of one of them, the
+closure of its template (`resumeCopies`), as an entry's load of the
+closure's own register is. One of a callee given it
 by its window's function, copied just before from a parameter's register
 (`givenCall`), so that a register callee calling what it is given is
 inlined with the closure in it (`InlineCallsGiven`). At an exit, Go makes

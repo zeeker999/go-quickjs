@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/compiler"
@@ -116,12 +117,11 @@ func jitMarkingCorpus(t *testing.T) (string, []string) {
 // fresh runtime, native code seeing the collector marking if marking.
 func jitMarkingRun(t *testing.T, src string, names []string, marking bool) map[string]jitMarkingWork {
 	t.Helper()
-	runtime.GC()
-	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	defer jitMarkingHeldForTest()()
 	if marking {
 		jitMarkingForTest(t)
 	}
-	r := jitRuntimeForTest(t, Config{JIT: true})
+	r := jitRuntimeForTest(t, Config{JIT: true, JITMemoryLimit: jitMarkingBudget})
 	if _, err := r.Run(compileForTest(t, src)); err != nil {
 		t.Fatal(err)
 	}
@@ -166,8 +166,7 @@ func jitMarkingRun(t *testing.T, src string, names []string, marking bool) map[s
 // and then once more counted.
 func jitMarkingRegRun(t *testing.T, src string, names []string, marking bool) map[string]jitMarkingWork {
 	t.Helper()
-	runtime.GC()
-	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	defer jitMarkingHeldForTest()()
 	if marking {
 		jitMarkingForTest(t)
 	}
@@ -178,7 +177,7 @@ func jitMarkingRegRun(t *testing.T, src string, names []string, marking bool) ma
 	SetRegTier(true)
 	defer SetRegTier(bytecode.RegDefault())
 	defer SetJITRegTier(SetJITRegTier(true))
-	r := jitRuntimeForTest(t, Config{JIT: true})
+	r := jitRuntimeForTest(t, Config{JIT: true, JITMemoryLimit: jitMarkingBudget})
 	if _, err := r.Run(prog); err != nil {
 		t.Fatal(err)
 	}
@@ -218,3 +217,38 @@ func jitMarkingRegRun(t *testing.T, src string, names []string, marking bool) ma
 // 1 GB is usual, and 5.7 GB under checkptr, which CI runs them with and which
 // keeps far less on the stack.
 const jitMarkingAllocLimit = 8 << 30
+
+// jitMarkingHeldForTest holds what else than its program decides a run's
+// work, so that jitMarkingRun's two runs differ in the marking alone, until
+// the restore it returns is called: the collector off once its cycles'
+// count (jitGCEpoch) has settled -- a finalizer counts a cycle at some time
+// after it, and a count landing in one run emptied the megamorphic cache
+// there (flush) -- and the clocks the JIT's cache ages and flushes code by
+// held (JITHoldClocks), which otherwise run on wall time: code flushed, or
+// reclaimed for room, in one run and not the other was compiled again in
+// that run alone. Run so on arm64 under emulation, two rounds of the
+// register runs differed, in the first in carried_exit_500 and
+// carried_exit_mixed by a call of Go, in the second in nothing; CI's
+// arm64 runner under checkptr had typed_sort make 372 calls of Go while
+// marking against 371, every other count the same; a flush forced into
+// typed_sort's warm-up in one run makes it 374. With the clocks held no
+// code ages, and the runtimes' JIT memory (jitMarkingBudget) holds all the
+// tests compile: at the default 8 MiB the cache, full, refused compiles
+// from the middle of the run on, typed_sort's among them.
+func jitMarkingHeldForTest() (restore func()) {
+	jitEpochOnce.Do(jitArmEpoch)
+	gc := debug.SetGCPercent(-1)
+	for epoch := jitGCEpoch.Load(); jitGCEpoch.Load() == epoch; {
+		runtime.GC()
+		time.Sleep(time.Millisecond)
+	}
+	clocks := JITHoldClocks()
+	return func() {
+		clocks()
+		debug.SetGCPercent(gc)
+	}
+}
+
+// jitMarkingBudget is the JIT's memory for jitMarkingRun's runtimes: the
+// register runs hold 12 MB of it at their end.
+const jitMarkingBudget = 256 << 20
