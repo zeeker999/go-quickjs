@@ -2342,7 +2342,10 @@ func TestJITPropertyLoopCancellation(t *testing.T) {
 // deadline begins once the loop has code: begun before, a first compile
 // slower than it -- a cold process on arm64 under emulation, or under
 // checkptr on a loaded runner -- had the context done before native code
-// was entered, which left at its first check of it, no budget spent.
+// was entered, which left at its first check of it, no budget spent. It
+// is a second, which only bounds the run: 30 ms had passed, on an
+// emulated arm64 process among thirty others, before forever's call
+// entered the code (0 entries).
 func jitCancelledNativeForTest(t *testing.T, r *Runtime, src, warm, forever string) (entries, hosts, budgets uint64) {
 	t.Helper()
 	if _, err := r.Run(compileForTest(t, src+"; "+warm)); err != nil {
@@ -2353,7 +2356,7 @@ func jitCancelledNativeForTest(t *testing.T, r *Runtime, src, warm, forever stri
 	}
 	p := compileForTest(t, forever)
 	entries0, hosts0, budgets0 := r.jit.entries, r.jit.hosts, r.jit.budgets
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	r.SetContext(ctx)
 	if _, err := r.Run(p); !errors.Is(err, context.DeadlineExceeded) {
