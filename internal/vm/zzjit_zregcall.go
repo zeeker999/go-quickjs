@@ -1517,6 +1517,29 @@ func (r *Runtime) jitRegPlainReceiver(callee Value, cl *closure, wb int) {
 	r.stack[wb+1] = this
 }
 
+// jitRegForwardReceiver writes to register 1 of the window at wb, a frame
+// of closure cl that f.apply(x, arguments) calls with its caller's
+// arguments (ssa.InlineSite's Forward), the receiver the interpreter's
+// apply gives it: x, or, for a sloppy callee, the global object for null
+// or undefined and x's wrapper for a primitive. Inlined, the callee's
+// register 1 is written only where it reads it, as for a plain call's
+// (jitRegPlainReceiver): left as the window held it, the frame Go made
+// of the level at an exit inside it was named in a stack trace as a
+// method of whatever was there, "Number.tThrow".
+func (r *Runtime) jitRegForwardReceiver(cl *closure, wb int, this Value) {
+	if cl == nil || cl.reg == nil {
+		return
+	}
+	if cl.reg.coerceThis && !this.IsObject() {
+		if this.IsNullish() {
+			this = r.globalThis
+		} else if o, err := r.toObject(this); err == nil {
+			this = Obj(o)
+		}
+	}
+	r.stack[wb+1] = this
+}
+
 // jitRegLevelAt is the level of the native call running in context i,
 // its code pinned (jitRegEntry's levels), or false where it is none of
 // register code's.

@@ -40,6 +40,11 @@ func regWrongCheck(t *testing.T, src string, cases []regWrongCase) {
 					jitMarkingForTest(t)
 				}
 				rts := regNativeRuntimes(t, src)
+				// Compiled at the first call, the warming calls' code
+				// native too, as jitRuntimeForTest's: what their native
+				// runs learn -- the targets a forwarder's calls hand
+				// their arguments to -- the code compiled next inlines.
+				rts[0].jitCallThreshold, rts[0].jitICThreshold = 1, 1
 				for _, c := range cases {
 					args := make([]Value, len(c.args))
 					for i, a := range c.args {
@@ -122,5 +127,34 @@ func TestJITRegClosureCellsByValue(t *testing.T) {
 	}`, []regWrongCase{
 		{"lc", []float64{40}, 1, "2,4,7,11,13,16,20,22,25,29,31,34,38,40,43,47,49,52,56,58,61,65,67,70,74,76,79,83,85,88,92,94,97,101,103,106,110,112,115,119"},
 		{"lc", []float64{5}, 0, "2,4,7,11,13"},
+	})
+}
+
+// The frames Go makes of inlined levels at an exit inside them are named
+// in a stack trace as the interpreter's are: by the function object the
+// code inlined each for, and, for one f.apply(x, arguments) forwards to
+// with its caller's arguments, by the receiver the interpreter's apply
+// gives it -- x, the global object for a sloppy callee's undefined, a
+// primitive's wrapper. They had read their windows' registers 0 and 1,
+// which inlined code writes only where the callee reads them, and held
+// what calls made since had left there: "Number.tThrow" for "tThrow"
+// (TestJITForwardersInlined), "at" for "fw".
+func TestJITRegForwardReceiverInStack(t *testing.T) {
+	regWrongCheck(t, `function tT(a) { if (a === 7) throw new RangeError('at ' + a); return a * 2 }
+	function tS(a) { 'use strict'; if (a === 7) throw new RangeError('s' + a); return a }
+	function fw() { return tT.apply(this, arguments) }
+	function fx() { return tT.apply(5, arguments) }
+	function fo() { return tT.apply(o, arguments) }
+	function fs() { return tS.apply('q', arguments) }
+	var o = { k: 1 }
+	function at(e) { return e.stack.split(String.fromCharCode(10)).slice(1, 3).map(l => l.trim().split(' ')[1]).join() }
+	function w(n) { let s = ''; for (let i = 0; i < n; i++) { try { s += fw(i) } catch (e) { s += e.message + at(e) } } return s }
+	function x(n) { let s = ''; for (let i = 0; i < n; i++) { try { s += fx(i) } catch (e) { s += e.message + at(e) } } return s }
+	function ob(n) { let s = ''; for (let i = 0; i < n; i++) { try { s += fo(i) } catch (e) { s += e.message + at(e) } } return s }
+	function st(n) { let s = ''; for (let i = 0; i < n; i++) { try { s += fs(i) } catch (e) { s += e.message + at(e) } } return s }`, []regWrongCase{
+		{"w", []float64{10}, 8, "024681012at 7tT,fw1618"},
+		{"x", []float64{10}, 8, "024681012at 7Number.tT,fx1618"},
+		{"ob", []float64{10}, 8, "024681012at 7Object.tT,fo1618"},
+		{"st", []float64{10}, 8, "0123456s7String.tS,fs89"},
 	})
 }

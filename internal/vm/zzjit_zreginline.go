@@ -35,9 +35,12 @@ type jitRegInlineLevel struct {
 	// holds: the construction's result where the callee returns no object.
 	construct bool
 	this      Value
-	// callee is the function its caller's call called, where it is one
-	// (the call's window's), for a plain call's receiver.
+	// callee is the function its caller's call called, where it is one,
+	// for a plain call's receiver: the object the code inlined it for
+	// (abi.Context's InlineCallee), else the call's window's. known is
+	// the former, nil where the code has none: a closure it makes.
 	callee Value
+	known  *Object
 	// threw marks the innermost level whose operation Go made at its host
 	// exit threw (jitRegInlineLeft).
 	threw bool
@@ -81,7 +84,12 @@ func (r *Runtime) jitRegInlined(idx int, f *frame, owner *jitRegEntry, at, wb in
 		if in == nil || in.reg == nil {
 			panic("vm: an inlined register callee's closure is not its caller's")
 		}
-		levels = append(levels, jitRegInlineLevel{cl: in, wb: int(c.Base), pc: int(c.ExitPC), kind: c.ExitKind, site: int64(c.ExitSite)})
+		lv := jitRegInlineLevel{cl: in, wb: int(c.Base), pc: int(c.ExitPC), kind: c.ExitKind, site: int64(c.ExitSite)}
+		if c.InlineCallee != 0 {
+			// The object, which the owner's code keeps alive.
+			lv.known = *(**Object)(unsafe.Pointer(&c.InlineCallee))
+		}
+		levels = append(levels, lv)
 		c.Live, c.ReturnTo = 0, 0
 	}
 	n := len(levels)
@@ -126,6 +134,17 @@ func (r *Runtime) jitRegInlined(idx int, f *frame, owner *jitRegEntry, at, wb in
 			// (jitRegLoopFinish's), which Go goes on calling.
 			called = r.stack[jitRegSlotIndex(owner.p, wb, owner.p.Locals+int(loop&0xffffffff)-1)+1]
 		}
+		if o := levels[k].known; o != nil {
+			// The function object the code inlined the callee for, which
+			// its call's checks found, as the stack form's frame of the
+			// level has it (jitUnwindNative's InlineCallee): the window's
+			// register, which inlined code writes only where the callee
+			// reads it, held whatever was there -- a stack trace named
+			// the frame by the function a call made after the window's
+			// last use had there.
+			called = Obj(o)
+			r.stack[levels[k].wb] = called
+		}
 		if called.IsObject() {
 			if fd := called.Object().fn(); fd != nil && fd.closure != nil && fd.closure.fn == levels[k].cl.fn && fd.closure.reg != nil {
 				levels[k].cl = fd.closure
@@ -166,6 +185,14 @@ func (r *Runtime) jitRegInlined(idx int, f *frame, owner *jitRegEntry, at, wb in
 			case bytecode.RCallW, bytecode.RCallWT:
 				// A plain call's receiver, for the frame (jitRegPlainReceiver).
 				r.jitRegPlainReceiver(x.callee, x.cl, x.wb)
+			case bytecode.RApplyArgs:
+				// f.apply(x, arguments)'s x, for the frame
+				// (jitRegForwardReceiver).
+				cwb := wb
+				if k > 0 {
+					cwb = levels[k-1].wb
+				}
+				r.jitRegForwardReceiver(x.cl, x.wb, r.stack[cwb+int(regAt(caller.code, at).B())+2])
 			}
 		}
 		lv := jitRegLevel{cl: x.cl, c: rc, wb: x.wb, construct: x.construct, inline: true}
