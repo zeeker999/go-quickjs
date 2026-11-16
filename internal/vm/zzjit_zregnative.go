@@ -9,6 +9,7 @@ import (
 	"math"
 	"slices"
 	"unsafe"
+	"weak"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit"
@@ -177,6 +178,11 @@ func (e *jitRegEntry) ipc(rpc int) int {
 	return e.p.At(uint32(rpc))
 }
 
+// jitRegEntryFixed is what the JIT counts for an entry of register code
+// apart from its code and the slices it holds: itself, and its place in
+// the cache (jitMapSlot).
+var jitRegEntryFixed = int(unsafe.Sizeof(jitRegEntry{})) + jitMapSlot
+
 // jitRegFor is cl's register code c compiled, from the cache or anew; nil
 // where the JIT has no memory for it now. An entry with no code holds the
 // refusal.
@@ -307,6 +313,12 @@ func (r *Runtime) jitRegCached(key jitKey, e *jitRegEntry) {
 		defer r.jitRegCalleesKeptNoEntries(e)
 	}
 	if life := e.life; life != nil && e.code != nil {
+		if life.regFlushed {
+			// Compiled again once hot again, its code let go of before
+			// (regLetGo), as a ghost dropped is counted (jitCompileForIn).
+			life.regFlushed = false
+			s.recompiled++
+		}
 		if life.ssaSerial++; life.ssaSerial == 1 {
 			s.compiled++
 		} else {
@@ -326,6 +338,9 @@ func (r *Runtime) jitRegCached(key jitKey, e *jitRegEntry) {
 			life.genLearned, life.loopSlow = false, false
 		}
 	}
+	// What the function learned for this compile, counted as the stack
+	// form's compile counts its entry (account).
+	s.regAccount(e.life)
 }
 
 // jitRegCompile is jitRegFor's compile (step A6 of 3a-3): LowerReg, the
@@ -728,6 +743,12 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 	// and the function the feedback asked are not.
 	e.keep = rf.fb.keep()
 	e.keep.cl, e.keep.fn, e.keep.prog, e.keep.regSeen = nil, nil, nil, nil
+	// What describes the code besides, counted with it, as the stack
+	// form's entry's measure counts what its code was compiled with
+	// (compiledBytes): the entry, what it reads by address, its tables by
+	// register pc.
+	e.bytes += jitRegEntryFixed + e.keep.compiledBytes() + jitCapBytes(e.at) + jitCapBytes(e.loops) +
+		jitCapBytes(e.unresumed) + jitCapBytes(e.unentered) + jitCapBytes(e.kept) + jitCapBytes(e.targets)
 	if JITCodeHook != nil {
 		// -jitcode's record of the code, as the stack form's compiles
 		// make it (jitInstall).
@@ -817,8 +838,12 @@ func (s *jitState) regInUseOf(e *jitRegEntry, called map[*bytecode.Function]bool
 }
 
 // regAge notes, at epoch now, which register code was used since the last
-// look (jitRegEntry's used), and lets go of what belonged to functions
-// that are gone (age).
+// look (jitRegEntry's used), and which functions' kept state
+// (regLearned) was, and counts again what each function's state holds
+// (regAccount), as age measures the stack form's entries; and lets go of
+// what belonged to functions that are gone, and of the links no code
+// calls through of functions the cache holds nothing for (regPruneLinks),
+// as age unlinks the stack form's.
 func (s *jitState) regAge(now uint64) {
 	for key, e := range s.regCache {
 		if key.gone() {
@@ -831,20 +856,151 @@ func (s *jitState) regAge(now uint64) {
 			e.seen, e.used = u, now
 		}
 	}
-	for key := range s.regLearned {
+	for key, l := range s.regLearned {
 		if key.gone() {
-			delete(s.regLearned, key)
+			s.regDropLife(key, l)
+			continue
 		}
+		if u := regLifeUses(l); u != l.seen {
+			l.seen, l.used = u, now
+		}
+		s.regAccount(l)
 	}
 	for key, l := range s.regLowered {
 		if key.gone() {
 			s.dropRegLowering(key, l)
 		}
 	}
+	s.regPruneLinks()
+}
+
+// regAccount counts what l, a function's state (regLearned), holds now
+// in what the JIT holds (regHeld), if the JIT keeps it (regCounted): its
+// entry and what it learned, the object pools' objects among it
+// (learnedBytes), as the stack form's account measures an entry. Not its
+// code, which its function's entry in regCache counts.
+func (s *jitState) regAccount(l *jitEntry) {
+	if l == nil || !l.regCounted {
+		return
+	}
+	n := jitEntryFixed + l.learnedBytes()
+	if n < l.bytes {
+		s.floorAt = 0
+	}
+	s.regHeld += n - l.bytes
+	l.bytes = n
+}
+
+// regDropLife lets go of l, the state the JIT kept for the function whose
+// key is key (regLearned): what it learned, the objects its pools and its
+// calls' targets hold among it, as the stack form's cache drops an entry
+// with no code (forget). Learning again, the function makes a new one.
+func (s *jitState) regDropLife(key jitKey, l *jitEntry) {
+	if s.regLearned[key] == l {
+		delete(s.regLearned, key)
+	}
+	if l.regCounted {
+		s.regHeld -= l.bytes
+		l.bytes, l.regCounted = 0, false
+		s.floorAt = 0
+	}
+}
+
+// regLifeUses is how often the function whose state l is ran: its runs
+// while it had no code (invoked, which its samples bring up to date,
+// jitRegArm), and its code's uses (regUses), as invoked and uses move
+// for the stack form's entry warming and with code.
+func regLifeUses(l *jitEntry) uint64 {
+	n := uint64(l.invoked) + l.starts + l.ssaStats.entries + l.goOns + l.slowCalls
+	if k := l.regLink; k != nil {
+		n += k.in
+	}
+	return n
+}
+
+// regLifeSpare reports whether l, the state of the function whose key is
+// key, is one the cache may let go of whole (regVictims, regFlush): its
+// function has no code in the cache -- code's state goes with it
+// (regLetGo) -- none is being compiled for it, and no code let go of
+// still runs it (regRetired).
+func (s *jitState) regLifeSpare(key jitKey, l *jitEntry, called map[*bytecode.Function]bool) bool {
+	if e := s.regCache[key]; e != nil && (e.code != nil || s.regInUseOf(e, called)) {
+		return false
+	}
+	if s.regPendingJobs[key] != nil {
+		return false
+	}
+	for _, e := range s.regRetired {
+		if e.key == key || e.life == l {
+			return false
+		}
+	}
+	return true
+}
+
+// regLetGoLife lets go of the state of the function whose key is key,
+// l, with what the cache holds for it -- an entry with no code, a
+// refusal -- and its programs (regLifeSpare).
+func (s *jitState) regLetGoLife(key jitKey, l *jitEntry) {
+	if e := s.regCache[key]; e != nil {
+		s.dropReg(key, e)
+	}
+	s.regDropLife(key, l)
+	if lw := s.regLowered[key]; lw != nil {
+		s.regTrimLowering(key, lw)
+	}
+}
+
+// regPruneLinks lets go of the links (regLinks) of functions the cache
+// holds nothing for that no code calls through -- the cache's, the code
+// let go of that still runs, a compile's in the background -- and no
+// compile asked for since the last look (jitLink's asked), as the stack
+// form's age drops the links neither an entry nor code has (unlink). A
+// link is made at a call Go makes for a native caller, for a generic
+// call to find the function by (regHint), and by every compile that
+// calls a function natively: kept for good, a program streaming
+// functions through the cache kept one for each it had ever called.
+// A link's slot of the hint table is freed, its function's left in it
+// (regUnhint); a call through it finds no link there, and Go makes it.
+func (s *jitState) regPruneLinks() {
+	last := s.regLinkLook
+	s.regLinkLook = s.agedAt
+	if len(s.regLinks) == 0 {
+		return
+	}
+	held := map[*jitLink]bool{}
+	hold := func(fb *jitFeedback) {
+		if fb == nil {
+			return
+		}
+		for _, l := range fb.keep().links {
+			held[l] = true
+		}
+	}
+	for _, e := range s.regCache {
+		hold(e.keep)
+		if e.osr != nil {
+			hold(e.osr.keep)
+		}
+	}
+	for _, e := range s.regRetired {
+		hold(e.keep)
+	}
+	for _, j := range s.regPendingJobs {
+		if j.rf != nil {
+			hold(j.rf.fb)
+		}
+	}
 	for key, l := range s.regLinks {
-		if key.gone() {
-			s.regUnhint(l)
-			delete(s.regLinks, key)
+		gone := key.gone()
+		if !gone && (s.regCache[key] != nil || held[l] || l.asked >= last || l.refs != 0) {
+			continue
+		}
+		l.clearCode()
+		s.regUnhint(l)
+		delete(s.regLinks, key)
+		if life := s.regLearned[key]; life != nil && life.regLink == l {
+			life.regLink = nil
 		}
 	}
 }
@@ -885,7 +1041,25 @@ func (s *jitState) regVictims(v []jitVictim, now uint64) []jitVictim {
 		if l := s.regLowered[key]; l != nil {
 			n += l.bytes - s.regLoweringSpare(key, l)
 		}
-		v = append(v, jitVictim{key: key, re: e, class: class, used: e.used, serial: uint64(e.serial), bytes: n})
+		if l := e.life; l != nil && l.regCounted {
+			// What it learned that holds objects goes with it (regForget),
+			// and a refusal's state with it whole (regLetGoLife).
+			if e.code == nil {
+				n += l.bytes
+			} else {
+				n += max(l.bytes-jitEntryFixed, 0) / 2
+			}
+		}
+		v = append(v, jitVictim{key: key, re: e, reg: true, class: class, used: e.used, serial: uint64(e.serial), bytes: n})
+	}
+	// The state kept of functions the cache holds nothing for -- warming
+	// up, or their code let go of -- as the stack form's entries with no
+	// code, which it reclaims with the refusals (listVictims).
+	for key, l := range s.regLearned {
+		if s.regCache[key] != nil || !l.regCounted || !s.regLifeSpare(key, l, called) {
+			continue
+		}
+		v = append(v, jitVictim{key: key, e: l, reg: true, class: jitVictimRefusal, used: l.used, bytes: l.bytes})
 	}
 	return v
 }
@@ -951,10 +1125,23 @@ func (s *jitState) regTrimLowering(key jitKey, l *jitLowering) {
 // victim at epoch now (reclaim).
 func (s *jitState) regReclaim(x *jitVictim, now uint64) {
 	e := x.re
+	if e == nil {
+		// A function's state alone (regVictims).
+		if l := x.e; s.regLearned[x.key] == l && s.regCache[x.key] == nil && s.regLifeSpare(x.key, l, s.regCalledFns()) {
+			s.regLetGoLife(x.key, l)
+			s.evicted++
+		}
+		return
+	}
 	if s.regCache[x.key] != e || s.regInUse(e) || (e.code != nil) != (x.class == jitVictimCode) || e.code != nil && e.used+jitCodeAge > now {
 		return
 	}
-	s.regLetGo(x.key, e)
+	if e.code == nil && e.life != nil && s.regLearned[x.key] == e.life && s.regLifeSpare(x.key, e.life, s.regCalledFns()) {
+		// A refusal, with what its function learned (regVictims).
+		s.regLetGoLife(x.key, e.life)
+	} else {
+		s.regLetGo(x.key, e)
+	}
 	if l := s.regLowered[x.key]; l != nil {
 		s.dropRegLowering(x.key, l)
 	}
@@ -962,19 +1149,91 @@ func (s *jitState) regReclaim(x *jitVictim, now uint64) {
 }
 
 // regFlush drops, at the flush's tick, the register code unused since the
-// flush's last look, not young, not in use (flush); and lets go of the
-// programs no compile asked for since its last look (regTrimLowering), as
-// the flush ages code: a callee's program for inlining, which no caller is
-// compiled with any longer, had been kept for as long as the callee's
-// code, the callee warm or not.
+// flush's last look, not young, not in use (flush): used are the code that
+// ran, by its uses, and the callees of code used -- inlined there, or
+// called natively -- whose own uses do not count what runs of them there,
+// and whose state what the caller compiles again learns from, as flush
+// finds the stack form's. It lets go of the programs no compile asked for
+// since its last look (regTrimLowering), as the flush ages code: a
+// callee's program for inlining, which no caller is compiled with any
+// longer, had been kept for as long as the callee's code, the callee warm
+// or not. And it lets go of all the JIT keeps for the functions of a realm
+// none of whose code was used and none of whose functions ran since its
+// last look, but their code, which goes as any code does -- what they
+// learned, their entries with no code, their programs -- as jitFlushRealms
+// drops the stack form's entries with no code of such a realm: a realm a
+// host dropped is reachable from them, what its functions learned holding
+// its objects, and only so let go of.
 func (s *jitState) regFlush(tick, now uint64) {
 	called := s.regCalledFns()
+	cur := s.rt.jitRealmKey()
+	live := map[weak.Pointer[Realm]]bool{cur: true}
+	used := map[jitKey]bool{}
+	var work []jitKey
 	for key, e := range s.regCache {
+		if key.realm != cur {
+			s.manyRealms = true
+		}
 		if e.code == nil {
 			continue
 		}
 		if u := s.regUses(e); u != e.flushSeen || e.flushAt == 0 {
 			e.flushSeen, e.flushAt = u, tick+1
+			used[key] = true
+			work = append(work, key)
+		}
+	}
+	for key, l := range s.regLearned {
+		if key.realm != cur {
+			s.manyRealms = true
+		}
+		if u := regLifeUses(l); u != l.flushSeen {
+			l.flushSeen = u
+			live[key.realm] = true
+		}
+	}
+	mark := func(key jitKey) {
+		if !used[key] {
+			used[key] = true
+			work = append(work, key)
+		}
+	}
+	markClosure := func(cl *closure) {
+		if cl != nil {
+			mark(s.regKeyOfClosure(cl))
+		}
+	}
+	markFeedback := func(fb *jitFeedback) {
+		if fb == nil {
+			return
+		}
+		for _, cl := range fb.inlined {
+			markClosure(cl)
+		}
+		for _, l := range fb.links {
+			mark(l.key)
+		}
+	}
+	for len(work) != 0 {
+		key := work[len(work)-1]
+		work = work[:len(work)-1]
+		live[key.realm] = true
+		if e := s.regCache[key]; e != nil {
+			markFeedback(e.keep)
+			if e.osr != nil {
+				markFeedback(e.osr.keep)
+			}
+		}
+		if l := s.regLearned[key]; l != nil {
+			for _, calls := range [2][]jitInline{l.inlines, l.nativeCalls} {
+				for _, x := range calls {
+					markClosure(x.cl)
+				}
+			}
+		}
+	}
+	for key, e := range s.regCache {
+		if e.code == nil || used[key] {
 			continue
 		}
 		if e.used+jitCodeAge > now || s.regInUseOf(e, called) {
@@ -985,6 +1244,20 @@ func (s *jitState) regFlush(tick, now uint64) {
 			s.dropRegLowering(key, l)
 		}
 		s.flushed++
+	}
+	// The realms none of whose functions ran: what the JIT keeps of their
+	// functions with no code.
+	for key, l := range s.regLearned {
+		if live[key.realm] || l.used+jitCodeAge > now || !s.regLifeSpare(key, l, called) {
+			continue
+		}
+		s.regLetGoLife(key, l)
+	}
+	for key, e := range s.regCache {
+		if live[key.realm] || e.code != nil || e.life != nil || s.regInUseOf(e, called) {
+			continue
+		}
+		s.dropReg(key, e)
 	}
 	// Programs asked for since the last look were found used then
 	// (jitLowering's used, the cache's age at the ask, regLowering).
@@ -1000,16 +1273,35 @@ func (s *jitState) regFlush(tick, now uint64) {
 	}
 }
 
+// regKeyOfClosure is the key of cl's function's code in cl's realm, the
+// current one's where it has none: the key its code is cached by.
+func (s *jitState) regKeyOfClosure(cl *closure) jitKey {
+	if cc := cl.closureCode; cc != nil && cc.jitRegKey.Pointer != (weak.Pointer[bytecode.Function]{}) {
+		return cc.jitRegKey
+	}
+	re := cl.realm
+	if re == nil {
+		return s.rt.jitKeyOf(cl.fn)
+	}
+	if re.jitSelf == (weak.Pointer[Realm]{}) {
+		re.jitSelf = weak.Make(re)
+	}
+	return jitKey{weak.Make(cl.fn), re.jitSelf}
+}
+
 // regLetGo drops e, the code of the function whose key is key, from the
 // cache for room or for going unused: the function warms up anew, and
 // compiled again once it is hot is compiled with what it had learned of
 // its sites -- what holds no object (regForget), as the stack form's
 // cache keeps of an entry it drops so (ghost, rememberFlushed).
 func (s *jitState) regLetGo(key jitKey, e *jitRegEntry) {
+	had := e.code != nil
 	s.dropReg(key, e)
 	if l := e.life; l != nil {
 		l.invalid, l.warming, l.reopt, l.learning = false, false, false, false
 		regForget(l)
+		l.regFlushed = l.regFlushed || had
+		s.regAccount(l)
 	}
 }
 

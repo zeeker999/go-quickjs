@@ -367,6 +367,10 @@ func (r *Runtime) jitRegInstall(j *jitRegJob) {
 		return
 	}
 	r.jitRegCached(j.key, e)
+	// No more than the budget held after, as after a compile on the spot
+	// (jitRegCompileFor): what the code describes, and what its callees
+	// learned of it as callers joined them, count past the room it asked.
+	defer s.settle()
 	if cc := j.cl.closureCode; cc != nil && j.cl.reg == j.c {
 		switch {
 		case e.code == nil:

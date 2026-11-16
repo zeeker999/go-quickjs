@@ -895,6 +895,14 @@ type jitEntry struct {
 	// nativeCallers are the stack form's. Keys, which hold no function
 	// alive: what a caller learned outlives its code.
 	regCallers []jitKey
+	// regCounted marks, for a function's register code, the state the
+	// JIT keeps for it (jitState's regLearned), whose bytes (bytes) count
+	// in what the JIT holds (regHeld) as a stack form's entry's measure
+	// counts what it learned (regAccount); regFlushed marks one whose
+	// code the cache let go of (regLetGo), whose next compile is one
+	// again of code dropped (jitState's recompiled), as a ghost's
+	// dropped marks the stack form's.
+	regCounted, regFlushed bool
 	// inlinePending marks calls found to inline since the code was
 	// compiled (jitLearned's callSites), which it is compiled again for
 	// once the calls around them have been seen.
@@ -1041,6 +1049,11 @@ type jitLink struct {
 	// hint is, for a register link (regLinkOf), its slot of the hint
 	// table (regHint), which generic calls find it by; 0 for none.
 	hint uint32
+	// asked is, for a register link, the cache's age (agedAt) when a
+	// caller last asked for it (regLinkOf): one asked since the cache's
+	// last look at the links may be a compile's under way, whose code
+	// calls through it once placed, and stays (regAge).
+	asked uint64
 	// gen is, for a generator's function, its code's generator entry,
 	// where a loop's step that resumes one natively jumps (ssa.CallSite's
 	// Gens), or 0 while there is none it may: 0 whenever entry is, for
@@ -1106,7 +1119,10 @@ type jitState struct {
 	// the entries kept for a frame (jitRegCalleesKeptNoEntries), which ask
 	// for no more of them, as seeding is the stack form's.
 	regKeptSeeding bool
-	// regHeld is what the register code in regCache takes (held).
+	// regHeld is what the register code in regCache takes (held), and
+	// what the JIT keeps for each function besides, its learned state in
+	// regLearned (regAccount), as the stack form's entryBytes counts its
+	// entries' code and what they learned.
 	regHeld int
 	// regLearned is what the code made from a function's register code
 	// learned at its exits, by the function's key, kept across its
@@ -1125,6 +1141,10 @@ type jitState struct {
 	// regLowered, before which a program not asked for since is let go of
 	// (regFlush).
 	regLowerLook uint64
+	// regLinkLook is the cache's age at its last look at regLinks, before
+	// which a link no code calls through and no compile asked for since,
+	// of a function the cache holds nothing for, is let go of (regAge).
+	regLinkLook uint64
 	// regHostOps counts register code's host exits by the register
 	// instruction Go ran whole, by its operation, for tests
 	// (RegNativeStats' HostOps): an array, not a map of the operation's
@@ -2035,7 +2055,7 @@ func (s *jitState) reclaim(x *jitVictim, now uint64) bool {
 			}
 		}
 	default:
-		if x.re != nil {
+		if x.reg {
 			s.regReclaim(x, now)
 			return true
 		}

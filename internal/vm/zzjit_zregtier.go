@@ -767,8 +767,9 @@ func (s *jitState) regLearnedOf(key jitKey) *jitEntry {
 	if s.regLearned == nil {
 		s.regLearned = map[jitKey]*jitEntry{}
 	}
-	l := &jitEntry{jitLearned: &jitLearned{reg: true, regLink: s.regLinks[key]}}
+	l := &jitEntry{jitLearned: &jitLearned{reg: true, regLink: s.regLinks[key]}, used: s.epoch(), regCounted: true}
 	s.regLearned[key] = l
+	s.regAccount(l)
 	return l
 }
 
