@@ -53,6 +53,7 @@ var (
 	atomPrototype, propOddKey int32
 	hasCacheBits              uint8
 	hasCacheMul               uint64
+	hasCacheKeyMul            uint64
 	// keySlotMul is keySlot's multiplier, and intStringsLen how many
 	// integers' strings the runtime keeps (intStrings).
 	keySlotMul, intStringsLen uint64
@@ -114,6 +115,7 @@ func loadConsts() {
 		*c.p = int32(k(c.name))
 	}
 	hasCacheBits, hasCacheMul = uint8(k("hasCacheBits")), k("hasCacheMul")
+	hasCacheKeyMul = k("hasCacheKeyMul")
 	keySlotMul, intStringsLen = k("keySlotMul"), k("intStringsLen")
 	rtBase, ccBase = k("rtBase"), k("ccBase")
 	for _, c := range []struct {
