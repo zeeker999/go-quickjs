@@ -374,6 +374,10 @@ type Runtime struct {
 	// cbFree is the built-ins' callbacks not in use, a list by their next
 	// (regCallbackOf).
 	cbFree *regCallback
+	// concats is the memo of short concatenations (zzz_concatmemo.go),
+	// made once concatCount of them have been made without it.
+	concats     *concatMemo
+	concatCount uint32
 	// jitFields is the optional native tier's state, empty in builds
 	// without it. It comes after everything the interpreter reads, so that
 	// a build with the tier moves none of their offsets, and before the last

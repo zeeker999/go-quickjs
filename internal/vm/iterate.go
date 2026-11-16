@@ -946,6 +946,11 @@ func (r *Runtime) copyDataProps(target *Object, src Value) error {
 // objectRest builds the rest object of an object destructuring pattern: every
 // own enumerable property of the source except those already bound.
 func (r *Runtime) objectRest(src Value, excluded []Value) (Value, error) {
+	if src.IsObject() {
+		if out, ok := r.restShaped(src.Object(), excluded); ok {
+			return Obj(out), nil
+		}
+	}
 	out := newObject(r.proto.object, ClassObject)
 	if src.IsNullish() {
 		return Obj(out), nil
@@ -988,6 +993,35 @@ func (r *Runtime) objectRest(src Value, excluded []Value) (Value, error) {
 		}
 	}
 	return Obj(out), nil
+}
+
+// restShaped is objectRest of o, a plain object of a shared layout whose
+// enumerable own keys are all data under string keys (shapeKeys), less the
+// keys excluded, strings, which converting runs nothing: its values read
+// where the layout has them, in its keys' order, each appended to the rest
+// object, made with room for them all, with no key looked up on o and
+// none asked whether it is enumerable -- or false, for objectRest to make.
+func (r *Runtime) restShaped(o *Object, excluded []Value) (*Object, bool) {
+	c := r.shapeKeys(o)
+	if c == nil || !c.copyable || len(excluded) > 8 {
+		return nil, false
+	}
+	var skip [8]Atom
+	for i, k := range excluded {
+		if !k.IsString() {
+			return nil, false
+		}
+		skip[i] = r.atoms.intern(k.String().Go())
+	}
+	out := newLiteralObject(r.proto.object, ClassObject, max(len(c.atoms)-len(excluded), 1))
+	for i, k := range c.atoms {
+		if slices.Contains(skip[:len(excluded)], k) {
+			continue
+		}
+		// A key of its own, none before it the same.
+		out.appendProp(Property{key: k, flags: propDefault, value: o.vals()[c.slots[i]]})
+	}
+	return out, true
 }
 
 // argumentsData holds what a mapped arguments object aliases.

@@ -225,7 +225,7 @@ func (r *Runtime) initObjectBuiltins() {
 		default:
 			return Undefined, rt.throwTypeError("Object.create requires an object or null")
 		}
-		o := newObject(proto, ClassObject)
+		o := newCreated(proto)
 		if props := arg(args, 1); !props.IsUndefined() {
 			if err := rt.defineProperties(o, props); err != nil {
 				return Undefined, err
@@ -1238,6 +1238,9 @@ func (r *Runtime) initArrayBuiltins() {
 	})
 
 	r.defMethod(p, "slice", 2, func(rt *Runtime, this Value, args []Value) (Value, error) {
+		if v, ok := rt.sliceDense(this, args); ok {
+			return v, nil
+		}
 		a, err := rt.viewArrayLike(this)
 		if err != nil {
 			return Undefined, err
