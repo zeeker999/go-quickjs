@@ -62,12 +62,12 @@ import (
 //	}
 //
 // esc runs between out's read and the addition, and what it does to out is
-// what would make growing it wrong: the old value is on the stack, and must
+// what would make growing it wrong: the old value has been read, and must
 // not change. But esc cannot reach a local no function mentions. So a local
 // append (localAppend) asks that of the name, and that the right side's own
 // text does not mention it, and it is safe whatever the right side runs. It
-// is an add marked bytecode.AddOwned, which fuses with nothing before it, for
-// any right side to come before.
+// is an add into the binding's own register, which grows the string in
+// place (regcomp's ownCands).
 //
 // What a sum must not pay for: every read of a binding appended to has a
 // str_freeze, which would stand between its read and what fuses with it, and

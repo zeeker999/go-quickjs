@@ -76,8 +76,8 @@ func (c *compiler) compileDispose(n *ast.DisposeStmt) {
 	c.handlerDepth--
 }
 
-// addDisposable adds the value on top of the stack, which stays there, to the
-// innermost scope's resources.
+// addDisposable walks the addition of a declaration's value to the innermost
+// scope's resources.
 func (c *compiler) addDisposable(kind ast.DeclKind, pos int) {
 	if len(c.disposeScopes) == 0 {
 		c.errorf(pos, "internal error: a using declaration outside a scope that disposes")

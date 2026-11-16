@@ -213,11 +213,11 @@ func declaredNames(s ast.Stmt) []string {
 	return out
 }
 
-// compileImportDecl emits nothing: the bindings are installed by the linker
+// compileImportDecl walks nothing: the bindings are installed by the linker
 // before the body runs.
 func (c *compiler) compileImportDecl(n *ast.ImportDecl) {}
 
-// compileExportDecl emits the declaration an export wraps, if any.
+// compileExportDecl walks the declaration an export wraps, if any.
 func (c *compiler) compileExportDecl(n *ast.ExportDecl) {
 	switch {
 	case n.Default:

@@ -10,9 +10,10 @@ import (
 // Strict code promises that a call in tail position -- the last thing a
 // function does before returning what the call returns -- does not keep the
 // caller's frame alive, so that recursion through tail calls runs in constant
-// space. The compiler finds those calls and emits them as tail calls; the
-// interpreter gives up the frame when it can and makes an ordinary call when
-// it cannot, which is always safe, since a return follows either way.
+// space. The compiler finds those calls and records them (regcomp.Record's
+// Tails), which the register code makes tail calls of; the interpreter gives
+// up the frame when it can and makes an ordinary call when it cannot, which
+// is always safe, since a return follows either way.
 //
 // A call is in tail position when it is what a return statement returns,
 // directly or as the branch of a conditional, the right of a logical operator

@@ -10,8 +10,8 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/jsnum"
 )
 
-// compileFunctionLiteral compiles a nested function and emits the instruction
-// that builds a closure from it. It returns the function's constant.
+// compileFunctionLiteral walks a nested function, its template a constant of
+// this one's, which it returns.
 func (c *compiler) compileFunctionLiteral(fn *ast.FuncLit, inferredName string) uint32 {
 	trace := c.traceName
 	c.traceName = ""
@@ -258,7 +258,7 @@ func (c *compiler) bindSelfName(fn *ast.FuncLit) {
 	c.markInitialized(c.selfName)
 }
 
-// bindParameters declares the parameter slots and emits the prologue for
+// bindParameters declares the parameter slots and walks the prologue of
 // defaults, destructuring and the rest parameter.
 func (c *compiler) bindParameters(fn *ast.FuncLit, materialize func(), wantArgs bool) {
 	simple := true
@@ -425,8 +425,8 @@ func isIdent(e ast.Expr) bool {
 // Destructuring
 // ---------------------------------------------------------------------------
 
-// compileDestructuring unpacks the value on top of the stack into a binding
-// pattern, consuming it.
+// compileDestructuring walks the unpacking of a value into a binding
+// pattern.
 func (c *compiler) compileDestructuring(target ast.Expr, kind ast.DeclKind) {
 	switch pat := target.(type) {
 	case *ast.Ident:
@@ -539,8 +539,8 @@ func (c *compiler) prepareRef(leaf ast.Expr, declaring bool, kind ast.DeclKind) 
 		return ref
 	}
 	if _, isSuper := m.Object.(*ast.Super); isSuper {
-		// super.x is resolved against the home object rather than a value on
-		// the stack, so there is nothing to evaluate ahead of time.
+		// super.x is resolved against the home object, so there is nothing
+		// to evaluate ahead of time.
 		return ref
 	}
 	ref.member = m
@@ -561,8 +561,8 @@ func (c *compiler) prepareRef(leaf ast.Expr, declaring bool, kind ast.DeclKind) 
 	return ref
 }
 
-// storeRef puts the value on top of the stack into a pattern's leaf, consuming
-// both it and whatever prepareRef pushed.
+// storeRef walks the store of a value into a pattern's leaf, whose
+// reference prepareRef evaluated.
 func (c *compiler) storeRef(ref patternRef, kind ast.DeclKind, declaring bool) {
 	if ref.member != nil {
 		switch {
@@ -674,8 +674,7 @@ func (c *compiler) bindPatternLeaf(leaf ast.Expr, kind ast.DeclKind, declaring b
 	}
 }
 
-// applyDefault replaces the value on the stack with a default when it is
-// undefined.
+// applyDefault walks a default, which replaces a value that is undefined.
 func (c *compiler) applyDefault(def ast.Expr, name string) {
 	c.compileExprNamed(def, name)
 }
@@ -821,9 +820,7 @@ func (c *compiler) compileClass(cls *ast.ClassLit, inferredName string) {
 //
 // Each is an immediately invoked method of the class. That is what makes `this`
 // the constructor -- an initializer may read one static field to compute the
-// next -- and what gives it a home object for `super.x`. OpCallMethod takes the
-// receiver from beneath the callee, so the constructor is duplicated into that
-// slot each time.
+// next -- and what gives it a home object for `super.x`.
 func (c *compiler) compileStaticElements(cls *ast.ClassLit, keyNames []string) []regcomp.ClassStatic {
 	type element struct {
 		pos   int
@@ -902,33 +899,16 @@ func (c *compiler) compileClassMember(m ast.Property, fn *ast.FuncLit, installNa
 	}
 
 	// A computed key is evaluated before the method it names, which is
-	// observable when it has a side effect, and leaves the stack in the
-	// [target, key, value] order the define instructions expect.
+	// observable when it has a side effect.
 	if m.Computed {
 		c.compileExpr(m.Key)
-		// The key now sits between the target and the function.
 	}
 	k := c.compileMethodValue(fn, methodName)
-	// The home object is what `super` resolves against, so a method has to
-	// remember the object it was defined on.
-	c.emitClassMemberDefine(m, key)
-	return k
-}
-
-// emitClassMemberDefine installs a member whose value is on the stack above
-// its target.
-func (c *compiler) emitClassMemberDefine(m ast.Property, key string) {
-	if m.Computed {
-		return
-	}
-	// A class method is not enumerable, unlike an object literal's, and a
-	// private one is additionally hidden from every reflective operation. Only
-	// a static private member reaches here; an instance one belongs to the
-	// instance and is handled above.
-	if pn, private := m.Key.(*ast.PrivateName); private {
+	if pn, private := m.Key.(*ast.PrivateName); private && !m.Computed {
+		// A static private member: its name resolved as it is defined.
 		c.privateName(pn, m.Start)
-		return
 	}
+	return k
 }
 
 // compilePrivateMethod adds one private instance method or accessor to the list
@@ -1097,7 +1077,7 @@ func topLevelLexicalNames(body []ast.Stmt) []string {
 	return out
 }
 
-// compileMethodValue emits a method's closure.
+// compileMethodValue walks a method's function, whose constant it returns.
 func (c *compiler) compileMethodValue(fn *ast.FuncLit, name string) uint32 {
 	lit := *fn
 	lit.Name = nil

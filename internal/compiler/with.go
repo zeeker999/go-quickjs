@@ -42,16 +42,16 @@ func (c *compiler) compileWith(n *ast.WithStmt) {
 	c.popExit()
 }
 
-// withProbe emits the probe that precedes a name's static instruction, and
-// returns the jump to patch once that instruction has been emitted.
+// withProbe notes the probe op that precedes a name's static access (regWith),
+// and returns its handle, 0.
 //
 // It returns -1 where there is nothing to probe: outside a `with` body, or for
 // a name whose binding was declared inside every enclosing one, which no
 // `with` object can shadow.
 //
-// The operand packs the name index with how many of the innermost objects to
-// consult, since a binding declared between two `with` statements is shadowed
-// by the inner one and not by the outer.
+// A probe consults the innermost objects as many as withLimit says, since a
+// binding declared between two `with` statements is shadowed by the inner one
+// and not by the outer.
 func (c *compiler) withProbe(op bytecode.Op, name string) int {
 	limit := c.withLimit(name)
 	if limit == 0 {
@@ -123,9 +123,8 @@ func (c *compiler) checkGlobalRef(n *ast.Ident) bool {
 // running still leaves the write on the object rather than on the binding the
 // name would otherwise mean.
 //
-// What it leaves on the stack is a base beneath the value read: the object the
-// name resolved to, or undefined when it resolved to a binding. endWithRef
-// reads that to decide where the write goes.
+// What the read resolved to -- an object, or a binding -- is where endWithRef's
+// write goes.
 func (c *compiler) beginWithRef(n *ast.Ident) {
 	limit := c.withLimit(n.Name)
 	probe := c.emitProbe(bytecode.OpWithGetUnder, n.Name, limit, 0xFFFFFFFF)
@@ -141,10 +140,8 @@ func (c *compiler) resolveWithRef(n *ast.Ident) {
 	c.regWith(n, c.emitProbe(bytecode.OpWithResolve, n.Name, limit, 0))
 }
 
-// endWithRef writes the value on top back through the reference beginWithRef
-// resolved, leaving the value and removing the base.
+// endWithRef walks the write back through the reference beginWithRef
+// resolved: the static store, where the read came from a binding.
 func (c *compiler) endWithRef(n *ast.Ident) {
-	// The read came from a binding, so the base goes and the static store
-	// stands in for the write.
 	c.assignToIdentStatic(n, false)
 }

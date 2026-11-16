@@ -164,7 +164,7 @@ func comparisonOpcode(op string) (bytecode.Op, bool) {
 	return 0, false
 }
 
-// compileExpr emits code leaving the expression's value on the stack.
+// compileExpr walks an expression.
 func (c *compiler) compileExpr(e ast.Expr) {
 	c.compileExprNamed(e, "")
 }
@@ -180,7 +180,6 @@ func (c *compiler) compileExprNamed(e ast.Expr, name string) {
 
 	switch n := e.(type) {
 	case *ast.NumberLit:
-		c.compileNumber(n.Value)
 
 	case *ast.StringLit:
 
@@ -298,29 +297,6 @@ func (c *compiler) compileExprNamed(e ast.Expr, name string) {
 	}
 }
 
-// compileNumber emits the cheapest push for a numeric literal.
-func (c *compiler) compileNumber(v float64) {
-	// Small integers are encoded in the instruction, avoiding a constant-pool
-	// entry and the indirection to read it.
-	if i := int32(v); float64(i) == v && !isNegZero(v) {
-		return
-	}
-}
-
-// compileConst pushes v, a value the compile knows (fold), as the
-// literal of it would be.
-func (c *compiler) compileConst(v fold.Const) {
-	switch v.Kind {
-	case fold.Number:
-		c.compileNumber(v.Num)
-	case fold.String:
-	case fold.Bool:
-	case fold.Null:
-	case fold.BigInt:
-	default:
-	}
-}
-
 // foldsVoid reports whether void's operand e is a value the compile
 // knows, which runs nothing and need not be evaluated: a literal, as void
 // 0 always was, or an operator that folds (fold).
@@ -337,7 +313,7 @@ func foldsVoid(e ast.Expr) bool {
 // path because it would be re-materialized as +0.
 func isNegZero(v float64) bool { return v == 0 && 1/v < 0 }
 
-// compileIdentRead emits a read of a variable.
+// compileIdentRead walks a read of a variable, recording its resolution.
 func (c *compiler) compileIdentRead(n *ast.Ident) {
 	// Inside a `with` body the object may answer instead of the binding.
 	probe := c.withProbe(bytecode.OpWithGet, n.Name)
@@ -428,7 +404,7 @@ func (c *compiler) compileTemplate(n *ast.TemplateLit) {
 
 // maxChainParts is the most parts compileStringChain joins in one concat. A
 // longer chain is joined a run at a time, each run's string the first part
-// of the next, so that its operands never pile up on the stack.
+// of the next.
 const maxChainParts = 32
 
 // compileStringChain compiles a + b + c + ..., once a string literal among
@@ -568,8 +544,6 @@ func (c *compiler) compileTaggedTemplate(n *ast.TaggedTemplate) {
 				c.compileExpr(m.Property)
 			default:
 				if pn, private := m.Property.(*ast.PrivateName); private {
-					// The receiver stays beneath the method, as
-					// OpGetPropThis leaves it.
 					c.privateName(pn, int(m.Start))
 					break
 				}
@@ -597,7 +571,7 @@ func (c *compiler) noteTail(n ast.Expr) {
 	c.reg.NoteTail(n)
 }
 
-// compileTemplateArguments pushes the strings object and the substitutions.
+// compileTemplateArguments walks a tagged template's substitutions.
 func (c *compiler) compileTemplateArguments(idx uint32, q *ast.TemplateLit) int {
 	for _, e := range q.Exprs {
 		c.compileExpr(e)
@@ -629,13 +603,9 @@ func (c *compiler) templateIdx(q *ast.TemplateLit) uint32 {
 
 func (c *compiler) compileArrayLit(n *ast.ArrayLit) {
 	trace := c.traceIn
-	// Without spread the whole literal is built in one instruction from
-	// values already on the stack. A hole is the uninitialized value, which
-	// is what an array's storage holds for one: it advances the length
-	// without making a property, which is what makes `1 in [1,,3]` false
-	// and what the iteration methods skip. As one instruction a literal
-	// with holes is the JIT's to make too (ir.ArrayLiteral), where a push
-	// of each element was not.
+	// A literal without spread is made in one operation, a hole the
+	// uninitialized value, which advances the length without making a
+	// property: `1 in [1,,3]` is false, and the iteration methods skip it.
 	simple := true
 	for _, el := range n.Elements {
 		if _, isSpread := el.(*ast.Spread); isSpread {
@@ -754,8 +724,7 @@ func (c *compiler) compileUnary(n *ast.Unary) {
 		// Of a value the compile knows -- typeof 1, !void 0; the parser
 		// has folded ! of a literal -- the literal of its value, as the
 		// register form compiles it too (fold.Value).
-		if v, ok := fold.Value(n); ok {
-			c.compileConst(v)
+		if _, ok := fold.Value(n); ok {
 			return
 		}
 	}
@@ -872,8 +841,8 @@ func (c *compiler) compileUnary(n *ast.Unary) {
 	}
 }
 
-// compileLocalUpdate emits the whole of `i++` on a plain local as a single
-// instruction, and reports whether it could.
+// compileLocalUpdate walks `i++` on a plain local, and reports whether it is
+// one.
 //
 // It is what the counted loop is made of, and the four instructions it replaces
 // -- read, coerce, add, store -- are four dispatches around one addition.
@@ -938,11 +907,8 @@ func (c *compiler) compileUpdateKeep(n *ast.Update, keep bool) {
 	case *ast.Member:
 		if _, isSuper := target.Object.(*ast.Super); isSuper {
 			c.noteSuper()
-			// A super reference has no object on the stack: the read starts at
-			// the home object's prototype and the write lands on `this`.
-			// The key, when there is one, stays beneath the value for the
-			// store; without one there is nothing under it, so the copy that
-			// carries the expression's result is a plain duplicate.
+			// A super reference has no object: the read starts at the home
+			// object's prototype and the write lands on `this`.
 			if target.Computed {
 				c.compileExpr(target.Property)
 			} else {
@@ -1040,7 +1006,7 @@ func (c *compiler) compileConditional(n *ast.Conditional) {
 	c.compileExpr(n.Alt)
 }
 
-// compileMemberKey pushes a member expression's key.
+// compileMemberKey walks a member expression's key.
 func (c *compiler) compileMemberKey(m *ast.Member) {
 	if m.Computed {
 		c.compileExpr(m.Property)
@@ -1158,8 +1124,8 @@ func (c *compiler) compileCall(n *ast.Call) {
 		c.compileSpreadCall(n)
 		return
 	}
-	// A method call keeps the receiver on the stack so that `this` binds to it
-	// without evaluating the object expression twice.
+	// A method call binds `this` to the receiver without evaluating the
+	// object expression twice.
 	if m, ok := n.Callee.(*ast.Member); ok && !m.Optional {
 		c.compileExpr(m.Object)
 		if m.Computed {
@@ -1219,7 +1185,7 @@ func (c *compiler) compileImport(n *ast.Call, phase uint32) {
 	c.compileArguments(n.Args)
 }
 
-// compileArguments pushes a call's arguments and returns how many there are.
+// compileArguments walks a call's arguments and returns how many there are.
 func (c *compiler) compileArguments(args []ast.Expr) int {
 	for _, a := range args {
 		c.compileExpr(a)
@@ -1273,8 +1239,8 @@ func (c *compiler) compileSpreadCall(n *ast.Call) {
 			return
 		}
 		if _, isSuper := m.Object.(*ast.Super); isSuper {
-			// A super reference has no object on the stack: the method comes
-			// from the home object's prototype and the receiver is `this`.
+			// A super reference has no object: the method comes from the
+			// home object's prototype and the receiver is `this`.
 			c.compileSuperMemberGet(m)
 			c.compileSpreadArguments(n.Args)
 			return
@@ -1558,7 +1524,7 @@ func (c *compiler) compileMemberUpdate(m *ast.Member, emitValue func()) {
 	emitValue()
 }
 
-// compileReadTarget pushes the current value of an assignment target.
+// compileReadTarget walks the read of an assignment target's current value.
 func (c *compiler) compileReadTarget(target ast.Expr) {
 	switch t := target.(type) {
 	case *ast.Ident:
@@ -1638,9 +1604,7 @@ func (c *compiler) assignToIdentStatic(t *ast.Ident, initializing bool) {
 	}
 }
 
-// assignTo stores the value on top of the stack into a target, leaving the
-// value on the stack as the expression's result.
-// compileCallTarget compiles a call that sloppy code assigned to: the call is
+// compileCallTarget walks a call that sloppy code assigned to: the call is
 // made, and then the assignment is a ReferenceError. The call's value stands
 // for the expression's, on the path nothing reaches. Strict code gets here
 // only as V8 parses it, and V8 makes the call there too.
@@ -1648,6 +1612,7 @@ func (c *compiler) compileCallTarget(call *ast.Call, pos int) {
 	c.compileExpr(call)
 }
 
+// assignTo walks the store of a value into a target.
 func (c *compiler) assignTo(target ast.Expr, initializing bool) {
 	switch t := target.(type) {
 	case *ast.Call:
@@ -1684,7 +1649,7 @@ func (c *compiler) assignTo(target ast.Expr, initializing bool) {
 
 	case *ast.AssignPattern:
 		// `[a = 1]` as an assignment target: the default applies to the value
-		// on the stack before it reaches the reference underneath.
+		// before it reaches the reference.
 		c.applyDefault(t.Default, nameOf(t.Target))
 		c.assignTo(t.Target, initializing)
 
@@ -1702,21 +1667,13 @@ func isPattern(e ast.Expr) bool {
 	return false
 }
 
-// compileMemberStore compiles `obj.p = value` and `obj[k] = value`, evaluating
-// the object, then the key, then the value, and leaving the assigned value on
-// the stack as the expression's result.
-//
-// The order matters: each part may have side effects, and the specification
-// fixes the order in which they happen.
-// compileMemberStore assigns to a property, leaving the value as the
-// expression's result -- unless keep is false, which an assignment in effect
-// position asks for: the copy that carries the result out is an instruction,
-// and so is the drop that would discard it.
+// compileMemberStore walks `obj.p = value` and `obj[k] = value`: the object,
+// then the key, then the value, the order the specification fixes.
 func (c *compiler) compileMemberStore(m *ast.Member, emitValue func(), keep bool) {
 	if _, isSuper := m.Object.(*ast.Super); isSuper {
 		c.noteSuper()
-		// A super reference has no object on the stack: the lookup starts at
-		// the home object's prototype, and the receiver is `this`.
+		// A super reference has no object: the lookup starts at the home
+		// object's prototype, and the receiver is `this`.
 		if m.Computed {
 			c.compileExpr(m.Property)
 			emitValue()
@@ -1743,17 +1700,13 @@ func (c *compiler) compileMemberStore(m *ast.Member, emitValue func(), keep bool
 	emitValue()
 }
 
-// compileMemberStoreFromValue stores a value that is already on the stack into
-// a member target, which is what a compound assignment needs after combining.
+// compileMemberStoreFromValue walks the store of a value made before the
+// member target's parts, which is what a pattern's leaf needs.
 func (c *compiler) compileMemberStoreFromValue(m *ast.Member) {
 	if _, isSuper := m.Object.(*ast.Super); isSuper {
 		c.noteSuper()
-		// The value is on top and the key, if computed, has to go under it.
 		if m.Computed {
-			// The value is already on the stack, so the base and the key go
-			// above it and it is swapped back on top.
 			c.compileExpr(m.Property)
-			return
 		}
 		return
 	}
@@ -1762,15 +1715,10 @@ func (c *compiler) compileMemberStoreFromValue(m *ast.Member) {
 		c.compileExpr(m.Object)
 		return
 	}
-	// The value is on top; the object and key have to go beneath it.
-	if m.Computed {
-		c.compileExpr(m.Object)
-		c.compileExpr(m.Property)
-		// value obj key -> obj key value
-		return
-	}
 	c.compileExpr(m.Object)
-	// value obj -> obj value
+	if m.Computed {
+		c.compileExpr(m.Property)
+	}
 }
 
 // compileSuperMemberGet reads a property through super, which looks it up on
@@ -1787,7 +1735,7 @@ func (c *compiler) compileSuperMemberGet(m *ast.Member) {
 	}
 }
 
-// compileYield emits a yield expression.
+// compileYield walks a yield expression.
 //
 // `yield*` is compiled as a loop that drains the operand's iterator, forwarding
 // each value out and each sent value back in, which is what delegation means.
@@ -1820,11 +1768,9 @@ func (c *compiler) compileYield(n *ast.Yield) {
 	c.declare(fmt.Sprintf("%%ys%d", *c.hiddenCount), bindVar, n.Start)
 	*c.hiddenCount++
 
-	// stack: cursor sent kind. The kind is kept in a binding of its own so
-	// that it survives the await an async delegation performs, which is where
-	// a return has to be told apart from an exhausted delegate.
-	// The instruction jumps past the delegation when the delegate is finished
-	// with, which only the end of this knows the address of.
+	// The kind is kept in a binding of its own so that it survives the
+	// await an async delegation performs, which is where a return has to be
+	// told apart from an exhausted delegate.
 	if async {
 		c.emitAwait(n.Start)
 	}
@@ -1834,18 +1780,14 @@ func (c *compiler) compileYield(n *ast.Yield) {
 	// is the end of the outer generator depends on how it was resumed: a
 	// return travels through the delegate and out of the generator that
 	// delegated to it, carrying the value the delegate finished with.
-	// The cursor beneath the value goes; it is finished with, and closing it
-	// again is not owed.
 	if async {
 		// An async generator awaits what it returns, here as anywhere else.
 		c.emitAwait(n.Start)
 	}
 	c.emitReturnValue(n.Start)
-	// The delegate's return value is the value of the whole expression, so the
-	// cursor beneath it is removed rather than the value.
 }
 
-// emitAwait emits an await, marking a module's body asynchronous.
+// emitAwait walks an await, marking a module's body asynchronous.
 //
 // A top-level await makes the module an async function: the interpreter has to
 // suspend the body rather than let the await escape the frame as an error, and

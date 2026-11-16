@@ -158,8 +158,8 @@ func (c *compiler) functionsAreGlobal() bool {
 	return c.parent == nil && c.depth == 0 && !c.evalVarsAreLocal()
 }
 
-// predeclareFunction emits a hoisted function declaration's definition into the
-// binding that was already created for it.
+// predeclareFunction walks a hoisted function declaration's definition into
+// the binding that was already created for it.
 func (c *compiler) predeclareFunction(h hoistedFunc) {
 	// `export default function () {}` is hoisted like any other function
 	// declaration, but the binding it creates has a name no identifier can
@@ -346,18 +346,6 @@ func (c *compiler) markUninitialized(name string) {
 	}
 }
 
-// resetCompletion sets the program's completion value to undefined, which the
-// control-flow statements do before they run.
-//
-// They report undefined rather than nothing when their body produces no value,
-// which is what makes `1; if (false) {}` undefined rather than 1 -- unlike a
-// block or an empty statement, which produce nothing and leave the value alone.
-func (c *compiler) resetCompletion() {
-	if c.completionSlot < 0 {
-		return
-	}
-}
-
 func (c *compiler) compileStatement(s ast.Stmt) {
 	c.enter(s.Pos())
 	defer c.leave()
@@ -408,27 +396,21 @@ func (c *compiler) compileStatement(s ast.Stmt) {
 	case *ast.EmptyStmt:
 
 	case *ast.IfStmt:
-		c.resetCompletion()
 		c.compileIf(n)
 
 	case *ast.WhileStmt:
-		c.resetCompletion()
 		c.compileWhile(n)
 
 	case *ast.DoWhileStmt:
-		c.resetCompletion()
 		c.compileDoWhile(n)
 
 	case *ast.ForStmt:
-		c.resetCompletion()
 		c.compileFor(n)
 
 	case *ast.ForInStmt:
-		c.resetCompletion()
 		c.compileForIn(n)
 
 	case *ast.ForOfStmt:
-		c.resetCompletion()
 		c.compileForOf(n)
 
 	case *ast.ReturnStmt:
@@ -454,11 +436,9 @@ func (c *compiler) compileStatement(s ast.Stmt) {
 		c.compileExpr(n.Arg)
 
 	case *ast.TryStmt:
-		c.resetCompletion()
 		c.compileTry(n)
 
 	case *ast.SwitchStmt:
-		c.resetCompletion()
 		c.compileSwitch(n)
 
 	case *ast.LabeledStmt:
@@ -484,7 +464,6 @@ func (c *compiler) compileStatement(s ast.Stmt) {
 		c.compileFieldInit(n)
 
 	case *ast.WithStmt:
-		c.resetCompletion()
 		c.compileWith(n)
 
 	default:
@@ -574,7 +553,7 @@ func (c *compiler) inLoop() bool {
 	return false
 }
 
-// initBinding stores the value on the stack into a declaration's target.
+// initBinding walks the store of a value into a declaration's target.
 func (c *compiler) initBinding(target ast.Expr, kind ast.DeclKind) {
 	if id, ok := target.(*ast.Ident); ok {
 		if kind == ast.DeclVar {
@@ -605,8 +584,8 @@ func (c *compiler) initBinding(target ast.Expr, kind ast.DeclKind) {
 	c.compileDestructuring(target, kind)
 }
 
-// emitReturnValue returns the value on top of the stack from the function,
-// routing it through any finally clause that owes a run first.
+// emitReturnValue walks a return, routed through any finally clause that
+// owes a run first.
 func (c *compiler) emitReturnValue(pos int) {
 	if len(c.finallys) > 0 {
 		// The finally clause must run before the function actually returns, so
@@ -620,8 +599,7 @@ func (c *compiler) emitReturnValue(pos int) {
 			// What the statements inside the clause's try left in place is
 			// undone first, as they are left before the try is: a for...of
 			// there closes its iterator before the clause runs. The value
-			// waits in a hidden local meanwhile, the iterators being beneath
-			// it.
+			// waits in a hidden local meanwhile.
 			if c.returnSlot < 0 {
 				c.returnSlot = int32(c.declare(fmt.Sprintf("%%rv%d", *c.hiddenCount), bindVar, pos))
 				*c.hiddenCount++
@@ -638,11 +616,7 @@ func (c *compiler) storeVar(name string) {
 	// A var's initializer is an assignment rather than a binding
 	// initialization: the declaration hoists out of a `with` body, but the
 	// store happens inside it, where the object may be what is written to.
-	// The probe peeks at the value and jumps over the static store, while the
-	// store itself consumes it. A copy for the store and a drop after both
-	// paths is what leaves the stack the same either way -- and a store that
-	// quietly left its value behind would push the loop it sits in off its own
-	// operands.
+	// The probe answers, or the static store runs.
 	probe := c.withProbe(bytecode.OpWithSet, name)
 	switch {
 	case c.regIdent != nil:
@@ -902,7 +876,7 @@ func (c *compiler) compileForOf(n *ast.ForOfStmt) {
 	c.popExit()
 }
 
-// compileForAwaitBody emits the loop of a `for await`, which differs from the
+// compileForAwaitBody walks the loop of a `for await`, which differs from the
 // synchronous form in that each step awaits the promise the iterator returns
 // before unpacking the result, and in how it is left.
 //
@@ -916,8 +890,7 @@ func (c *compiler) compileForOf(n *ast.ForOfStmt) {
 // as a finally clause is, and the handler a return, or a throw, is routed
 // to. A loop the iterator ends, or whose next, or the result it awaited,
 // fails, is not closed. The cursor is kept in a hidden local, where the
-// close finds it whatever is on the stack above it, and another says
-// whether the body is running.
+// close finds it, and another says whether the body is running.
 //
 // Each turn's await is at pos, the loop's expression's: a stack trace of
 // what throws after it -- the iterator's return method closing the loop --
@@ -926,9 +899,6 @@ func (c *compiler) compileForAwaitBody(left ast.Node, body ast.Stmt, pos int) {
 	cur := c.declare(fmt.Sprintf("%%fa%d", *c.hiddenCount), bindVar, left.Pos())
 	busy := c.declare(fmt.Sprintf("%%fb%d", *c.hiddenCount), bindVar, left.Pos())
 	*c.hiddenCount++
-	// Kept without a copy above the stack: what an exception unwinds past
-	// is closed, and a copy left there would be closed too.
-
 	c.handlerDepth++
 	c.finallys = append(c.finallys, finallyCtx{
 		emit:     func() { c.emitAsyncClose(cur, busy, false) },
@@ -957,7 +927,7 @@ func (c *compiler) compileForAwaitBody(left ast.Node, body ast.Stmt, pos int) {
 	c.emitAsyncClose(cur, busy, false)
 }
 
-// emitAsyncClose emits a for await's AsyncIteratorClose of the cursor in
+// emitAsyncClose walks a for await's AsyncIteratorClose of the cursor in
 // local cur, where local busy says the body is running: its return method
 // is called, and what that returns awaited and, unless quiet, checked to be
 // an object. quiet is a throw's: whatever goes wrong closing is dropped,
@@ -971,8 +941,8 @@ func (c *compiler) emitAsyncClose(cur, busy uint32, quiet bool) {
 	c.handlerDepth--
 }
 
-// compileForBody emits the shared loop structure of for-in and for-of, with the
-// iterator already on the stack.
+// compileForBody walks the shared loop structure of for-in and for-of, its
+// iterator made.
 func (c *compiler) compileForBody(left ast.Node, body ast.Stmt) {
 	c.pushLoop(nil, true)
 	c.debugAt(left.Pos())
@@ -985,9 +955,6 @@ func (c *compiler) compileForBody(left ast.Node, body ast.Stmt) {
 	c.endScope()
 
 	c.popLoop()
-	// ForOfStart left the cursor on the stack. A break arrives here with the
-	// iterator still open, so it is closed before the cursor is dropped; an
-	// exhausted one is already closed and the instruction leaves it alone.
 }
 
 // bareJumpTarget is the index in c.loops of the statement a break or
@@ -1072,9 +1039,8 @@ func (c *compiler) compileLabeled(n *ast.LabeledStmt) {
 
 // compileLabeledLoop compiles a loop whose own context carries the labels.
 func (c *compiler) compileLabeledLoop(labels []string, body ast.Stmt) {
-	// The loop compilers push their context themselves, so the labels are
-	// applied by patching them immediately afterwards. To keep that simple
-	// they are recorded in a pending field the next pushLoop consumes.
+	// The loop walkers push their context themselves, so the labels are
+	// recorded in a pending field the next pushLoop consumes.
 	c.pendingLabels = labels
 	c.compileStatement(body)
 }
@@ -1092,9 +1058,9 @@ func (l *loopCtx) named(label string) bool {
 // compileTry compiles a try statement.
 //
 // A finally clause has to run however the protected block finished, so the
-// block's outcome is encoded as a completion record -- a value and a kind --
-// left on the stack for the finally code to reproduce afterwards. That is what
-// makes `return` inside a try still run the finally before returning.
+// block's outcome is a completion record -- a value and a kind -- the finally
+// code reproduces afterwards. That is what makes `return` inside a try still
+// run the finally before returning.
 func (c *compiler) compileTry(n *ast.TryStmt) {
 	if n.Finally == nil {
 		c.compileTryCatch(n)
@@ -1119,7 +1085,7 @@ func (c *compiler) compileTry(n *ast.TryStmt) {
 // The clause is compiled twice where it can be: inline, for the body's
 // normal completion, which goes on past the try after it; and as the
 // handler's, which a throw and the returns routed through the clause enter
-// with their completion record beneath it, and its rethrow carries on. A
+// with their completion record, and its rethrow carries on. A
 // loop whose body is a try statement then runs no record and no rethrow at
 // each turn, as it does none for a try with only a catch. Code compiled for a debugger has the clause
 // once, so that a breakpoint in it is one statement; and a clause inside a
@@ -1144,9 +1110,9 @@ func (c *compiler) compileTryFinally(pos int, body func(), finally []ast.Stmt) {
 	c.compileFinallyClause(pos, finally, true)
 }
 
-// compileFinallyClause compiles a finally clause's statements, with the
-// completion record of the try beneath them where record says so, or with
-// none, inlined after the try's normal completion.
+// compileFinallyClause walks a finally clause's statements, with the
+// completion record of the try where record says so, or with none, inlined
+// after the try's normal completion.
 func (c *compiler) compileFinallyClause(pos int, finally []ast.Stmt, record bool) {
 	// What the finally clause produces is not the statement's value: the try
 	// block's is, so `try { 1 } finally { 2 }` is 1, which a binding of its
@@ -1156,9 +1122,7 @@ func (c *compiler) compileFinallyClause(pos int, finally []ast.Stmt, record bool
 		*c.hiddenCount++
 		c.declare(name, bindVar, pos)
 	}
-	// The completion record sits beneath the clause's own operands, so a break
-	// or continue leaving the clause has to drop it: what it jumps to is not
-	// expecting two values it never pushed.
+	// A break or continue leaving the clause drops the completion record.
 	if record {
 		c.pushExit(exitCompletion)
 	}
@@ -1272,8 +1236,7 @@ func (c *compiler) pushExit(e pendingExit) {
 	c.exitHandlers = append(c.exitHandlers, c.handlerDepth)
 }
 
-// popExit ends the statement that pushed the innermost exit, which emits its
-// own undo on the path that falls out of the bottom.
+// popExit ends the statement that pushed the innermost exit.
 func (c *compiler) popExit() {
 	c.exits = c.exits[:len(c.exits)-1]
 	c.exitHandlers = c.exitHandlers[:len(c.exitHandlers)-1]
@@ -1293,7 +1256,7 @@ func (c *compiler) unwindExits(top, down int) int {
 	return min(top, down)
 }
 
-// unwindTo emits what a break or continue owes on its way to target: the
+// unwindTo walks what a break or continue owes on its way to target: the
 // finally clauses it leaves, the exception handlers it jumps out from, and the
 // operands and iterators the statements in between put there.
 //
@@ -1441,8 +1404,8 @@ func (c *compiler) compileFieldInit(n *ast.FieldInit) {
 	c.compileExpr(n.Value)
 }
 
-// compileIterationBody binds a for-in/of head to the value on the stack and
-// runs the body, in the scope the iteration has begun.
+// compileIterationBody walks the binding of a for-in/of head to each value
+// and the body, in the scope the iteration has begun.
 //
 // A using head's value is disposed of at the end of each iteration, before
 // the loop goes on or, if it is leaving, closes its iterator.
