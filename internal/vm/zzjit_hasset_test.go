@@ -137,8 +137,10 @@ function inRopes(n) { var s = 0; for (var j = 0; j < n; j++) if (keys[j % 20] in
 
 // Four keys of one layout whose addresses put them in one set of hasCache
 // each keep their entry: asked in turn, none calls Go once each has been
-// asked. A fifth key of the set takes the newest place, and the oldest of
-// the four -- the first noted -- leaves.
+// asked -- a loop of 400 turns over them calls it as often as one over
+// one key. A fifth key
+// of the set takes the newest place, and the oldest of the four -- the
+// first noted -- leaves.
 func TestJITHasCacheFourWays(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
@@ -174,7 +176,7 @@ function inSome(ks, n) { var s = 0; for (var j = 0; j < n; j++) if (ks[j % ks.le
 	for i, k := range five {
 		idx[i] = fmt.Sprintf("keys[%d]", k)
 	}
-	if _, err := r.Run(compileForTest(t, `var pick4 = [`+strings.Join(idx[:4], ", ")+`], pick5 = [`+strings.Join(idx, ", ")+`]`)); err != nil {
+	if _, err := r.Run(compileForTest(t, `var pick1 = [`+idx[0]+`], pick4 = [`+strings.Join(idx[:4], ", ")+`], pick5 = [`+strings.Join(idx, ", ")+`]`)); err != nil {
 		t.Fatal(err)
 	}
 	fn := global("inSome")
@@ -189,11 +191,17 @@ function inSome(ks, n) { var s = 0; for (var j = 0; j < n; j++) if (ks[j % ks.le
 	}
 	for range 2 {
 		run("pick4", 40)
+		run("pick1", 40)
 	}
+	// What a run of the loop makes besides its ins, which one key, whose
+	// entry nothing displaces, measures: the four keys' ins make no more.
+	calls = 0
+	run("pick1", 400)
+	base := calls
 	calls = 0
 	run("pick4", 400)
-	if calls != 0 {
-		t.Errorf("four keys of one set: %d calls of Go in 400 turns, want none", calls)
+	if calls != base {
+		t.Errorf("four keys of one set: %d calls of Go in 400 turns, one key %d, want as many", calls, base)
 	}
 	set := hasSetOf(keys[five[0]].ref, sh)
 	ways := r.has[set*hasCacheWays : (set+1)*hasCacheWays]
