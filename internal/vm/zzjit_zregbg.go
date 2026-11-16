@@ -282,8 +282,7 @@ func (r *Runtime) jitRegInstall(j *jitRegJob) {
 	s := r.jit
 	// The links the job's feedback asked for are let go of by none until
 	// its code holds them (regUnlink).
-	s.regBuilding++
-	defer func() { s.regBuilding-- }()
+	defer s.regBuilding(&j.rf)()
 	defer func() {
 		if cc := j.cl.closureCode; cc != nil {
 			// Its calls enter it if it has code, installed or not.

@@ -1136,12 +1136,12 @@ type jitState struct {
 	// regLowered, before which a program not asked for since is let go of
 	// (regFlush).
 	regLowerLook uint64
-	// regBuilding counts the register compiles under way on the
-	// runtime's goroutine, built or installed (jitRegCompile,
+	// regBuilds are the feedback of the register compiles under way on
+	// the runtime's goroutine, built or installed (jitRegCompile,
 	// jitRegInstall): the links their code is to call through, which no
 	// code holds yet (jitLink's refs), are let go of by none meanwhile
 	// (regUnlink).
-	regBuilding int
+	regBuilds []**jitRegFeedback
 	// regHostOps counts register code's host exits by the register
 	// instruction Go ran whole, by its operation, for tests
 	// (RegNativeStats' HostOps): an array, not a map of the operation's

@@ -384,10 +384,6 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 		return nil
 	}
 	e := &jitRegEntry{key: key, life: life, used: s.epoch()}
-	// The links its feedback asks for, which no code holds until it is
-	// placed, are let go of by none meanwhile (regUnlink).
-	s.regBuilding++
-	defer func() { s.regBuilding-- }()
 	s.budget = r.jitBudget()
 	if !s.jitRegRoomAhead(cl, e.life, s.jitRegReplaced(key, osrAt)) {
 		// None, all the cache holds young or in use, and it is not
@@ -432,6 +428,9 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 	}
 	r.jitRegSeenFeedback(cl, c)
 	rf := r.jitRegFeedbackFor(cl, p)
+	// The links its feedback asks for, which no code holds until it is
+	// placed, are let go of by none meanwhile (regUnlink).
+	defer s.regBuilding(&rf)()
 	if background {
 		// Asked ahead here, built on a worker (zzjit_zregbg.go).
 		snap := jitRegSnapshotOf(rf, p)
@@ -975,7 +974,7 @@ func (s *jitState) regPruneLinks() {
 // regUnlink lets go of l, a register link, once nothing calls through it:
 // its function has nothing in the cache (regCache), no code holds it
 // (refs, regHoldLinks), and no compile under way may -- one on the
-// runtime's goroutine (regBuilding), or in the background, whose
+// runtime's goroutine (regBuilds), or in the background, whose
 // feedback has asked for it -- as the stack form's unlink forgets a link
 // no entry owns and no code calls through. A link is made at a call Go
 // makes for a native caller, for a generic call to find the function by
@@ -983,8 +982,13 @@ func (s *jitState) regPruneLinks() {
 // for good, a program streaming functions through the cache kept one for
 // each it had ever called.
 func (s *jitState) regUnlink(l *jitLink) {
-	if l.refs != 0 || s.regBuilding != 0 || s.regLinks[l.key] != l || s.regCache[l.key] != nil {
+	if l.refs != 0 || s.regLinks[l.key] != l || s.regCache[l.key] != nil {
 		return
+	}
+	for _, rf := range s.regBuilds {
+		if *rf != nil && slices.Contains((*rf).fb.keep().links, l) {
+			return
+		}
 	}
 	for _, j := range s.regPendingJobs {
 		if j.rf != nil && slices.Contains(j.rf.fb.keep().links, l) {
@@ -992,6 +996,18 @@ func (s *jitState) regUnlink(l *jitLink) {
 		}
 	}
 	s.regDropLink(l)
+}
+
+// regBuilding notes *rf, the feedback of a register compile under way,
+// whose links are let go of by none (regUnlink) until the function it
+// returns is called, as the compile ends.
+func (s *jitState) regBuilding(rf **jitRegFeedback) func() {
+	s.regBuilds = append(s.regBuilds, rf)
+	return func() {
+		if i := slices.Index(s.regBuilds, rf); i >= 0 {
+			s.regBuilds = slices.Delete(s.regBuilds, i, i+1)
+		}
+	}
 }
 
 // regDropLink takes l out of regLinks: native callers no longer call

@@ -767,12 +767,16 @@ func (s *jitState) regLearnedOf(key jitKey) *jitEntry {
 	if s.regLearned == nil {
 		s.regLearned = map[jitKey]*jitEntry{}
 	}
-	// Made in the room for it, as the stack form's entry is made only in
-	// the room for it (jitWarmFor) -- the cache letting go of what it may
-	// (makeRoom), other functions' state among it; made all the same where
-	// there is none, which the next compile's room, or settle, makes.
+	// Kept in the room for it, as the stack form's entry is made only in
+	// the room for it (jitWarmFor), the cache letting go of what it may
+	// (makeRoom), other functions' state among it. Where there is none, a
+	// state the JIT does not keep: the function warms up, and learns, in
+	// vain, and runs in the existing tiers until some code is old, as one
+	// the stack form made no entry for does.
 	s.budget = s.rt.jitBudget()
-	s.makeRoom(jitEntryFixed)
+	if !s.makeRoom(jitEntryFixed) {
+		return &jitEntry{jitLearned: &jitLearned{reg: true, regLink: s.regLinks[key]}, used: s.epoch()}
+	}
 	l := &jitEntry{jitLearned: &jitLearned{reg: true, regLink: s.regLinks[key]}, used: s.epoch(), regCounted: true}
 	s.regLearned[key] = l
 	s.regAccount(l)
