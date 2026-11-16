@@ -1049,11 +1049,6 @@ type jitLink struct {
 	// hint is, for a register link (regLinkOf), its slot of the hint
 	// table (regHint), which generic calls find it by; 0 for none.
 	hint uint32
-	// asked is, for a register link, the cache's age (agedAt) when a
-	// caller last asked for it (regLinkOf): one asked since the cache's
-	// last look at the links may be a compile's under way, whose code
-	// calls through it once placed, and stays (regAge).
-	asked uint64
 	// gen is, for a generator's function, its code's generator entry,
 	// where a loop's step that resumes one natively jumps (ssa.CallSite's
 	// Gens), or 0 while there is none it may: 0 whenever entry is, for
@@ -1141,10 +1136,12 @@ type jitState struct {
 	// regLowered, before which a program not asked for since is let go of
 	// (regFlush).
 	regLowerLook uint64
-	// regLinkLook is the cache's age at its last look at regLinks, before
-	// which a link no code calls through and no compile asked for since,
-	// of a function the cache holds nothing for, is let go of (regAge).
-	regLinkLook uint64
+	// regBuilding counts the register compiles under way on the
+	// runtime's goroutine, built or installed (jitRegCompile,
+	// jitRegInstall): the links their code is to call through, which no
+	// code holds yet (jitLink's refs), are let go of by none meanwhile
+	// (regUnlink).
+	regBuilding int
 	// regHostOps counts register code's host exits by the register
 	// instruction Go ran whole, by its operation, for tests
 	// (RegNativeStats' HostOps): an array, not a map of the operation's

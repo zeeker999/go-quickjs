@@ -41,7 +41,6 @@ var jitRegFrameOps = map[ssa.GoOp]bool{ssa.GoHost: true, ssa.GoArgument: true, s
 func (s *jitState) regLinkOf(cl *closure, c *regCode) *jitLink {
 	key := s.rt.jitRegKeyOf(cl)
 	if l := s.regLinks[key]; l != nil {
-		l.asked = s.agedAt
 		s.regHint(cl, l)
 		return l
 	}
@@ -49,7 +48,7 @@ func (s *jitState) regLinkOf(cl *closure, c *regCode) *jitLink {
 		s.regLinks = map[jitKey]*jitLink{}
 	}
 	l := &jitLink{key: key, params: 2 + uint64(c.params), locals: uint64(c.numRegs), frame: uint64(c.numRegs),
-		flags: s.rt.jitRegLinkFlags(cl, c), asked: s.agedAt}
+		flags: s.rt.jitRegLinkFlags(cl, c)}
 	if e := s.regCache[key]; e != nil && e.code != nil && !e.invalid && (e.life == nil || !e.life.notNative) {
 		l.regSet(s, e)
 	}

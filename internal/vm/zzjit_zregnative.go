@@ -384,6 +384,10 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 		return nil
 	}
 	e := &jitRegEntry{key: key, life: life, used: s.epoch()}
+	// The links its feedback asks for, which no code holds until it is
+	// placed, are let go of by none meanwhile (regUnlink).
+	s.regBuilding++
+	defer func() { s.regBuilding-- }()
 	s.budget = r.jitBudget()
 	if !s.jitRegRoomAhead(cl, e.life, s.jitRegReplaced(key, osrAt)) {
 		// None, all the cache holds young or in use, and it is not
@@ -743,6 +747,9 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 	// and the function the feedback asked are not.
 	e.keep = rf.fb.keep()
 	e.keep.cl, e.keep.fn, e.keep.prog, e.keep.regSeen = nil, nil, nil, nil
+	// Its code calls through its links from now on, until it is closed
+	// (regClose).
+	s.regHoldLinks(e.keep, 1)
 	// What describes the code besides, counted with it, as the stack
 	// form's entry's measure counts what its code was compiled with
 	// (compiledBytes): the entry, what it reads by address, its tables by
@@ -951,56 +958,73 @@ func (s *jitState) regLetGoLife(key jitKey, l *jitEntry) {
 	}
 }
 
-// regPruneLinks lets go of the links (regLinks) of functions the cache
-// holds nothing for that no code calls through -- the cache's, the code
-// let go of that still runs, a compile's in the background -- and no
-// compile asked for since the last look (jitLink's asked), as the stack
-// form's age drops the links neither an entry nor code has (unlink). A
-// link is made at a call Go makes for a native caller, for a generic
-// call to find the function by (regHint), and by every compile that
-// calls a function natively: kept for good, a program streaming
-// functions through the cache kept one for each it had ever called.
-// A link's slot of the hint table is freed, its function's left in it
-// (regUnhint); a call through it finds no link there, and Go makes it.
+// regPruneLinks lets go of the links (regLinks) of functions gone, and of
+// those no code calls through of functions the cache holds nothing for
+// (regUnlink), as the stack form's age drops the links neither an entry
+// nor code has.
 func (s *jitState) regPruneLinks() {
-	last := s.regLinkLook
-	s.regLinkLook = s.agedAt
-	if len(s.regLinks) == 0 {
-		return
-	}
-	held := map[*jitLink]bool{}
-	hold := func(fb *jitFeedback) {
-		if fb == nil {
-			return
-		}
-		for _, l := range fb.keep().links {
-			held[l] = true
-		}
-	}
-	for _, e := range s.regCache {
-		hold(e.keep)
-		if e.osr != nil {
-			hold(e.osr.keep)
-		}
-	}
-	for _, e := range s.regRetired {
-		hold(e.keep)
-	}
-	for _, j := range s.regPendingJobs {
-		if j.rf != nil {
-			hold(j.rf.fb)
-		}
-	}
 	for key, l := range s.regLinks {
-		gone := key.gone()
-		if !gone && (s.regCache[key] != nil || held[l] || l.asked >= last || l.refs != 0) {
+		if key.gone() {
+			s.regDropLink(l)
 			continue
 		}
-		l.clearCode()
-		s.regUnhint(l)
-		delete(s.regLinks, key)
-		if life := s.regLearned[key]; life != nil && life.regLink == l {
-			life.regLink = nil
+		s.regUnlink(l)
+	}
+}
+
+// regUnlink lets go of l, a register link, once nothing calls through it:
+// its function has nothing in the cache (regCache), no code holds it
+// (refs, regHoldLinks), and no compile under way may -- one on the
+// runtime's goroutine (regBuilding), or in the background, whose
+// feedback has asked for it -- as the stack form's unlink forgets a link
+// no entry owns and no code calls through. A link is made at a call Go
+// makes for a native caller, for a generic call to find the function by
+// (regHint), and by every compile that calls a function natively: kept
+// for good, a program streaming functions through the cache kept one for
+// each it had ever called.
+func (s *jitState) regUnlink(l *jitLink) {
+	if l.refs != 0 || s.regBuilding != 0 || s.regLinks[l.key] != l || s.regCache[l.key] != nil {
+		return
+	}
+	for _, j := range s.regPendingJobs {
+		if j.rf != nil && slices.Contains(j.rf.fb.keep().links, l) {
+			return
+		}
+	}
+	s.regDropLink(l)
+}
+
+// regDropLink takes l out of regLinks: native callers no longer call
+// code through it, and its slot of the hint table is freed (regUnhint),
+// where a call finds no link, and Go makes it.
+func (s *jitState) regDropLink(l *jitLink) {
+	l.clearCode()
+	s.regUnhint(l)
+	if s.regLinks[l.key] == l {
+		delete(s.regLinks, l.key)
+	}
+	if life := s.regLearned[l.key]; life != nil && life.regLink == l {
+		life.regLink = nil
+	}
+}
+
+// regHoldLinks counts code whose keep is fb calling through each of its
+// links once (jitLink's refs), by d: 1 as the code is placed, -1 as it is
+// closed, when a link no code calls through any longer is let go of
+// (regUnlink), as the stack form's setLinks counts an entry's code.
+func (s *jitState) regHoldLinks(fb *jitFeedback, d int) {
+	if fb == nil {
+		return
+	}
+	links := fb.links
+	for i, l := range links {
+		if slices.Contains(links[:i], l) {
+			continue
+		}
+		l.refs += d
+		if d < 0 && l.refs <= 0 {
+			l.refs = 0
+			s.regUnlink(l)
 		}
 	}
 }
@@ -1338,6 +1362,10 @@ func (s *jitState) dropReg(key jitKey, e *jitRegEntry) {
 	if s.regCache[key] == e {
 		delete(s.regCache, key)
 		s.regLinkUpdate(key, nil)
+		if l := s.regLinks[key]; l != nil {
+			// Its function's link, if no code calls through it.
+			defer s.regUnlink(l)
+		}
 		s.regHeld -= e.bytes
 		if o := e.osr; o != nil {
 			// Its code for on-stack replacement goes with it.
@@ -1373,6 +1401,7 @@ func (s *jitState) regClose(e *jitRegEntry) {
 		return
 	}
 	_ = s.closeSSA(e.code, e.keep)
+	s.regHoldLinks(e.keep, -1)
 	// What the code read by address, and the calls' targets it was
 	// compiled for, go with it: the entry stays where its function's
 	// template names it until a call finds it let go of (jitRegLetGoOf),
