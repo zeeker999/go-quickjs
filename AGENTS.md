@@ -67,7 +67,8 @@ concurrently.
   in a later group moves nothing of an earlier one.
 - The register interpreter's hot code is its loop, `runReg`, its call path,
   `rhCallW`, `regEnterW`, `regCallSlow` and `regRunFD`, the native
-  dispatcher's Go side, `nativeLoop`, and the native handlers' block.
+  dispatcher's Go side, `nativeLoop` and its loop `nativeDrive`, and the
+  native handlers' block.
   `runReg` is a fixed loop over a table of handlers, the same for every
   operation (`TestRegLoopIsSmall`): an operation is a handler of its own,
   never a case added to it. A Go handler added to `zzreg_table.go` moves
@@ -96,10 +97,12 @@ concurrently.
 - The layout lock keeps the hot code where it measured best whatever a
   change moves around it: generated pads, dead code and data, put the
   anchors of `internal/vm/layoutlock.txt` -- the built-ins, the call path,
-  `runReg` and `rhCallW`, the JIT's leaf calls, the DataView leaves, the
-  method values, the regular expression
-  matcher (a pad of its own in internal/regexp), and the Go runtime's
-  `mheap_`, `writeBarrier` and `gcController` -- at fixed offsets modulo
+  `runReg` and `rhCallW`, the JIT's leaf calls, the regular expression
+  matcher (a pad of its own in internal/regexp), the register
+  interpreter's native handlers' block (`regNativeHandlers`, by an
+  assembly pad sorted before it: package vm's assembly is laid out after
+  its closures, so that any closure's growth had moved it), and the Go
+  runtime's `mheap_`, `writeBarrier` and `gcController` -- at fixed offsets modulo
   4 KB and 64 bytes in a `v8bench` build. After a change to package
   vm, run `go generate ./internal/vm` (or `go run ./internal/cmd/layoutpad`)
   and commit the pads; `TestLayoutLock` (internal/vm/layoutlock_test.go,
@@ -203,6 +206,7 @@ Do not manually edit generated files or their binary companions:
   fails while a file is out of date; on a host with no JIT (darwin amd64,
   say), it checks every file but the feedback dispatchers'.
 - `internal/vm/*_layoutpad.go`, `internal/vm/layoutpad_*.go`,
+  `internal/vm/zzzyn_native_a_layoutpad_*.s`,
   `internal/regexp/aa_layoutpad.go` and `internal/regexp/layoutpad_*.go`,
   the layout lock's pads and the constants that size them for each
   configuration,
@@ -482,7 +486,7 @@ go run ./internal/cmd/v8bench -mode micro -n 1 -suite empty_loop,func_call
 To compare two builds, use `internal/cmd/v8bench/placements`: one build of
 each side compares where the linker put package vm's hot code as much as
 the code. `build` makes eight builds of the working tree, each placing
-`callObject`, the JIT's leaf calls, `runReg`, `rhCallW`, `nativeLoop`
+`callObject`, the JIT's leaf calls, `runReg`, `rhCallW`, `nativeDrive`
 and the assembly -- the native handlers and the JIT's leaf stubs --
 differently in a balanced design, and checks every one with `go tool
 nm`; `-tags quickjs_jit` builds them with the JIT. `compare` runs two

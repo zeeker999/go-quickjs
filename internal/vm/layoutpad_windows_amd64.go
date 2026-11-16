@@ -5,21 +5,22 @@
 package vm
 
 // The layout lock's levers for windows/amd64 plain (layoutlock.txt): a pad's byte
-// stores, -1 for a pad left out, or a data lever's variables.
+// stores (the assembly pad's 32-byte slots), -1 for a pad left out, or a
+// data lever's variables.
 const (
-	layoutPadNA  = 577
+	layoutPadNA  = 151
 	layoutPadNGA = -1
 	layoutPadNMA = -1
-	layoutPadND  = 357
+	layoutPadND  = 280
 	layoutPadNGD = -1
 	layoutPadNMD = -1
-	layoutPadNB  = 0
+	layoutPadNB  = 581
 	layoutPadNGB = -1
 	layoutPadNMB = -1
-	layoutPadNJ  = 471
+	layoutPadNJ  = 444
 	layoutPadNGJ = -1
 	layoutPadNMJ = -1
-	layoutPadNQ  = 393
+	layoutPadNQ  = 10
 	layoutPadNGQ = -1
 	layoutPadNMQ = -1
 	layoutPadNW  = 361
@@ -29,7 +30,12 @@ const (
 	layoutPadNGZ = -1
 	layoutPadNMZ = -1
 	layoutPadNCZ = -1
-	layoutPadNDH = 3
+	layoutPadNH  = 116
+	layoutPadNDH = 0
 	layoutPadNDW = 4
 	layoutPadNDG = 2
 )
+
+// layoutPadH is the assembly pad, in
+// zzzyn_native_a_layoutpad_windows_amd64.s. It is never called.
+func layoutPadH()

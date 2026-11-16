@@ -18,14 +18,15 @@
 //	zzjit_leaf_pad.go     before zzjit_leaffast.go           jitLeafGo
 //	zzreg_ru_pad.go       before zzreg_run.go                runReg
 //	zzreg_run_b_pad.go    after zzreg_run.go, before calls   rhCallW
-//	zzzyn_native_r_pad.go before zzzyn_native_run.go         nativeLoop
+//	zzzyn_native_r_pad.go before zzzyn_native_run.go         nativeDrive
 //	zzzzz_pad.go          closures, after every other one    regNativeHandlers
 //
 // callObject is the calls of functions and built-ins; jitLeafGo the JIT's
 // calls of Go leaves (built with the JIT alone: a build without it has no
 // such target, and its pad moves what follows); runReg the Go table's loop;
-// rhCallW, with regEnterW after it, the register calls; nativeLoop the
-// native dispatcher's Go side; and the last the assembly after the
+// rhCallW, with regEnterW after it, the register calls; nativeDrive the
+// native dispatcher's Go loop, after nativeLoop in its file; and the last
+// the assembly after the
 // closures -- the JIT's leaf stubs and the native dispatcher's entry, its
 // exit's call of Go and its handlers, regNativeHandlers. The assembly is
 // laid out after the package's closures, so its pad is closures, function
@@ -178,7 +179,7 @@ var (
 	pads = [nPads]string{"internal/vm/vm_b_pad.go", "internal/vm/zzjit_leaf_pad.go", "internal/vm/zzreg_ru_pad.go",
 		"internal/vm/zzreg_run_b_pad.go", "internal/vm/zzzyn_native_r_pad.go", "internal/vm/zzzzz_pad.go"}
 	targets = [nPads]string{"(*Runtime).callObject", "jitLeafGo", "(*Runtime).runReg",
-		"rhCallW", "(*Runtime).nativeLoop", "regNativeHandlers.abi0"}
+		"rhCallW", "(*Runtime).nativeDrive", "regNativeHandlers.abi0"}
 	// optional are the targets a build may lack: the JIT's leaf calls,
 	// without the JIT, and the native handlers, on an architecture that
 	// has the Go table alone.
@@ -213,7 +214,7 @@ func placementsOf(k int) []int {
 // combination twice. runReg is b0, rhCallW b1 and the native block b2,
 // which -k 4's half, where b0^b1^b2 is 0, keeps apart; there callObject,
 // b0^b1^b2, is at one phase, jitLeafGo, b0^b1, follows the native block,
-// nativeLoop, b1^b2, runReg, and the data, b0^b2, rhCallW.
+// nativeDrive, b1^b2, runReg, and the data, b0^b2, rhCallW.
 func design(n int) [nPads]int {
 	b0, b1, b2 := n&1, (n>>1)&1, (n>>2)&1
 	return [nPads]int{b0 ^ b1 ^ b2, b0 ^ b1, b0, b1, b1 ^ b2, b2}

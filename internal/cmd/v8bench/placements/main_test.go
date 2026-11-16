@@ -160,7 +160,7 @@ func TestTargetAddrs(t *testing.T) {
 		"140003000 T " + vm + "(*Runtime).runReg",
 		"140003400 T " + vm + "(*Runtime).runRegNot",
 		"140004000 T " + vm + "rhCallW",
-		"140005000 T " + vm + "(*Runtime).nativeLoop",
+		"140005000 T " + vm + "(*Runtime).nativeDrive",
 		"140006000 T " + vm + "regNativeHandlers.abi0",
 		"140007000 D " + vm + "padSink",
 	}, "\n")

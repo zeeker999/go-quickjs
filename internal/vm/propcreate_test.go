@@ -189,8 +189,10 @@ func TestPropertyCreationAgreesWithNode(t *testing.T) {
 // each doubling: its site's root notes the room they came to need
 // (outgrowProps), and the next objects are made with it, from the third on.
 // A keyed store's objects -- a table of names, a dictionary past the soft
-// limit -- teach their site nothing, nor do objects with no site teach
-// their class's root.
+// limit -- teach their site nothing, and objects with no site teach their
+// class's root no more than the room an object carries in its own
+// allocation, which only Object.create's objects are made with
+// (newCreated).
 func TestObjectRoomLearnedFromGrowth(t *testing.T) {
 	t.Parallel()
 	r := New(Config{})

@@ -9,7 +9,9 @@
 //
 // The hot set is the Go table's loop (runReg), its call handler and the
 // frames it enters (rhCallW, regEnterW, regCallSlow, regRunFD, callObject),
-// the native dispatcher's Go side (nativeRun, nativeLoop) and its assembly:
+// the native dispatcher's Go side (nativeRun, nativeLoop, its loop
+// nativeDrive, and nativeCallbackRun, a kept callback's entry) and its
+// assembly:
 // the entry, the exit's call of Go and the generated handler blocks, which
 // are position-independent and so compare as they are.
 //
@@ -46,6 +48,8 @@ var hot = []string{
 	"internal/vm.(*Runtime).callObject",
 	"internal/vm.(*Runtime).nativeRun",
 	"internal/vm.(*Runtime).nativeLoop",
+	"internal/vm.(*Runtime).nativeDrive",
+	"internal/vm.(*Runtime).nativeCallbackRun",
 	"internal/vm.nativeEnter",
 	"internal/vm.nativeCallH",
 	"internal/vm.nativeStoreRef",

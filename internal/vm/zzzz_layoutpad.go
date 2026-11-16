@@ -217,6 +217,9 @@ func init() {
 		if layoutPadNZ >= 0 {
 			layoutPadZ()
 		}
+		if layoutPadNH >= 0 {
+			layoutPadH()
+		}
 		layoutPadPtrs[0] = unsafe.Pointer(&layoutPadDH0)
 		layoutPadPtrs[1] = unsafe.Pointer(&layoutPadDH1)
 		layoutPadPtrs[2] = unsafe.Pointer(&layoutPadDH2)
