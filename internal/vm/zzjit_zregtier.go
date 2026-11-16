@@ -689,21 +689,19 @@ func (r *Runtime) jitRegSpent(c *regCode, e *jitRegEntry) int64 {
 func (r *Runtime) jitRegReoptimize(cl *closure, c *regCode, e *jitRegEntry, at int) *jitRegEntry {
 	life := e.life
 	// The frames that go on in the new code after the calls they are in,
-	// at entries of it, as the stack form's jitReoptimize has its runs'
-	// (resumed), and as V8's compile for a frame is asked with its
-	// bytecode offset: the code is built with no entry after a call until
-	// Go has gone on there (ssa.Func's Unresumed). The one Go goes on with
-	// now, at: wherever that is, as the call it went on after may be one
-	// the new code makes natively, learned for it. Compiled without it, it
-	// was compiled again at once with it (jitRegResumeSeen) -- zlib's loop
-	// of ten thousand instructions twice, in a row, at each compile for
-	// what it learned. And the runs of e's code Go is inside, after their
-	// calls of Go, where e has no entry. Not a loop's header, which this
-	// compile keeps for the frame where it is due (jitRegFrameAt), as the
-	// stack form's compile in a run does (jitRecompileInRun), and no later
-	// one: learned for good, its entry was never one escape analysis could
-	// drop, its objects made at every turn, and a frame that stayed there
-	// never went on in code of its own (jitRegLoopCode).
+	// at entries of it (resumed), as V8's compile for a frame is asked with
+	// its bytecode offset: the code is built with no entry after a call
+	// until Go has gone on there (ssa.Func's Unresumed). The one Go goes on
+	// with now, at: wherever that is, as the call it went on after may be
+	// one the new code makes natively, learned for it. Compiled without it,
+	// it was compiled again at once with it (jitRegResumeSeen) -- zlib's
+	// loop of ten thousand instructions twice, in a row, at each compile
+	// for what it learned. And the runs of e's code Go is inside, after
+	// their calls of Go, where e has no entry. Not a loop's header, which
+	// this compile keeps for the frame where it is due (jitRegFrameAt), and
+	// no later one: learned for good, its entry was never one escape
+	// analysis could drop, its objects made at every turn, and a frame that
+	// stayed there never went on in code of its own (jitRegLoopCode).
 	if life != nil && at >= 0 && !slices.Contains(life.resumed, uint32(at)) && (at == 0 || regLoopAround(c, at) != at) {
 		life.resumed = append(life.resumed, uint32(at))
 	}
@@ -748,20 +746,18 @@ func (s *jitState) regLearnedOf(key jitKey) *jitEntry {
 	if s.regLearned == nil {
 		s.regLearned = map[jitKey]*jitEntry{}
 	}
-	// Kept in the room for it, as the stack form's entry is made in the
-	// room for it (jitWarmFor), the cache letting go of what it may
+	// Kept in the room for it, the cache letting go of what it may
 	// (makeRoom), other functions' state among it. Where there is none --
 	// all the cache holds young code, say -- it is kept all the same,
 	// counted once its function is compiled, which asks for its room, or at
-	// the cache's next look (regAge), whose room it is then made among:
-	// the stack form's entry is made at its function's first call, this at
-	// the function's first sample, after its first run, and a loop driving
-	// a program's phases had none made for it, and so no code, once the
-	// first phase had filled the budget.
+	// the cache's next look (regAge), whose room it is then made among: it
+	// is made at the function's first sample, after its first run, and a
+	// loop driving a program's phases had none made for it, and so no code,
+	// once the first phase had filled the budget.
 	s.budget = s.rt.jitBudget()
 	room := s.makeRoom(jitEntryFixed)
-	// Numbered as the stack form's entries are (serial), which makeRoom
-	// takes the least recently made of first among those of an epoch.
+	// Numbered (serial), which makeRoom takes the least recently made of
+	// first among those of an epoch.
 	s.serial++
 	l := &jitEntry{jitLearned: &jitLearned{reg: true, regLink: s.regLinks[key]}, used: s.epoch(), serial: s.serial, regCounted: room}
 	s.regLearned[key] = l
@@ -1009,10 +1005,10 @@ func (r *Runtime) jitRegWriteSeen(f *frame, c *regCode, e *jitRegEntry, rpc int,
 func (r *Runtime) jitRegEnter(f *frame, cl *closure, c *regCode, base, start int) (Value, error) {
 	e := cl.closureCode.jitReg
 	if r.jit != nil && r.jit.inFlight() {
-		// A call is a check, as the stack form's is (tryJITAt): compiles
-		// in the background that are done installed now -- its first, or
-		// one replacing the code it has, which goes on running until then
-		// -- and entered from this call on.
+		// A call is a check: compiles in the background that are done
+		// installed now -- its first, or one replacing the code it has,
+		// which goes on running until then -- and entered from this call
+		// on.
 		r.jitDrain()
 		e = cl.closureCode.jitReg
 	}
@@ -1235,10 +1231,10 @@ func (r *Runtime) jitRegLoop(st *regState, target int) int {
 	}
 	if e != nil && e.life.loopSlow && !forced {
 		// Code whose runs begun at a loop do not pay (loopSlow): the
-		// interpreter runs the loop, and Go enters it again once retried,
-		// as the stack form's tryJITAt has it (jitRetrySlow), which
-		// counts the call (slowCalls): counted here too, each had been
-		// two, and the code retried at half the calls.
+		// interpreter runs the loop, and Go enters it again once retried
+		// (jitRegRetrySlow), which counts the call (slowCalls): counted
+		// here too, each had been two, and the code retried at half the
+		// calls.
 		r.jitRegRetrySlow(e)
 	}
 	if e == nil || !e.goesOn || jitRunSlow(e.life, osr) {
@@ -1326,7 +1322,7 @@ func (r *Runtime) jitRegLoopCode(f *frame, c *regCode, e *jitRegEntry, target in
 	if e.invalid || !slices.Contains(e.unentered, target) || e.osrJob != nil {
 		// No loop of its own to compile code for; or code for one being
 		// compiled in the background, which the frame waits out in the
-		// interpreter (jitRegInstallOSR).
+		// interpreter (jitRegInstall).
 		return nil
 	}
 	if at := uintptr(unsafe.Pointer(f)); e.osrMiss != at || e.osrMissPC != target {

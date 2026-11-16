@@ -3982,10 +3982,8 @@ func goCallWord(site *ssa.CallSite) uint64 {
 // writes them to the callee's window past the VM's stack's top -- the
 // function in its register 0, a method call's receiver in 1, the
 // arguments from 2 -- where Go reads them (the VM's jitRegGoCallOn),
-// as the window's layout is the frame Go makes for the call. The stack
-// form's call left native code at its checks instead, and Go ran a callee
-// with no code from its start (abi.ExitEnter); register code, whose window
-// holds the operands, makes such a call as it makes any other.
+// as the window's layout is the frame Go makes for the call. Register code,
+// whose window holds the operands, makes such a call as it makes any other.
 func windowGoCall(v *ssa.Value, site *ssa.CallSite) bool {
 	return len(v.Args) > abi.MaxGoArgs && site.Window != 0 && !site.Super && !site.Forward && site.Accessor == ssa.AccessorNone
 }

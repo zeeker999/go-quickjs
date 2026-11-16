@@ -1280,8 +1280,8 @@ func (r *Runtime) jitFillClosures(pool *abi.ObjectPool, tmpl Value, fn *bytecode
 }
 
 // reoptPending reports whether e's code is to be compiled again, for any
-// of the reasons jitReoptimize takes: what it learned at its exits to make
-// natively -- a speculation that failed, a shape, a call to inline, a
+// of the reasons jitRegReoptimize takes: what it learned at its exits to
+// make natively -- a speculation that failed, a shape, a call to inline, a
 // callee that inlines more -- or that it leaves too often called natively.
 // Code whose guard failed is invalidated (jitRegInvalidate) and compiled
 // again on the interpreter's budget (jitRegWarmUp); code that learned
@@ -1597,9 +1597,9 @@ func (fb *jitFeedback) keep() *jitFeedback {
 	return fb
 }
 
-// jitInline is a call jitCallSeen has seen call a function it may inline:
-// the call's PC, the function, and how often native code has left the
-// inlined callee for Go there.
+// jitInline is a call jitRegCallSeen has seen call a function it may
+// inline: the call's PC, the function, and how often native code has left
+// the inlined callee for Go there.
 type jitInline struct {
 	pc    int32
 	cl    *closure
@@ -1651,10 +1651,10 @@ const (
 	jitCallsHot              = 128
 )
 
-// What jitCallSeen knows of a call (jitEntry.callSites), past its count: that
-// it waits for its callee, too long to inline, to be compiled (jitRegCallSeen),
-// that it is made natively, that it is neither that nor inlined, or that it
-// is inlined.
+// What jitRegCallSeen knows of a call (jitEntry.callSites), past its count:
+// that it waits for its callee, too long to inline, to be compiled
+// (jitRegCallSeen), that it is made natively, that it is neither that nor
+// inlined, or that it is inlined.
 const (
 	jitCallWaiting = 252
 	jitCallNative  = 253

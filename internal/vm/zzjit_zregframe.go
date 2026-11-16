@@ -351,19 +351,18 @@ func (r *Runtime) jitRegCellsClosure(ctx *abi.Context, f *frame, c *regCode, e *
 		return false
 	}
 	// The closure takes the context's cells, those its by-value captures'
-	// values are in too, as the stack form's (jitCellsClosure): what it
-	// takes by value is never assigned once it is made (bytecode's
-	// UpvalueDesc's ByValue), so the cell it shares holds its value as a
-	// copy would. The window's registers, which the code does not keep
-	// -- a cell native code took at a scope's end (mir's cellsClose) is
-	// open on none until the exit -- are not read: left to an exit, AWFY
-	// NBody's advance, a native callee, left native code at its forEach's
-	// arrow at every call. On the run's own frame, a closure made by value
-	// from them, its other captures given upvalues opened on the window's
-	// registers, had not shared the cells native code went on assigning,
-	// and an upvalue left open on a register a later entry took for the
-	// register's cell (jitRegMakeCells): two iterations' closures shared
-	// a let.
+	// values are in too: what it takes by value is never assigned once it
+	// is made (bytecode's UpvalueDesc's ByValue), so the cell it shares
+	// holds its value as a copy would. The window's registers, which the
+	// code does not keep -- a cell native code took at a scope's end (mir's
+	// cellsClose) is open on none until the exit -- are not read: left to
+	// an exit, AWFY NBody's advance, a native callee, left native code at
+	// its forEach's arrow at every call. On the run's own frame, a closure
+	// made by value from them, its other captures given upvalues opened on
+	// the window's registers, had not shared the cells native code went on
+	// assigning, and an upvalue left open on a register a later entry took
+	// for the register's cell (jitRegMakeCells): two iterations' closures
+	// shared a let.
 	byLocal := make([]*upvalue, max(int(c.ncap), 1))
 	for k, u := range t.fn.Upvalues {
 		if !u.FromParent || k >= len(caps) {

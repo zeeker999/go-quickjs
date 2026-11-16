@@ -135,12 +135,11 @@ func (r *Runtime) jitRegInlined(idx int, f *frame, owner *jitRegEntry, at, wb in
 		}
 		if o := levels[k].known; o != nil {
 			// The function object the code inlined the callee for, which
-			// its call's checks found, as the stack form's frame of the
-			// level has it (jitUnwindNative's InlineCallee): the window's
-			// register, which inlined code writes only where the callee
-			// reads it, held whatever was there -- a stack trace named
-			// the frame by the function a call made after the window's
-			// last use had there.
+			// its call's checks found (abi.Context's InlineCallee): the
+			// window's register, which inlined code writes only where the
+			// callee reads it, held whatever was there -- a stack trace
+			// named the frame by the function a call made after the
+			// window's last use had there.
 			called = Obj(o)
 			r.stack[levels[k].wb] = called
 		}
@@ -188,11 +187,10 @@ func (r *Runtime) jitRegInlined(idx int, f *frame, owner *jitRegEntry, at, wb in
 			// The loop's callback: its receiver the loop's thisArg, as
 			// Go's forEach calls it (jitRegForwardReceiver), an arrow's
 			// the one it captured (jitRegPlainReceiver); and the
-			// built-in's frame below it, as the stack form's unwinding
-			// makes it (jitPushLoopFrame), which a stack trace shows: "at
-			// Array.forEach". Neither had been made, the callback named
-			// "Number.throwAt" by what its window's register 1 held, and
-			// the built-in left out.
+			// built-in's frame below it (jitRegPushLoopFrame), which a
+			// stack trace shows: "at Array.forEach". Neither had been made,
+			// the callback named "Number.throwAt" by what its window's
+			// register 1 held, and the built-in left out.
 			if x.callee.IsObject() && x.callee.Object().fn() != nil && x.callee.Object().fn().arrow {
 				r.jitRegPlainReceiver(x.callee, x.cl, x.wb)
 			} else {
@@ -252,8 +250,7 @@ func (r *Runtime) jitRegInlined(idx int, f *frame, owner *jitRegEntry, at, wb in
 				r.jitRegReopt(cl, owner)
 			case x.threw && !atSite && !owner.life.reopt && slices.ContainsFunc(l.nativeCalls, func(y jitInline) bool { return int(y.pc) == at && y.forEach && !y.cbLeft }):
 				// A loop's callback that threw, inlined in the loop: counted
-				// against its inlining there (jitInlineLeft's cbLeft), as the
-				// stack form's unwinding of the loop's callback counts it --
+				// against its inlining there (jitInlineLeft's cbLeft) --
 				// left inlined, a callback that throws at every call left
 				// native code at each.
 				r.jitInlineLeft(l, at)
@@ -403,8 +400,7 @@ func (r *Runtime) jitRegInlineLeft(f *frame, x *jitRegInlineLevel, owner *jitReg
 		}
 		learned = true
 	case abi.ExitHost:
-		// Counted once, where the run left (jitRegLeft), as the stack
-		// form counts an inlined callee's exit (runSSALoop): counted here
+		// Counted once, where the run left (jitRegLeft): counted here
 		// too, each such exit had been two.
 		f.pc = regSrc(c, pc) + 1
 		s.noteRegHost(c, pc)

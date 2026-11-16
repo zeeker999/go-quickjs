@@ -110,10 +110,9 @@ type jitRegEntry struct {
 	// compiled for a frame waiting at one (jitRegLoopCode), kept apart from
 	// this, osrOf in it the code it was compiled beside; osrMiss and
 	// osrMissPC the frame, by its address, and the header a loop's check
-	// last found no entry at, as the stack form's entry has them
-	// (jitLearnLoopEntry); osrJob that code's compile in the background,
-	// which the frames waiting at the loop wait out in the interpreter, as
-	// the stack form's wait out its entry's pending (jitRegInstallOSR).
+	// last found no entry at (jitRegLoopCode); osrJob that code's compile
+	// in the background, which the frames waiting at the loop wait out in
+	// the interpreter until it is installed (jitRegInstall).
 	unentered  []int
 	osr, osrOf *jitRegEntry
 	osrJob     *jitRegJob
@@ -303,7 +302,7 @@ func (r *Runtime) jitRegCached(key jitKey, e *jitRegEntry) {
 	if life := e.life; life != nil && e.code != nil {
 		if life.regFlushed {
 			// Compiled again once hot again, its code let go of before
-			// (regLetGo), as a ghost dropped is counted (jitCompileForIn).
+			// (regLetGo).
 			life.regFlushed = false
 			s.recompiled++
 		}
@@ -325,8 +324,7 @@ func (r *Runtime) jitRegCached(key jitKey, e *jitRegEntry) {
 			life.genLearned, life.loopSlow = false, false
 		}
 	}
-	// What the function learned for this compile, counted as the stack
-	// form's compile counts its entry (account).
+	// What the function learned for this compile, counted.
 	s.regAccount(e.life)
 }
 
@@ -343,11 +341,10 @@ var jitCompileNote func(r *Runtime, cl *closure)
 // frameAt, where not 0, is the register pc of a loop's header whose entry
 // a frame waits at (ssa.Func's FrameAt, which escape analysis keeps): code
 // for on-stack replacement there (jitRegLoopCode), compiled in the
-// background where the function's code is, as the stack form's is
-// (jitLearnLoopEntry's jitReoptimize) and V8's concurrent OSR: the frame
-// goes on in the interpreter until it is installed (jitRegInstallOSR).
-// Where it is 0, it is the loop a frame of the function waits at for this
-// compile, if any (jitRegFrameAt).
+// background where the function's code is, as V8's OSR compiles are
+// concurrent: the frame goes on in the interpreter until it is installed
+// (jitRegInstall). Where it is 0, it is the loop a frame of the function
+// waits at for this compile, if any (jitRegFrameAt).
 func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool, frameAt int) *jitRegEntry {
 	s := r.jit
 	osrAt := frameAt
@@ -377,9 +374,8 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 		return nil
 	}
 	e := &jitRegEntry{key: key, life: life, used: s.epoch()}
-	// Its state kept while the compile fills and counts it, as the stack
-	// form's compile holds its entry (roomFor's busy): the room made for
-	// the code would otherwise let go of the state of the very function
+	// Its state kept while the compile fills and counts it: the room made
+	// for the code would otherwise let go of the state of the very function
 	// it is made for (regLifeSpare), whose build then filled a state the
 	// cache no longer counted -- top-level code's 206 KB of closure pools
 	// on arm64, counted only later, past the budget -- and a function short
@@ -660,12 +656,11 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 	need, spill := jit.CodeFootprint(mc), s.spillRoom(mc)
 	// And what the compile had its function's state hold besides -- the
 	// pools of the literals, closures and constructions it makes, filled
-	// as it was built -- which regAccount counts once it is placed, as
-	// the stack form's install asks room for its entry's learnedBytes
-	// with the code (jitInstall). Asked for the code alone, top-level code
-	// declaring forty functions, its closures' pools 206 KB, was placed
-	// with 106 KB of code at a budget of 256 KB, which the two then held
-	// past while it ran, neither one the cache's to reclaim.
+	// as it was built -- which regAccount counts once it is placed. Asked
+	// for the code alone, top-level code declaring forty functions, its
+	// closures' pools 206 KB, was placed with 106 KB of code at a budget of
+	// 256 KB, which the two then held past while it ran, neither one the
+	// cache's to reclaim.
 	grown := 0
 	if l := e.life; l != nil && l.regCounted {
 		grown = max(jitEntryFixed+l.learnedBytes()-l.bytes, 0)
@@ -849,10 +844,9 @@ func (s *jitState) regInUseOf(e *jitRegEntry, called map[*bytecode.Function]bool
 // regAge notes, at epoch now, which register code was used since the last
 // look (jitRegEntry's used), and which functions' kept state
 // (regLearned) was, and counts again what each function's state holds
-// (regAccount), as age measures the stack form's entries; and lets go of
-// what belonged to functions that are gone, and of the links no code
-// calls through of functions the cache holds nothing for (regPruneLinks),
-// as age unlinks the stack form's.
+// (regAccount); and lets go of what belonged to functions that are gone,
+// and of the links no code calls through of functions the cache holds
+// nothing for (regPruneLinks).
 func (s *jitState) regAge(now uint64) {
 	for key, e := range s.regCache {
 		if key.gone() {
@@ -893,8 +887,8 @@ func (s *jitState) regAge(now uint64) {
 // regAccount counts what l, a function's state (regLearned), holds now
 // in what the JIT holds (regHeld), if the JIT keeps it (regCounted): its
 // entry and what it learned, the object pools' objects among it
-// (learnedBytes), as the stack form's account measures an entry. Not its
-// code, which its function's entry in regCache counts.
+// (learnedBytes). Not its code, which its function's entry in regCache
+// counts.
 func (s *jitState) regAccount(l *jitEntry) {
 	if l == nil || !l.regCounted {
 		return
@@ -909,8 +903,8 @@ func (s *jitState) regAccount(l *jitEntry) {
 
 // regDropLife lets go of l, the state the JIT kept for the function whose
 // key is key (regLearned): what it learned, the objects its pools and its
-// calls' targets hold among it, as the stack form's cache drops an entry
-// with no code (forget). Learning again, the function makes a new one.
+// calls' targets hold among it. Learning again, the function makes a new
+// one.
 func (s *jitState) regDropLife(key jitKey, l *jitEntry) {
 	if s.regLearned[key] == l {
 		delete(s.regLearned, key)
@@ -924,8 +918,7 @@ func (s *jitState) regDropLife(key jitKey, l *jitEntry) {
 
 // regLifeUses is how often the function whose state l is ran: its runs
 // while it had no code (invoked, which its samples bring up to date,
-// jitRegArm), and its code's uses (regUses), as invoked and uses move
-// for the stack form's entry warming and with code.
+// jitRegArm), and its code's uses (regUses).
 func regLifeUses(l *jitEntry) uint64 {
 	n := uint64(l.invoked) + l.starts + l.ssaStats.entries + l.goOns + l.slowCalls
 	if k := l.regLink; k != nil {
@@ -969,8 +962,7 @@ func (s *jitState) regLetGoLife(key jitKey, l *jitEntry) {
 
 // regPruneLinks lets go of the links (regLinks) of functions gone, and of
 // those no code calls through of functions the cache holds nothing for
-// (regUnlink), as the stack form's age drops the links neither an entry
-// nor code has.
+// (regUnlink).
 func (s *jitState) regPruneLinks() {
 	for key, l := range s.regLinks {
 		if key.gone() {
@@ -985,8 +977,7 @@ func (s *jitState) regPruneLinks() {
 // its function has nothing in the cache (regCache), no code holds it
 // (refs, regHoldLinks), and no compile under way may -- one on the
 // runtime's goroutine (regBuilds), or in the background, whose
-// feedback has asked for it -- as the stack form's unlink forgets a link
-// no entry owns and no code calls through. A link is made at a call Go
+// feedback has asked for it. A link is made at a call Go
 // makes for a native caller, for a generic call to find the function by
 // (regHint), and by every compile that calls a function natively: kept
 // for good, a program streaming functions through the cache kept one for
@@ -1059,7 +1050,7 @@ func (s *jitState) regDropLink(l *jitLink) {
 // regHoldLinks counts code whose keep is fb calling through each of its
 // links once (jitLink's refs), by d: 1 as the code is placed, -1 as it is
 // closed, when a link no code calls through any longer is let go of
-// (regUnlink), as the stack form's setLinks counts an entry's code.
+// (regUnlink).
 func (s *jitState) regHoldLinks(fb *jitFeedback, d int) {
 	if fb == nil {
 		return
@@ -1128,8 +1119,7 @@ func (s *jitState) regVictims(v []jitVictim, now uint64) []jitVictim {
 		v = append(v, jitVictim{key: key, re: e, reg: true, class: class, used: e.used, serial: serial, bytes: n})
 	}
 	// The state kept of functions the cache holds nothing for -- warming
-	// up, or their code let go of -- as the stack form's entries with no
-	// code, which it reclaims with the refusals (listVictims).
+	// up, or their code let go of -- reclaimed with the refusals.
 	for key, l := range s.regLearned {
 		if s.regCache[key] != nil || !l.regCounted || !s.regLifeSpare(key, l, called) {
 			continue
@@ -1248,18 +1238,16 @@ func (s *jitState) regReclaim(x *jitVictim, now uint64) {
 // flush's last look, not young, not in use (flush): used are the code that
 // ran, by its uses, and the callees of code used -- inlined there, or
 // called natively -- whose own uses do not count what runs of them there,
-// and whose state what the caller compiles again learns from, as flush
-// finds the stack form's. It lets go of the programs no compile asked for
-// since its last look (regTrimLowering), as the flush ages code: a
-// callee's program for inlining, which no caller is compiled with any
-// longer, had been kept for as long as the callee's code, the callee warm
-// or not. And it lets go of all the JIT keeps for the functions of a realm
-// none of whose code was used and none of whose functions ran since its
-// last look, but their code, which goes as any code does -- what they
-// learned, their entries with no code, their programs -- as jitFlushRealms
-// drops the stack form's entries with no code of such a realm: a realm a
-// host dropped is reachable from them, what its functions learned holding
-// its objects, and only so let go of.
+// and whose state what the caller compiles again learns from. It lets go of
+// the programs no compile asked for since its last look (regTrimLowering),
+// as the flush ages code: a callee's program for inlining, which no caller
+// is compiled with any longer, had been kept for as long as the callee's
+// code, the callee warm or not. And it lets go of all the JIT keeps for the
+// functions of a realm none of whose code was used and none of whose
+// functions ran since its last look, but their code, which goes as any code
+// does: what they learned, their entries with no code, their programs. A
+// realm a host dropped is reachable from them, what its functions learned
+// holding its objects, and only so let go of.
 func (s *jitState) regFlush(tick, now uint64) {
 	called := s.regCalledFns()
 	cur := s.rt.jitRealmKey()
@@ -1451,10 +1439,10 @@ func (s *jitState) dropReg(key jitKey, e *jitRegEntry) {
 		}
 		// What the floor noted as held for good has gone, and its
 		// function's state, which its code had kept, is the cache's to
-		// reclaim now (regLifeSpare): looked for again, as the stack
-		// form's dropEntry has it. Kept, the floor had a full budget
-		// refuse room with a hundred kilobytes of such states reclaimable,
-		// the JIT holding past its budget until the epoch's end.
+		// reclaim now (regLifeSpare): looked for again. Kept, the floor had
+		// a full budget refuse room with a hundred kilobytes of such states
+		// reclaimable, the JIT holding past its budget until the epoch's
+		// end.
 		s.floorAt = 0
 	}
 	e.dropped, e.cached = true, false
@@ -2007,9 +1995,8 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 			next, ran, err = r.regWhole(f, c, wb, exitPC)
 			if err != nil && mcallee.IsObject() && !e.invalid {
 				// A loop's built-in's call whose callback threw: learned
-				// all the same, as the stack form's learns it before the
-				// call (jitCallSeen's jitForEaches) -- a loop whose
-				// callback throws at every call was never made.
+				// all the same -- a loop whose callback throws at every
+				// call was never made.
 				r.jitRegForEachSeen(f, e, exitPC, mcallee, mrecv, mcb, int(w.X()))
 			}
 			if seen.write && err == nil && ran {
@@ -2661,8 +2648,7 @@ func (r *Runtime) jitRegPlainWhole(ctx *abi.Context, cl *closure, c *regCode) bo
 // jitRegGoSettled reports whether the call of Go ctx makes at register pc
 // rpc of c is one Go makes for good, which jitRegRunGoProfit judges: not
 // a call of a function, which the code may make natively once it has
-// learned the call (jitRegCallSeen), as the stack form judges none that
-// is unsettled (jitCallUnsettled).
+// learned the call (jitRegCallSeen).
 func (r *Runtime) jitRegGoSettled(ctx *abi.Context, c *regCode, rpc int) bool {
 	if rpc >= len(c.rc.Code) {
 		return false
@@ -2930,7 +2916,7 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 		// What the call called, which the code may call natively once
 		// compiled again (jitRegCallSeen), or make a loop of its own
 		// (jitRegForEachSeen): asked while the call is unsettled
-		// (jitRegCallSettle), as the stack form's (jitCallUnsettled).
+		// (jitRegCallSettle).
 		if !r.jitRegViaCall(op, callee, this) {
 			// G.call(x, ...) of a script function G keeps the call
 			// unsettled, as a call of a function with code does: its G
@@ -2965,8 +2951,7 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 	}
 	if err != nil && r.stopped == nil && op == bytecode.RCallMW && !run.e.invalid && jitRegCallUnsettled(run.e, rpc, op) {
 		// A loop's built-in's call whose callback threw, learned all the
-		// same, as the stack form's learns it before the call
-		// (jitCallSeen's jitForEaches).
+		// same.
 		r.jitRegForEachSeen(f, run.e, rpc, callee, this, first, argc)
 	}
 	if err != nil || r.stopped != nil || run.e.invalid || run.leave || r.jitRegCompileDueNow(&run, idx) {

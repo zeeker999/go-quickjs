@@ -15,22 +15,21 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
 
-// Register code compiled in the background, as the stack form's is
-// (zzjit_background.go): the runtime's goroutine lowers the function's
-// register code and asks its feedback ahead (jitRegSnapshotOf); a worker
-// of the process's builds the function from the snapshot, optimizes it
-// and runs the backend (jitRegJob.run), touching nothing of the
-// runtime's; and the runtime's goroutine installs it at a later check
-// (jitDrain), at a sample of the register tier's (jitRegHot), placing its
-// code as the compile made on the spot would have. Meanwhile the function
-// runs in the interpreter, or in its code that the compile replaces, which
-// goes on running, valid, called by its native callers, as V8's does; a
-// compile of a function deoptimized since is thrown away, as the stack
-// form's is (jitReoptimized). Code for a frame waiting at a loop
-// (jitRegLoopCode) is compiled so too, and kept beside the function's code
-// at its install (jitRegInstall's osrAt). A build that asked what the snapshot was not asked (a
-// miss), or whose questions took back what they cannot, is built on the
-// runtime's goroutine at the install instead.
+// Register code compiled in the background (zzjit_background.go): the
+// runtime's goroutine lowers the function's register code and asks its
+// feedback ahead (jitRegSnapshotOf); a worker of the process's builds the
+// function from the snapshot, optimizes it and runs the backend
+// (jitRegJob.run), touching nothing of the runtime's; and the runtime's
+// goroutine installs it at a later check (jitDrain), at a sample of the
+// register tier's (jitRegHot), placing its code as the compile made on the
+// spot would have. Meanwhile the function runs in the interpreter, or in
+// its code that the compile replaces, which goes on running, valid, called
+// by its native callers, as V8's does; a compile of a function deoptimized
+// since is thrown away (jitRegJob's deopts). Code for a frame waiting at a
+// loop (jitRegLoopCode) is compiled so too, and kept beside the function's
+// code at its install (jitRegInstall's osrAt). A build that asked what the
+// snapshot was not asked (a miss), or whose questions took back what they
+// cannot, is built on the runtime's goroutine at the install instead.
 
 // jitRegJob is a register compile in the background.
 type jitRegJob struct {
@@ -47,7 +46,7 @@ type jitRegJob struct {
 	// (jitRegFrameAt), whose entry escape analysis keeps. osrAt, where not
 	// 0, is that header for code kept for a loop (jitRegLoopCode), to be
 	// kept beside osrBeside, the function's code it was asked beside,
-	// if that is still the function's at the install (jitRegInstallOSR).
+	// if that is still the function's at the install (jitRegInstall).
 	frameAt   int
 	osrAt     int
 	osrBeside *jitRegEntry
@@ -168,8 +167,7 @@ func (r *Runtime) jitRegSubmit(j *jitRegJob) {
 	if j.osrAt != 0 {
 		// Code for a loop, which the function's code it is asked beside
 		// waits for: its frames waiting at the loop go on in the
-		// interpreter meanwhile (jitRegLoopCode), as the stack form's wait
-		// for their entry's pending compile.
+		// interpreter meanwhile (jitRegLoopCode).
 		j.osrBeside.osrJob = j
 	} else {
 		if s.regPendingJobs == nil {
@@ -317,9 +315,7 @@ func (r *Runtime) jitRegInstall(j *jitRegJob) {
 		if j.key.gone() || e.life.deopts != j.deopts || old != j.osrBeside || old.invalid || old.code == nil || old.dropped {
 			// Gone; deoptimized since; or the code it was asked beside
 			// compiled again, invalid or let go of: frames in the
-			// function's loops are the new code's to learn of, as the
-			// stack form's code kept for a loop goes once its function's is
-			// compiled again (osrReplaced).
+			// function's loops are the new code's to learn of.
 			s.bgDiscarded++
 			return
 		}

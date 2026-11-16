@@ -3861,7 +3861,7 @@ const minInliningFrequency = 0.05
 
 // MinInliningFrequency is minInliningFrequency, for the VM, which decides
 // a call made less often a native call, not one to inline (its
-// jitCallCold).
+// regCallCold).
 const MinInliningFrequency = minInliningFrequency
 
 // siteFrequency is how often the root's call at pc, the frame being
@@ -9415,9 +9415,8 @@ func (b *builder) windowCall(blk *Block, pc int, in ir.Instruction, calls []*Cal
 		if tf, ok := b.fb.(TypeofFeedback); ok && b.goCalls() {
 			if cells, ok := tf.TypeofCells(); ok && cells != 0 {
 				// Its name loaded from the runtime's table, Go's for what
-				// native code cannot tell, as the stack form's
-				// (typeofCall): a call of Go at each had been register
-				// code's.
+				// native code cannot tell: a call of Go at each had been
+				// register code's.
 				b.windowTypeof(blk, pc, in, cells)
 				return
 			}

@@ -71,8 +71,7 @@ func (r *Runtime) jitRegForEachSeen(f *frame, e *jitRegEntry, rpc int, callee, r
 	if cl.reg == nil && r.regOf(cl) == nil {
 		// A callback only the built-in has called, which made its frame
 		// without the register code a call of it would get -- a sort's
-		// comparator -- given it, as the stack form's needs its function
-		// alone (jitForEachSeen).
+		// comparator -- given it.
 		return
 	}
 	if sort && !jitRegSortComparator(cl.fn, cl.reg.rc) {
@@ -95,9 +94,9 @@ func (r *Runtime) jitRegForEachSeen(f *frame, e *jitRegEntry, rpc int, callee, r
 		return
 	}
 	l.nativeCalls = append(l.nativeCalls, jitInline{pc: int32(rpc), obj: o, forEach: true, cb: cl, cbObj: cb.Object(), proto: proto})
-	// Decided: a loop of its own, as the stack form's jitForEachSeen marks
-	// it (callSites) -- left undecided, its callback's unwinding had the
-	// code compiled again (jitRegUnwound) rather than stop calling it.
+	// Decided: a loop of its own, marked so in callSites -- left undecided,
+	// its callback's unwinding had the code compiled again (jitRegUnwound)
+	// rather than stop calling it.
 	if c := f.cl.reg; c != nil && rpc < len(c.rc.Code) {
 		if len(l.callSites) != len(c.rc.Code) {
 			l.callSites = make([]uint8, len(c.rc.Code))
@@ -267,17 +266,16 @@ func jitRegSortComparator(fn *bytecode.Function, rc *bytecode.RegCode) bool {
 // which the loop checks it is given, its window the loop's call's
 // operands -- or, one made anew at each call of its maker (byCode), no
 // object, for the builder to inline where the caller makes it just before
-// the call (madeCallback, ssa's madeAt), as the stack form's -- not an
-// arrow that reads its this, which may come from any frame, nor a sloppy
-// function that reads its this, which the loop's call coerces -- the
-// global object for the undefined a loop without a thisArg gives it --
-// as the stack form's loop refuses a callback whose site coerces a this
-// it reads (ssa's Coerce with a ThisSlot): inlined, its this was the
-// loop's undefined, this === globalThis false. Nor one whose inlining in
-// the loop left native code too often (jitInlineLeft's cbLeft, counted on
-// the loop's own entry, as the stack form's), called natively since: kept
-// among the call's inlines, its leaving had made the loop's call a
-// native call of the callback, and the loop was built no more.
+// the call (madeCallback, ssa's madeAt) -- not an arrow that reads its
+// this, which may come from any frame, nor a sloppy function that reads its
+// this, which the loop's call coerces -- the global object for the
+// undefined a loop without a thisArg gives it (ssa's Coerce with a
+// ThisSlot): inlined, its this was the loop's undefined, this ===
+// globalThis false. Nor one whose inlining in the loop left native code too
+// often (jitInlineLeft's cbLeft, counted on the loop's own entry), called
+// natively since: kept among the call's inlines, its leaving had made the
+// loop's call a native call of the callback, and the loop was built no
+// more.
 func (f *jitRegFeedback) callbackInline(x jitInline, site ssa.CallSite, argc int) (ssa.InlineSite, bool) {
 	cl, o := x.cb, x.cbObj
 	byCode := x.byCode || site.ByCode != 0
@@ -435,12 +433,11 @@ func jitRegSlotIndex(p *ir.Program, wb, i int) int {
 
 // jitRegPushLoopFrame pushes the frame of the built-in whose call register
 // code makes a loop of (abi.Context's Loop, loop), its callback's caller,
-// as Go's forEach has a frame while its callback runs (nativeFrame) and
-// the stack form's unwinding makes one (jitPushLoopFrame), for the frames
-// Go makes of a callback inlined in the loop, which a stack trace shows:
-// "at Array.forEach". Its receiver is arr, the loop's array, or, where
-// the slot holds none, the prototype of the loop's kind, which the trace
-// names the frame by all the same.
+// as Go's forEach has a frame while its callback runs (nativeFrame), for
+// the frames Go makes of a callback inlined in the loop, which a stack
+// trace shows: "at Array.forEach". Its receiver is arr, the loop's array,
+// or, where the slot holds none, the prototype of the loop's kind, which
+// the trace names the frame by all the same.
 func (r *Runtime) jitRegPushLoopFrame(loop uint64, arr Value) {
 	kind := int(loop >> 32)
 	fe := r.jitLoopFn(kind)

@@ -542,8 +542,8 @@ func regGoBranches(w bytecode.RInstr) bool {
 // regDefinition reports whether cold operation op makes a class's or an
 // object literal's member, or a private one's, which a callee's code
 // leaves to Go: of those,
-// what reads only its operands and the frame (frameDefinition), and the
-// operations Go makes from native code (GoOperation), a callee keeps.
+// what reads only its operands and the frame, and the operations Go makes
+// from native code (GoOperation), a callee keeps.
 func regDefinition(op bytecode.ROp) bool {
 	switch op {
 	case bytecode.RDefineGetterIndex, bytecode.RDefineSetterIndex, bytecode.RClassGetterIndex,
@@ -1668,9 +1668,9 @@ func (l *regLowering) lowerCold(pc int, w bytecode.RInstr) {
 	case bytecode.RCheckGlobalRef:
 		l.emit(ir.Instruction{Op: ir.BindingCheck, Dest: int(a), Key: l.name(b)}, false)
 	case bytecode.RAssertResolved:
-		// R[A], check_global_ref's answer, checked natively, as the stack
-		// form's assert_resolved (ir.Resolved): Go throws the
-		// ReferenceError from an exit where it is false. R[A] keeps it.
+		// R[A], check_global_ref's answer, checked natively (ir.Resolved):
+		// Go throws the ReferenceError from an exit where it is false. R[A]
+		// keeps it.
 		l.emit(ir.Instruction{Op: ir.Resolved, Left: reg(a), Right: reg(a), Dest: int(a), Key: l.name(b)}, false)
 	case bytecode.RGetUpvalCheck:
 		l.emit(ir.Instruction{Op: ir.UpvalueRead, Dest: int(a), Key: w.BC(), Check: true}, false)
@@ -2217,8 +2217,8 @@ func RegAccess(rc *bytecode.RegCode, pc int) (reads, writes []int, all bool) {
 	case bytecode.RCopyDataProps, bytecode.RSetProtoOf, bytecode.RArrayPush, bytecode.RArraySpread, bytecode.RNewClass,
 		bytecode.RSetHomeObject, bytecode.RDefineMethod, bytecode.RSetFieldInit,
 		// An accessor's half, a literal's or a class's, and a function
-		// named after its key, made by Go on their operands as the stack
-		// form's (jitDefinition, frameDefinition), not a host exit.
+		// named after its key, made by Go on their operands (the VM's
+		// jitRegFrameless), not a host exit.
 		bytecode.RDefineGetter, bytecode.RDefineSetter,
 		bytecode.RClassGetter, bytecode.RClassSetter, bytecode.RSetFuncName:
 		return []int{a, b}, nil, false

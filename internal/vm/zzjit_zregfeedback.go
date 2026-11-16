@@ -309,8 +309,7 @@ func (f *jitRegFeedback) Accessor(pc int) (ssa.AccessorSite, bool) {
 // a register read or write, to inline (AccessorSite's Inline), as a
 // method's call of it is (Inline): register code native callers may call,
 // not the compiled function's, nor an arrow, nor one that keeps its
-// arguments (regCode's args), as the stack form inlines no accessor that
-// reads them (jitInlinesAt): the builder leaves such a callee's
+// arguments (regCode's args): the builder leaves such a callee's
 // arguments.length and arguments[k] to an exit, whose frame of the
 // inlined level is given the arguments of a call's window alone
 // (jitRegInlineArgs) -- a setter's, inlined, counted none. Its window the
@@ -557,9 +556,9 @@ func (f *jitRegFeedback) callTarget(pc int) (*Object, *closure, bool) {
 	if k.kind&regCallThrough != 0 {
 		// f.call(t, ...), whose cache the interpreter makes f's, entering f
 		// one register on (regCallThrough): the call's function, in the
-		// window, is the realm's Function.prototype.call, as the stack
-		// form's call sees it -- taken for a call of f, a leaf's check of
-		// f failed at every call (hasOwnProperty.call(o, k)).
+		// window, is the realm's Function.prototype.call -- taken for a
+		// call of f, a leaf's check of f failed at every call
+		// (hasOwnProperty.call(o, k)).
 		r := f.fb.r
 		return r.callFn, nil, r.callFn != nil
 	}
@@ -672,10 +671,9 @@ func (f *jitRegFeedback) regLitFed(pc int) bool {
 // a call the code had no entry after (jitRegResumeSeen), which the next
 // compile has one at. The builder asks it by the state's PC, a register
 // pc. After a call of the function itself, which its recursion's outer
-// runs are all suspended at, it has one too, as the stack form's
-// (jitFeedback's Resumed): one leaving deep in the recursion has Go go on
-// after the call in each, which had run the rest of each outer level in
-// the interpreter.
+// runs are all suspended at, it has one too: one leaving deep in the
+// recursion has Go go on after the call in each, which had run the rest of
+// each outer level in the interpreter.
 func (f *jitRegFeedback) Resumed(rpc int) bool {
 	fb := f.fb
 	e := fb.e
@@ -845,8 +843,7 @@ func (f *jitRegFeedback) inline(pc int) (ssa.InlineSite, bool) {
 	}
 	if f.regCallCold(pc, rpc, cl) {
 		// One made too seldom to be inlined is called natively, whatever
-		// its size, as the stack form's (jitCallCold) and V8's Turbofan
-		// decide it.
+		// its size, as V8's Turbofan decides it.
 		return ssa.InlineSite{}, false
 	}
 	if site.Parent != 0 {
@@ -932,15 +929,15 @@ func (f *jitRegFeedback) inline(pc int) (ssa.InlineSite, bool) {
 	return in, true
 }
 
-// regCallCold is the stack form's jitCallCold for register code: whether
-// the call at the program's instruction pc, register pc rpc, of cl's
-// function, which the existing tiers count every call of, is made too
-// seldom for each invocation of the frame's function to be inlined
-// (ssa.MinInliningFrequency), as V8's Turbofan asks the frequency before
-// it forces a small function in -- not where the code learned a call
-// there they do not count; nor a call inside a callee inlined, which is
-// inlined however seldom it is made, as V8 inlines the callee and leaves
-// such a call a call, which an inlined frame does not make.
+// regCallCold reports whether the call at the program's instruction pc,
+// register pc rpc, of cl's function, which the interpreter counts every
+// call of, is made too seldom for each invocation of the frame's function
+// to be inlined (ssa.MinInliningFrequency), as V8's Turbofan asks the
+// frequency before it forces a small function in -- not where the code
+// learned a call there it does not count; nor a call inside a callee
+// inlined, which is inlined however seldom it is made, as V8 inlines the
+// callee and leaves such a call a call, which an inlined frame does not
+// make.
 func (f *jitRegFeedback) regCallCold(pc int, rpc int32, cl *closure) bool {
 	if cl == nil || f.fb.root != nil || !jitCountedCallee(cl) {
 		return false
@@ -959,8 +956,7 @@ func (f *jitRegFeedback) regCallCold(pc int, rpc int32, cl *closure) bool {
 }
 
 // jitRegCallOp is op with a call in tail position's opcode as the
-// ordinary call's, as native code makes it where the stack is shallow, as
-// the stack form's jitCallOp.
+// ordinary call's, as native code makes it where the stack is shallow.
 func jitRegCallOp(op bytecode.ROp) bytecode.ROp {
 	switch op {
 	case bytecode.RCallWT:

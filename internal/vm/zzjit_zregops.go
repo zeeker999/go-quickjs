@@ -117,10 +117,9 @@ func (f *jitRegFeedback) IndexOf(pc int) (uintptr, int, bool) {
 func (f *jitRegFeedback) ParseInt(pc int) (uintptr, bool) {
 	o, n, ok := f.methodCall(pc, false)
 	if !ok || n != 1 || o == nil || o != f.fb.r.jitParseInt || f.Generic(pc) {
-		// Not where its argument was met not a number (jitRegCallMissed),
-		// which the stack form's makes natively only once seen a number
-		// (jitParseInts): a call of Go there, which had been a host exit
-		// at every call -- parseInt('7').
+		// Not where its argument was met not a number (jitRegCallMissed): a
+		// call of Go there, which had been a host exit at every call --
+		// parseInt('7').
 		return 0, false
 	}
 	f.fb.keep().holders = append(f.fb.keep().holders, o)
@@ -144,8 +143,7 @@ func (f *jitRegFeedback) BigString(pc int) (uintptr, bool) {
 // call of parseInt, the realm's, that native code makes of a number
 // (ParseInt), met an argument that is none -- built generic, a call of
 // Go, from the next compile on (jitNumberMissed), compiled again from here
-// (jitRegReopt), as the stack form learns a parseInt only of a number
-// (jitParseInts); or a replace's leaf met operands its check never takes
+// (jitRegReopt); or a replace's leaf met operands its check never takes
 // (below).
 func (r *Runtime) jitRegCallMissed(f *frame, c *regCode, e *jitRegEntry, wb, rpc int) {
 	if rpc < 0 || rpc >= len(c.rc.Code) {
@@ -167,9 +165,8 @@ func (r *Runtime) jitRegCallMissed(f *frame, c *regCode, e *jitRegEntry, wb, rpc
 	case op == bytecode.RCallMW && w.X() == 2 && r.strReplaceFn != nil && callee.Object() == r.strReplaceFn:
 		// The replace leaf's (Leaf), of a pattern that is no RegExp or a
 		// template that is no string -- s.replace('b', f) -- which its
-		// check never takes, as the stack form learns a replace's leaf
-		// only of operands its check takes (jitReplaceLeafSeen): left so,
-		// the call left native code at every call.
+		// check never takes: left so, the call left native code at every
+		// call.
 		if pat, tmpl := r.stack[a], r.stack[a+1]; pat.IsObject() && pat.Object().class == ClassRegExp && tmpl.IsString() {
 			return
 		}
@@ -238,10 +235,9 @@ func (r *Runtime) jitRegPlainSet(ctx *abi.Context, idx int) (*closure, bytecode.
 	if st := jitGoCallState(ctx); st != nil && st.Inline != 0 {
 		// An inlined callee's write: its own closure's site and name, at
 		// its register pc (InlinePC), the closure among those the code
-		// inlines, as the stack form's (jitGoInlined) -- refused, the
-		// write left native code, and a callee inlined in a loop whose
-		// site went megamorphic finished in the interpreter at every
-		// call until it was inlined no more.
+		// inlines -- refused, the write left native code, and a callee
+		// inlined in a loop whose site went megamorphic finished in the
+		// interpreter at every call until it was inlined no more.
 		var in *closure
 		if owner != nil && owner.keep != nil {
 			for _, x := range owner.keep.inlined {
@@ -437,20 +433,18 @@ func (f *jitRegFeedback) CellsPool() (uintptr, []int32, bool) {
 }
 
 // jitRegFrameless makes register instruction op, whole, for native code
-// in ctx without its frame where that runs nothing and throws nothing, as
-// the stack form's operations are made (jitOpPlain, jitOpFrameless), each
-// as the stack form's instruction of it: an object's spread -- learning
-// the layouts' copy native code makes next (jitCopyLearn) -- an array's
-// spread of a dense array's elements, an element appended, an object
-// pattern's rest, a computed key converted or defined, a literal's
+// in ctx without its frame where that runs nothing and throws nothing, each
+// as jitOpFrameless makes the stack instruction of it: an object's spread
+// -- learning the layouts' copy native code makes next (jitCopyLearn) -- an
+// array's spread of a dense array's elements, an element appended, an
+// object pattern's rest, a computed key converted or defined, a literal's
 // __proto__. Its operands are the instruction's registers (compile's
-// RegAccess), in their order, the stack form's operands'; its result goes
+// RegAccess), in their order, the stack instruction's; its result goes
 // to the call's keep cell, which the code reads where the instruction
 // writes a register. A class's or a literal's member made -- a method's
 // home object set, a method defined, a literal's or a class's getter or
 // setter defined, a class's field initializer given, a function named
-// after its key -- it makes of cl's names, c its register code, as the
-// stack form's jitGoHostPlain makes them (jitDefinition's cases). It
+// after its key -- it makes of cl's names, c its register code. It
 // reports whether it made it; what it does not make, Go makes on the
 // frame (jitRegOpMade, jitRegWhole).
 func (r *Runtime) jitRegFrameless(ctx *abi.Context, cl *closure, c *regCode, rpc int, op bytecode.ROp) bool {
@@ -466,8 +460,7 @@ func (r *Runtime) jitRegFrameless(ctx *abi.Context, cl *closure, c *regCode, rpc
 		switch op {
 		case bytecode.RDefineGetter, bytecode.RDefineSetter, bytecode.RClassGetter, bytecode.RClassSetter:
 			// An accessor's half, a literal's or a class's, as
-			// regDefineAccessor and regClassAccessor define it and the
-			// stack form's jitGoHostPlain (jitDefinition's define_getter).
+			// regDefineAccessor and regClassAccessor define it.
 			if a.IsObject() && b.IsObject() {
 				getter := op == bytecode.RDefineGetter || op == bytecode.RClassGetter
 				flags := memberFlags(0)
@@ -618,11 +611,9 @@ func (r *Runtime) jitRegReadSeen(f *frame, c *regCode, run jitRegRun, rpc int, r
 	l := r.jitRegLearnedFor(f, run.e)
 	if !r.jitRegSiteMegamorphic(f.cl, c, l, rpc) {
 		if op.plain() && recv.IsObject() {
-			// Its prototype's too, for a key the receiver lacks, as the
-			// stack form fills a pattern's read (jitPropertySeen's
-			// get_prop_under): register code's pattern reads are plain
-			// reads, each absent key -- an option's default -- a call
-			// of Go at every read.
+			// Its prototype's too, for a key the receiver lacks: register
+			// code's pattern reads are plain reads, each absent key -- an
+			// option's default -- a call of Go at every read.
 			r.jit.megaFill(recv.Object(), op.key)
 			r.jitMegaFillProto(recv.Object(), op.key)
 		}

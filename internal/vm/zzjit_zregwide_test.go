@@ -59,8 +59,8 @@ const wideCallsSetup = `
 // is a native call where it calls what its code learned, and a call of Go
 // past them, its operands written to the callee's window, where Go makes
 // the frame of the call from (mir's windowGoCall, the VM's jitRegGoCallOn)
-// -- not an exit: the stack form's left native code there. Each answer is
-// the interpreter's, the collector marking or not.
+// -- not an exit. Each answer is the interpreter's, the collector marking
+// or not.
 func TestJITRegWideCallsOfGo(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")

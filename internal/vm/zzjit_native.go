@@ -541,11 +541,10 @@ func (r *Runtime) jitKeyOf(fn *bytecode.Function) jitKey {
 
 // jitRegKeyOf is jitKeyOf(cl.fn), which register code's every call of Go,
 // exit and level of a native call asks, kept by cl's template
-// (jitCodeFields' jitRegKey), not found by the function's address
-// (entryFor): weak.Make finds or makes the runtime's handle of fn at each
-// call -- a search of its span's specials -- a sixth
-// of AWFY's CD under the register JIT. A closure of another realm than the
-// running one's has its key made.
+// (jitCodeFields' jitRegKey), not found by the function's address:
+// weak.Make finds or makes the runtime's handle of fn at each call -- a
+// search of its span's specials -- a sixth of AWFY's CD under the register
+// JIT. A closure of another realm than the running one's has its key made.
 func (r *Runtime) jitRegKeyOf(cl *closure) jitKey {
 	cc := cl.closureCode
 	if cc == nil || cl.realm != r.Realm {
@@ -658,11 +657,9 @@ type jitEntry struct {
 	regCallers []jitKey
 	// regCounted marks, for a function's register code, the state the
 	// JIT keeps for it (jitState's regLearned), whose bytes (bytes) count
-	// in what the JIT holds (regHeld) as a stack form's entry's measure
-	// counts what it learned (regAccount); regFlushed marks one whose
-	// code the cache let go of (regLetGo), whose next compile is one
-	// again of code dropped (jitState's recompiled), as a ghost's
-	// dropped marks the stack form's.
+	// in what the JIT holds (regHeld, regAccount); regFlushed marks one
+	// whose code the cache let go of (regLetGo), whose next compile is one
+	// again of code dropped (jitState's recompiled).
 	regCounted, regFlushed bool
 	// inlinePending marks calls found to inline since the code was
 	// compiled (jitLearned's callSites), which it is compiled again for
@@ -824,8 +821,7 @@ type jitState struct {
 	regKeptSeeding bool
 	// regHeld is what the register code in regCache takes (held), and
 	// what the JIT keeps for each function besides, its learned state in
-	// regLearned (regAccount), as the stack form's entryBytes counts its
-	// entries' code and what they learned.
+	// regLearned (regAccount).
 	regHeld int
 	// regLearned is what the code made from a function's register code
 	// learned at its exits, by the function's key, kept across its
@@ -1256,9 +1252,9 @@ func jitPoolBytes(pool *abi.ObjectPool) int {
 	return n
 }
 
-// held is what the JIT holds for the runtime: its entries (measure), the
-// programs it has lowered (jitRegLower), and what it holds besides
-// (sharedBytes).
+// held is what the JIT holds for the runtime: its register code and its
+// functions' state (regHeld), the programs it has lowered (jitRegLower),
+// and what it holds besides (sharedBytes).
 func (s *jitState) held() int {
 	return s.lowerBytes + s.sharedBytes() + s.regHeld
 }
@@ -1548,7 +1544,7 @@ func (s *jitState) learn(instructions, bytes int) {
 // since it last looked, by their uses, and measure each again, as what an
 // entry learns grows its slices and pools; and drop the entries, lowerings
 // and links of the functions collected since, whose weak keys are empty,
-// and the links neither an entry nor code has (unlink); and flush code
+// and the links neither an entry nor code has (regAge); and flush code
 // gone unused (flush).
 func (s *jitState) age(now uint64) {
 	if s.agedAt == now+1 {
@@ -1657,26 +1653,6 @@ func jitArmEpoch() {
 		jitGCEpoch.Add(1)
 		jitArmEpoch()
 	})
-}
-
-// hintsCap is the hint table's capacity once remember has taken a slot of
-// it, and hintGrowth the bytes that adds to what the JIT holds: none while
-// a slot is free, and the table's growth when it is full. A compile makes
-// room for it with its code's, before remember: the table grew past the
-// budget the room had been made in, a full one by half again.
-func (s *jitState) hintsCap() int {
-	n := len(s.hints) + 1
-	if len(s.hints) == 0 {
-		n++
-	}
-	if len(s.hintFree) != 0 || n <= cap(s.hints) {
-		return cap(s.hints)
-	}
-	return max(n, 2*cap(s.hints), 16)
-}
-
-func (s *jitState) hintGrowth() int {
-	return (s.hintsCap() - cap(s.hints)) * int(unsafe.Sizeof(jitHintSlot{}))
 }
 
 func (r *Runtime) releaseJIT() {

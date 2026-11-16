@@ -12,11 +12,10 @@ import (
 
 // A register compile is placed only where there is room for its code and
 // for what it had its function's state hold besides -- the pools of the
-// closures it makes, filled as it was built -- as the stack form's install
-// asks for its entry's learnedBytes with the code (jitInstall). Placed in
-// room for the code alone, top-level code declaring forty functions held
-// 106 KB of code and 214 KB of state at a budget of 256 KB on arm64 under
-// CI's stress (TestJITRegRealmsWithinTheBudgetClocked), neither the cache's
+// closures it makes, filled as it was built. Placed in room for the code
+// alone, top-level code declaring forty functions held 106 KB of code and
+// 214 KB of state at a budget of 256 KB on arm64 under CI's stress
+// (TestJITRegRealmsWithinTheBudgetClocked), neither the cache's
 // to reclaim while the code ran. Here a function making arrows is compiled
 // once with room to spare, which measures its code and its state, and then
 // at a budget its code fits and the two do not: the JIT holds no more than
