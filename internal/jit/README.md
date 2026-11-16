@@ -734,10 +734,12 @@ its own, to `jitSnapDepth` -- into a `jitRegSnapshot`, which has
 interfaces it would; a worker builds, optimizes and compiles from it
 (`jitRegJob`), touching nothing of the runtime's; and the runtime's
 goroutine installs it at a later check -- a sample (`jitRegHot`), at a call
-or a back edge, or a call of the function itself, which a compile handed to
-the workers marks (`closureCode`'s `jitEnters`) so that its calls go to the
-JIT (`jitRegEnter`), as the stack form's calls install theirs
-(`tryJITAt`) -- putting back what the questions appended to the
+or a back edge, or any call Go makes of a function with code or a compile
+pending (`jitRegEnter`): a compile handed to the workers marks its
+function's closure (`closureCode`'s `jitEnters`) so that its calls go to the
+JIT, and a call of code compiled again in the background installs the
+replacement as one of its first code does, as the stack form's calls
+install theirs (`tryJITAt`) -- putting back what the questions appended to the
 feedback's lists (`replay`) and placing the code as the compile on the spot
 (`jitRegPlace`). A question the snapshot was not asked is a miss
 (`jitSnapMiss`): the compile is built at the install instead
@@ -747,8 +749,15 @@ native callers, and is not compiled again (`regPendingJobs`). A compile of
 a function deoptimized since it was prepared is thrown away at the install,
 as the stack form's is (`jitRegJob`'s `deopts`), and so is one whose code
 in the cache a native call still runs (`jitRegEntry`'s `levels`), that code
-asked to be compiled again. Top-level code is compiled on the spot, as the
-stack form's is.
+asked to be compiled again. Code for a frame waiting at a loop whose entry
+escape analysis dropped (`jitRegLoopCode`) is compiled in the background
+too, as the stack form's is and as V8's OSR compiles are concurrent: the
+job (`osrAt`) waits beside the function's code it was asked for
+(`jitRegEntry`'s `osrJob`), the frame goes on in the interpreter meanwhile,
+and the install keeps the code beside that code (`regKeepOSR`) -- or throws
+it away where the function deoptimized or its code was compiled again or
+let go of since, its loops then the new code's to learn of. Top-level code
+is compiled on the spot, as the stack form's is.
 
 **Compiling again.** Code is compiled again, in place, when:
 
