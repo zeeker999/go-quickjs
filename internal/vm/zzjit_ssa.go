@@ -352,19 +352,17 @@ const jitPropertyCases = 4
 
 // jitPropOp is a named property's operation as what the JIT learns at its
 // exits sees it, of either form's code: its key, its receiver, its site's
-// cache (nil where it has none, as an object pattern's read), and whether
-// it is a write, a method's read (get_prop_this's, get_method's), or an
-// object pattern's read (get_prop_under's); unnamed marks one whose key is
-// past its closure's names.
+// cache (nil where it has none), and whether it is a write or a method's
+// read (get_prop_this's, get_method's).
 type jitPropOp struct {
-	key                           Atom
-	recv                          Value
-	c                             *propCache
-	write, method, under, unnamed bool
+	key           Atom
+	recv          Value
+	c             *propCache
+	write, method bool
 }
 
 // plain reports whether op is a plain read: get_prop's, not a method's.
-func (op *jitPropOp) plain() bool { return !op.write && !op.method && !op.under }
+func (op *jitPropOp) plain() bool { return !op.write && !op.method }
 
 // jitPolySeenOp is jitPolySeen's, of either form's code: the read op at pc
 // that native code left to Go.
@@ -389,7 +387,7 @@ func (r *Runtime) jitPolySeenOp(e *jitEntry, pc int, op jitPropOp) {
 		e.polyReopt = true
 		return
 	}
-	if !recv.IsObject() || op.unnamed {
+	if !recv.IsObject() {
 		if !recv.IsObject() && !recv.IsNullish() && op.plain() {
 			// A string's, a number's, a boolean's: Go reads it from
 			// native code once the code is compiled again (prim) -- an
@@ -490,7 +488,7 @@ func (r *Runtime) jitPrimitiveSeen(e *jitEntry, pc int, op *jitPropOp) bool {
 	default:
 		return false
 	}
-	if !op.method || op.unnamed || proto == nil {
+	if !op.method || proto == nil {
 		return false
 	}
 	at := uint32(pc)
@@ -526,21 +524,6 @@ func (r *Runtime) jitDeoptSeenOp(e *jitEntry, pc int, op jitPropOp, serial uint3
 		e = &jitEntry{jitLearned: &jitLearned{}}
 	}
 	key, write, recv := op.key, op.write, op.recv
-	if op.under {
-		// An object pattern's read, which has no cache, missed its source's
-		// own table -- a property the source lacks, its default the
-		// pattern's: it looks in the megamorphic cache from the next
-		// compile on, filled now, and Go reads what it does not find from
-		// native code (jitFeedback's Property), rather than deoptimize at
-		// each such read. One that never misses keeps its own table's
-		// search alone, with no branch for Go.
-		jitPolySiteAt(e, pc).mega = true
-		if recv.IsObject() {
-			r.jit.megaFill(recv.Object(), key)
-			r.jitMegaFillProto(recv.Object(), key)
-		}
-		return
-	}
 	if recv.IsBigInt() && op.method && !slices.Contains(e.bigSites, uint32(pc)) {
 		// A BigInt's method: read off BigInt.prototype by the code compiled
 		// again, the site no polymorphic one (jitFeedback's StringProperty).

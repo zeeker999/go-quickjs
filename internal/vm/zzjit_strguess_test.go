@@ -4,8 +4,6 @@ package vm
 
 import (
 	"testing"
-
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
 
 // A method read compiled before its cache knew a receiver, which the code
@@ -91,16 +89,4 @@ func TestJITStringGuessFilledLater(t *testing.T) {
 	if n := r.jit.hosts - hosts; n != 0 {
 		t.Errorf("f left native code %d times in 1,000 reads", n)
 	}
-}
-
-// jitPCOf is the PC of fn's first instruction of the opcode named op.
-func jitPCOf(t *testing.T, fn *bytecode.Function, op string) int {
-	t.Helper()
-	for pc, in := range fn.Code {
-		if in.Op.String() == op {
-			return pc
-		}
-	}
-	t.Fatalf("no %s in %s", op, fn.Name)
-	return 0
 }

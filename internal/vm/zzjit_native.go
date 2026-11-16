@@ -19,7 +19,6 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit"
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
-	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 	"github.com/go-quickjs/go-quickjs/internal/jit/mir"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 	"github.com/go-quickjs/go-quickjs/internal/regexp"
@@ -75,12 +74,7 @@ type jitFields struct {
 	// at once.
 	jitCallThreshold uint16
 	jitICThreshold   uint16
-	jitDeoptDepth    uint32
-	// jitDeoptCode is the code a failed guard left the invocation the
-	// interpreter goes on with at jitDeoptDepth (jitDeoptInterpret), or
-	// nil for one it goes on with for any other reason (jitInterpret).
-	jitDeoptCode *jit.SSACode
-	jit          *jitState
+	jit              *jitState
 	// jitFrameFn and jitFramePC are the function and the loop's header a
 	// back edge's check is under way at, whose frame waits there for what
 	// the check compiles (jitRegLoop, jitRegFrameAt).
@@ -433,7 +427,7 @@ func (r *Runtime) jitSubstringOf(o *Object) (kind int, ok bool) {
 // closure made from the template shares, as V8's closures share their
 // function's feedback and code through its SharedFunctionInfo: how hot the
 // function is, its permanent refusal, and the hint of its code, a slot in
-// the runtime's hint table (jitState.hint), not a pointer -- none of which
+// the runtime's hint table (jitState.hints), not a pointer -- none of which
 // registers a weak key on cold or refused calls. A closure made anew, as
 // each call of a function making an arrow makes one, is as warm as its
 // function, and knows its code from its first call: each closure's own,
@@ -445,22 +439,12 @@ func (r *Runtime) jitSubstringOf(o *Object) (kind int, ok bool) {
 // of a closure of its own. jitResumeSkip is how many resumptions of a
 // generator's or an async function's code judged slow Go makes in the
 // interpreter without looking at the code again (jitRegEnter).
-// jitGenericCalls counts,
-// up to jitCallsHot, the calls generic calls (ssa.CallSite's Generic) left
-// to Go for want of the function's code (jitRegCallTarget).
 type jitCodeFields struct {
-	jitRefused      bool
-	jitCalls        uint8
-	jitLoopDelay    uint8
-	jitResumeSkip   uint8
-	jitGenericCalls uint8
-	jitHint         [4]byte
-	// jitRegHot counts the samples of the function's runs the register
-	// tier took, jitRegDeopts its code's deoptimizations,
-	// and jitRegRefused says it is not compiled from its register code;
-	// jitReg is its code, nil until compiled (zzjit_zregtier.go).
-	jitRegHot, jitRegDeopts uint8
-	jitRegRefused           bool
+	jitResumeSkip uint8
+	jitHint       [4]byte
+	// jitRegRefused says the function is not compiled from its register
+	// code; jitReg is its code, nil until compiled (zzjit_zregtier.go).
+	jitRegRefused bool
 	// jitRegHostOnly says the cache held the function's code refused for
 	// host operations alone at the last resumption Go made of it, and
 	// jitRegColdWork is the work its resumptions have done since, which
@@ -1135,14 +1119,6 @@ type jitState struct {
 	// arrayRooms are pools with large inherited hints. The weak list
 	// releases completed samples without keeping discarded code's pools.
 	arrayRooms []weak.Pointer[abi.ObjectPool]
-}
-
-// Only selected own reference fields are prepared. The receiver bound keeps
-// cycles and unusually large object graphs on the ordinary host path.
-const jitReferenceReceivers = 32
-
-type jitReferences struct {
-	cells [jitReferenceReceivers][ir.MaxProperties]ir.ReferenceCell
 }
 
 func (r *Runtime) initJIT(enabled bool, memoryLimit int64) {
