@@ -89,14 +89,14 @@ const dataViewTestWant = `255.254.18.52.52.18.251.255.255.255.63.192.0.0.3.0 255
 // a frame where nothing they do runs script or throws: each answer is
 // Node's, and an immutable buffer's setters still throw.
 func TestDataViewLeaves(t *testing.T) {
-	for _, tree := range []bool{true} {
+	{
 		r := New(Config{})
 		v, err := r.Run(compileForTest(t, dataViewTestSrc))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got := v.String().Go(); got != dataViewTestWant {
-			t.Errorf("tree tier %v:\ngot  %s\nwant %s", tree, got, dataViewTestWant)
+			t.Errorf("\ngot  %s\nwant %s", got, dataViewTestWant)
 		}
 		v, err = r.Run(compileForTest(t, dataViewImmutableSrc))
 		r.Close()
@@ -104,7 +104,7 @@ func TestDataViewLeaves(t *testing.T) {
 			t.Fatal(err)
 		}
 		if got, want := v.String().Go(), "5,TypeError,TypeError,5 5,TypeError,TypeError,5 5,TypeError,TypeError,5"; got != want {
-			t.Errorf("tree tier %v: immutable buffer: got %s, want %s", tree, got, want)
+			t.Errorf("immutable buffer: got %s, want %s", got, want)
 		}
 	}
 	// Every accessor is declared the leaf of its width.

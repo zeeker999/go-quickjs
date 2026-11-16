@@ -11,7 +11,7 @@ import "testing"
 // runtime at its default setting, src run there rounds times.
 func jitAsyncAgreesForTest(t *testing.T, setup, src string, rounds int) *Runtime {
 	t.Helper()
-	run := func(r *Runtime, tree bool) string {
+	run := func(r *Runtime) string {
 		if _, err := r.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
 		}
@@ -33,12 +33,7 @@ func jitAsyncAgreesForTest(t *testing.T, setup, src string, rounds int) *Runtime
 	}
 	want := New(Config{})
 	t.Cleanup(func() { want.Close(); want.ReleaseClosed() })
-	w := run(want, false)
-	tr := New(Config{})
-	t.Cleanup(func() { tr.Close(); tr.ReleaseClosed() })
-	if got := run(tr, true); got != w {
-		t.Fatalf("tree tier: %s\ninterpreter: %s", got, w)
-	}
+	w := run(want)
 	for _, c := range []jitStressConfig{
 		{threshold: true},
 		{threshold: true, budget: 1},
@@ -47,12 +42,12 @@ func jitAsyncAgreesForTest(t *testing.T, setup, src string, rounds int) *Runtime
 	} {
 		r := jitRuntimeForTest(t, Config{JIT: true})
 		r.jitStress = c
-		if got := run(r, true); got != w {
+		if got := run(r); got != w {
 			t.Fatalf("JIT %+v: %s\ninterpreter: %s", c, got, w)
 		}
 	}
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	if got := run(r, true); got != w {
+	if got := run(r); got != w {
 		t.Fatalf("JIT: %s\ninterpreter: %s", got, w)
 	}
 	return r

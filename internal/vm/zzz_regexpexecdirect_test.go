@@ -62,21 +62,19 @@ const regexpExecDirectTestWant = "4:4,3,1, 4:2,1,1, 4:1,-,1, 7:-,-,-, 0:null 2:2
 func TestRegExpExecDirect(t *testing.T) {
 	want := regexpExecDirectTestWant + " # " + regexpExecDirectTestWant
 	for _, idle := range []bool{true, false} {
-		for _, tree := range []bool{true} {
-			if idle {
-				runtime.GC()
-				debug.SetGCPercent(-1)
-			}
-			r := New(Config{})
-			v, err := r.Run(compileForTest(t, regexpExecDirectTestSrc))
-			r.Close()
-			debug.SetGCPercent(100)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := v.String().Go(); got != want {
-				t.Errorf("tree tier %v, collector idle %v:\ngot  %s\nwant %s", tree, idle, got, want)
-			}
+		if idle {
+			runtime.GC()
+			debug.SetGCPercent(-1)
+		}
+		r := New(Config{})
+		v, err := r.Run(compileForTest(t, regexpExecDirectTestSrc))
+		r.Close()
+		debug.SetGCPercent(100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := v.String().Go(); got != want {
+			t.Errorf("collector idle %v:\ngot  %s\nwant %s", idle, got, want)
 		}
 	}
 }

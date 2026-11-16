@@ -35,15 +35,13 @@ const strEqTestWant = "ab/ab//3,ab/ab//3,b/b/f/3,b/b/f/3,b/b/f/3,bc/bc/f/3,b/b/f
 // own, so that it is run as register code rather than by pureCall.
 func TestStrictEqualityWithStrings(t *testing.T) {
 	t.Parallel()
-	for _, tree := range []bool{true} {
-		r := New(Config{})
-		v, err := r.Run(compileForTest(t, strEqTestSrc))
-		r.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := v.String().Go(); got != strEqTestWant {
-			t.Errorf("tree tier %v: got %s, want %s", tree, got, strEqTestWant)
-		}
+	r := New(Config{})
+	v, err := r.Run(compileForTest(t, strEqTestSrc))
+	r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := v.String().Go(); got != strEqTestWant {
+		t.Errorf("got %s, want %s", got, strEqTestWant)
 	}
 }

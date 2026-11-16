@@ -37,21 +37,19 @@ const regexpRareUnitTestWant = `11374 {"Q":"‰","QQ":"Q\"","x"#,"Qngr":"\/Qngr"
 // finds Node's matches, with the collector idle and running.
 func TestRegExpRareUnit(t *testing.T) {
 	for _, idle := range []bool{true, false} {
-		for _, tree := range []bool{true} {
-			if idle {
-				runtime.GC()
-				debug.SetGCPercent(-1)
-			}
-			r := New(Config{})
-			v, err := r.Run(compileForTest(t, regexpRareUnitTestSrc+"run() + ' # ' + run()"))
-			r.Close()
-			debug.SetGCPercent(100)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got, want := v.String().Go(), regexpRareUnitTestWant+" # "+regexpRareUnitTestWant; got != want {
-				t.Errorf("tree tier %v, collector idle %v:\ngot  %s\nwant %s", tree, idle, got, want)
-			}
+		if idle {
+			runtime.GC()
+			debug.SetGCPercent(-1)
+		}
+		r := New(Config{})
+		v, err := r.Run(compileForTest(t, regexpRareUnitTestSrc+"run() + ' # ' + run()"))
+		r.Close()
+		debug.SetGCPercent(100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := v.String().Go(), regexpRareUnitTestWant+" # "+regexpRareUnitTestWant; got != want {
+			t.Errorf("collector idle %v:\ngot  %s\nwant %s", idle, got, want)
 		}
 	}
 }

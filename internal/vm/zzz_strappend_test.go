@@ -703,16 +703,14 @@ func TestStrAppend(t *testing.T) {
 	t.Parallel()
 	// Its strings grow to 0.8 GB in each runtime.
 	heavy(t)
-	for _, tree := range []bool{true} {
-		r := New(Config{})
-		v, err := r.Run(compileForTest(t, strAppendTestSrc))
-		r.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := v.String().Go(); got != strAppendTestWant {
-			t.Errorf("tree tier %v:\n%s", tree, firstDifference(got, strAppendTestWant))
-		}
+	r := New(Config{})
+	v, err := r.Run(compileForTest(t, strAppendTestSrc))
+	r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := v.String().Go(); got != strAppendTestWant {
+		t.Errorf("\n%s", firstDifference(got, strAppendTestWant))
 	}
 }
 
@@ -733,16 +731,14 @@ result
 
 func TestStrAppendDeclaration(t *testing.T) {
 	t.Parallel()
-	for _, tree := range []bool{true} {
-		r := New(Config{})
-		v, err := r.Run(compileForTest(t, strAppendDeclarationSrc))
-		r.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := v.String().Go(); got != "abcdY" {
-			t.Errorf("tree tier %v: got %q, want abcdY", tree, got)
-		}
+	r := New(Config{})
+	v, err := r.Run(compileForTest(t, strAppendDeclarationSrc))
+	r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := v.String().Go(); got != "abcdY" {
+		t.Errorf("got %q, want abcdY", got)
 	}
 }
 

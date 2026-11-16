@@ -79,16 +79,14 @@ func TestTreeArrayAppends(t *testing.T) {
 		out.join(' | ')`
 	const want = "0,1,2,3,4,5 | 9,1,2,3 | 2 | TypeError | 1,2 | 2 | TypeError | 1,2 | 7 | 1,,,,,5,6 | " +
 		"2 | 1,2 | 0,1 | 3,3,x | 4 | 0,1,2,y"
-	for _, tree := range []bool{true} {
-		r := New(Config{})
-		v, err := r.Run(compileForTest(t, src))
-		r.Close()
-		if err != nil {
-			t.Fatalf("tree %v: %v", tree, err)
-		}
-		if got := v.String().Go(); got != want+" | "+want+" | "+want {
-			t.Errorf("tree %v:\n%s\nwant three of\n%s", tree, got, want)
-		}
+	r := New(Config{})
+	v, err := r.Run(compileForTest(t, src))
+	r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := v.String().Go(); got != want+" | "+want+" | "+want {
+		t.Errorf("got:\n%s\nwant three of\n%s", got, want)
 	}
 }
 
@@ -159,15 +157,13 @@ func TestArrayLengthGrowsWithHoles(t *testing.T) {
 		out.join(' | ')`
 	const want = "0,false,false,,0 | 1,false,false,,0 | 4,false,false,,0 | 10,false,false,,0 | 1000,false,false,,0 | 2000,false,false,,0 | " +
 		"7,false,true,1-2-3----x | 6,false,false,1--3---9 | 1000000,true,false,5 | 1"
-	for _, tree := range []bool{true} {
-		r := New(Config{})
-		v, err := r.Run(compileForTest(t, src))
-		r.Close()
-		if err != nil {
-			t.Fatalf("tree %v: %v", tree, err)
-		}
-		if got := v.String().Go(); got != want {
-			t.Errorf("tree %v:\n%s\nwant\n%s", tree, got, want)
-		}
+	r := New(Config{})
+	v, err := r.Run(compileForTest(t, src))
+	r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := v.String().Go(); got != want {
+		t.Errorf("got:\n%s\nwant\n%s", got, want)
 	}
 }

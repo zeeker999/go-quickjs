@@ -77,22 +77,20 @@ const replaceFlatTestWant = "2637138712 3380 TypeError TypeError3 aa sub:aab bbb
 // pass (zzz_regexpreplace.go): each answer is Node's, with the collector
 // idle and running.
 func TestRegExpReplaceFlat(t *testing.T) {
-	for _, tree := range []bool{true} {
-		for _, idle := range []bool{true, false} {
-			gc := debug.SetGCPercent(-1)
-			if !idle {
-				debug.SetGCPercent(1)
-			}
-			r := New(Config{})
-			v, err := r.Run(compileForTest(t, replaceFlatTestSrc))
-			r.Close()
-			debug.SetGCPercent(gc)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := v.String().Go(); got != replaceFlatTestWant {
-				t.Errorf("tree tier %v, collector idle %v:\ngot  %s\nwant %s", tree, idle, got, replaceFlatTestWant)
-			}
+	for _, idle := range []bool{true, false} {
+		gc := debug.SetGCPercent(-1)
+		if !idle {
+			debug.SetGCPercent(1)
+		}
+		r := New(Config{})
+		v, err := r.Run(compileForTest(t, replaceFlatTestSrc))
+		r.Close()
+		debug.SetGCPercent(gc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := v.String().Go(); got != replaceFlatTestWant {
+			t.Errorf("collector idle %v:\ngot  %s\nwant %s", idle, got, replaceFlatTestWant)
 		}
 	}
 }

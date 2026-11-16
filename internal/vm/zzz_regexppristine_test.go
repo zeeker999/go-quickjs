@@ -175,14 +175,12 @@ func regexpPristineCheck(t *testing.T, r *Runtime, c regexpPristineCase, where s
 // collector idle: each answer is Node's, and the object changed is no
 // longer pristine.
 func TestRegExpPristine(t *testing.T) {
-	for _, tree := range []bool{true} {
-		for _, c := range regexpPristineCases {
-			gc := debug.SetGCPercent(-1)
-			r := New(Config{})
-			regexpPristineCheck(t, r, c, map[bool]string{true: "tree tier", false: "interpreter"}[tree])
-			r.Close()
-			debug.SetGCPercent(gc)
-		}
+	for _, c := range regexpPristineCases {
+		gc := debug.SetGCPercent(-1)
+		r := New(Config{})
+		regexpPristineCheck(t, r, c, "tree tier")
+		r.Close()
+		debug.SetGCPercent(gc)
 	}
 }
 

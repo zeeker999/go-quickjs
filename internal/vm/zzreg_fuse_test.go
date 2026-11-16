@@ -8,22 +8,20 @@ import (
 // and that at least built functions ran as register code.
 func regRunBoth(t *testing.T, src, want string, built int64) {
 	t.Helper()
-	for _, reg := range []bool{true} {
-		fn := compileForTest(t, src)
-		before := RegsBuilt()
-		r := New(Config{})
-		v, err := r.Run(fn)
-		if err != nil {
-			t.Fatalf("reg=%v: %v", reg, err)
-		}
-		if got := v.String().Go(); got != want {
-			t.Errorf("reg=%v: got %s, want %s", reg, got, want)
-		}
-		if n := RegsBuilt() - before; reg && n < built {
-			t.Errorf("only %d functions ran as register code, want %d", n, built)
-		}
-		r.Close()
+	fn := compileForTest(t, src)
+	before := RegsBuilt()
+	r := New(Config{})
+	v, err := r.Run(fn)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if got := v.String().Go(); got != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+	if n := RegsBuilt() - before; n < built {
+		t.Errorf("only %d functions ran as register code, want %d", n, built)
+	}
+	r.Close()
 }
 
 // TestRegFusedElements pins the register form's fused operations: x[++i]

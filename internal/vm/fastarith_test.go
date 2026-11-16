@@ -22,20 +22,17 @@ function g(a, b) { return a + b }
 		"1,3,-2,-2,0,RangeError;6074001000,0,9223372037000250000,1,0,RangeError;" +
 		"-9223372036854775809,-9223372036854775807,9223372036854775808,9223372036854775808,0,RangeError;" +
 		"abcd;;x1;1x;nnull;TypeError"
-	for _, on := range []bool{true} {
-		fn := compileForTest(t, src)
-		r := New(Config{})
-		v, err := r.Run(fn)
-		if err != nil {
-			r.Close()
-			t.Fatalf("tree %v: %v", on, err)
-		}
-		got, err := r.ToString(v)
-		if err != nil || got.Go() != want {
-			t.Errorf("tree %v: got %v, %v; want %s", on, got, err, want)
-		}
+	fn := compileForTest(t, src)
+	r := New(Config{})
+	v, err := r.Run(fn)
+	if err != nil {
 		r.Close()
-		if on {
-		}
+		t.Fatal(err)
 	}
+	got, err := r.ToString(v)
+	if err != nil || got.Go() != want {
+		t.Errorf("got %v, %v; want %s", got, err, want)
+	}
+	r.Close()
+
 }

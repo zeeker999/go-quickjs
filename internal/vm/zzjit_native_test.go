@@ -2018,50 +2018,48 @@ func TestJITSSAElementReferences(t *testing.T) {
 // rather than taking one each; closing the runtime releases every one.
 func TestJITArenaMappings(t *testing.T) {
 	t.Parallel()
-	for _, ssa := range []bool{true} {
-		r := New(Config{JIT: true})
-		r.jitCallThreshold, r.jitICThreshold = 1, 1
-		// Compiled on the spot, as the counts below are written for, not in
-		// the background (QJS_JIT_STRESS's background), whose code comes
-		// checks later.
-		r.jitStress.background = false
-		// Each called twice: the code, at a threshold of one call, is
-		// compiled at its function's second (its first run counted by its
-		// return, regTickRet).
-		var src strings.Builder
-		for i := 0; i < 100; i++ {
-			fmt.Fprintf(&src, "function f%d(n){let s=%d;for(let i=0;i<n;i++)s+=i;return s}\nf%d(3);f%d(3);\n", i, i, i, i)
+	r := New(Config{JIT: true})
+	r.jitCallThreshold, r.jitICThreshold = 1, 1
+	// Compiled on the spot, as the counts below are written for, not in
+	// the background (QJS_JIT_STRESS's background), whose code comes
+	// checks later.
+	r.jitStress.background = false
+	// Each called twice: the code, at a threshold of one call, is
+	// compiled at its function's second (its first run counted by its
+	// return, regTickRet).
+	var src strings.Builder
+	for i := 0; i < 100; i++ {
+		fmt.Fprintf(&src, "function f%d(n){let s=%d;for(let i=0;i<n;i++)s+=i;return s}\nf%d(3);f%d(3);\n", i, i, i, i)
+	}
+	if _, err := r.Run(compileForTest(t, src.String())); err != nil {
+		t.Fatal(err)
+	}
+	if r.jit == nil {
+		t.Fatalf("compiled no function")
+	}
+	// The code compiled.
+	var codes []*jit.SSACode
+	for _, e := range r.jit.regCache {
+		if e.code != nil {
+			codes = append(codes, e.code)
 		}
-		if _, err := r.Run(compileForTest(t, src.String())); err != nil {
-			t.Fatal(err)
-		}
-		if r.jit == nil {
-			t.Fatalf("ssa %v: compiled no function", ssa)
-		}
-		// The code compiled.
-		var codes []*jit.SSACode
-		for _, e := range r.jit.regCache {
-			if e.code != nil {
-				codes = append(codes, e.code)
-			}
-		}
-		if len(codes) < 100 {
-			t.Fatalf("ssa %v: compiled too few functions (%d)", ssa, len(codes))
-		}
-		arena, bytes := r.jit.arena, 0
-		for _, c := range codes {
-			bytes += c.Size()
-		}
-		if chunks := arena.Chunks(); chunks == 0 || chunks > bytes/(64<<10)+1 {
-			t.Fatalf("ssa %v: %d functions, %d bytes of code, in %d mappings", ssa, len(codes), bytes, chunks)
-		} else {
-			t.Logf("ssa %v: %d functions, %d bytes of code, in %d mappings", ssa, len(codes), bytes, chunks)
-		}
-		r.Close()
-		r.ReleaseClosed()
-		if arena.Chunks() != 0 {
-			t.Fatalf("ssa %v: a closed runtime keeps %d mappings", ssa, arena.Chunks())
-		}
+	}
+	if len(codes) < 100 {
+		t.Fatalf("compiled too few functions (%d)", len(codes))
+	}
+	arena, bytes := r.jit.arena, 0
+	for _, c := range codes {
+		bytes += c.Size()
+	}
+	if chunks := arena.Chunks(); chunks == 0 || chunks > bytes/(64<<10)+1 {
+		t.Fatalf("%d functions, %d bytes of code, in %d mappings", len(codes), bytes, chunks)
+	} else {
+		t.Logf("%d functions, %d bytes of code, in %d mappings", len(codes), bytes, chunks)
+	}
+	r.Close()
+	r.ReleaseClosed()
+	if arena.Chunks() != 0 {
+		t.Fatalf("a closed runtime keeps %d mappings", arena.Chunks())
 	}
 }
 

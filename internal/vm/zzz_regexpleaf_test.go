@@ -110,7 +110,7 @@ const regexpLeafTestWant = `null,1,false,1 null,0,false,0 null,0,false,0 null,1,
 // writes lastIndex: each answer is Node's, and the check passes exactly
 // where it says.
 func TestRegExpLeaves(t *testing.T) {
-	for _, tree := range []bool{true} {
+	{
 		r := New(Config{})
 		v, err := r.Run(compileForTest(t, regexpLeafTestSrc))
 		r.Close()
@@ -118,7 +118,7 @@ func TestRegExpLeaves(t *testing.T) {
 			t.Fatal(err)
 		}
 		if got := v.String().Go(); got != regexpLeafTestWant {
-			t.Errorf("tree tier %v:\ngot  %s\nwant %s", tree, got, regexpLeafTestWant)
+			t.Errorf("\ngot  %s\nwant %s", got, regexpLeafTestWant)
 		}
 	}
 	r := New(Config{})
@@ -343,7 +343,7 @@ for (var how of ['exec', 'test']) {
 }
 out.join('|')`
 	want := "SyntaxError,regular expression is too complex,,0|SyntaxError,regular expression is too complex,,0"
-	for _, tree := range []bool{true} {
+	{
 		r := New(Config{})
 		v, err := r.Run(compileForTest(t, src))
 		r.Close()
@@ -351,7 +351,7 @@ out.join('|')`
 			t.Fatal(err)
 		}
 		if got := v.String().Go(); got != want {
-			t.Errorf("tree tier %v:\ngot  %s\nwant %s", tree, got, want)
+			t.Errorf("\ngot  %s\nwant %s", got, want)
 		}
 	}
 
@@ -443,39 +443,36 @@ func TestRegExpLeafSpentOnceNested(t *testing.T) {
 	if testing.Short() {
 		t.Skip("spends the step budget")
 	}
-	for _, tree := range []bool{true} {
-		r := New(Config{})
-		src := `function f0(re, s) { return re.exec(s) }
+	r := New(Config{})
+	src := `function f0(re, s) { return re.exec(s) }
 function f1(re, s) { return f0(re, s) }
 function f2(re, s) { return f1(re, s) }
 var s = 'a'.repeat(32) + 'cb'
 function warm() { for (var i = 0; i < 300; i++) f2(/(a+)+b/, 'aab') }
 warm(); warm()`
-		if _, err := r.Run(compileForTest(t, src)); err != nil {
-			t.Fatal(err)
-		}
-		// In the process's CPU time, as TestRegExpLeafFailsAgainWithFrame.
-		best := func(src string) time.Duration {
-			b := time.Duration(1 << 62)
-			for range 2 {
-				start := processCPUForTest()
-				v, err := r.Run(compileForTest(t, src))
-				if err != nil {
-					t.Fatal(err)
-				}
-				if got := v.String().Go(); got != "SyntaxError: regular expression is too complex" {
-					t.Fatalf("tree tier %v: %s = %s", tree, src, got)
-				}
-				b = min(b, processCPUForTest()-start)
+	if _, err := r.Run(compileForTest(t, src)); err != nil {
+		t.Fatal(err)
+	}
+	// In the process's CPU time, as TestRegExpLeafFailsAgainWithFrame.
+	best := func(src string) time.Duration {
+		b := time.Duration(1 << 62)
+		for range 2 {
+			start := processCPUForTest()
+			v, err := r.Run(compileForTest(t, src))
+			if err != nil {
+				t.Fatal(err)
 			}
-			return b
+			if got := v.String().Go(); got != "SyntaxError: regular expression is too complex" {
+				t.Fatalf("%s = %s", src, got)
+			}
+			b = min(b, processCPUForTest()-start)
 		}
-		call := "var out; try { %s } catch (e) { out = e.name + ': ' + e.message } out"
-		leaf, framed := best(fmt.Sprintf(call, "f2(/(a+)+b/, s)")), best(fmt.Sprintf(call, "/(a+)+b/g.exec(s)"))
-		r.Close()
-		if leaf > 2*framed {
-			t.Errorf("tree tier %v: the leaf's failed call took %v, one with a frame %v: the match made %.1f times",
-				tree, leaf, framed, float64(leaf)/float64(framed))
-		}
+		return b
+	}
+	call := "var out; try { %s } catch (e) { out = e.name + ': ' + e.message } out"
+	leaf, framed := best(fmt.Sprintf(call, "f2(/(a+)+b/, s)")), best(fmt.Sprintf(call, "/(a+)+b/g.exec(s)"))
+	r.Close()
+	if leaf > 2*framed {
+		t.Errorf("the leaf's failed call took %v, one with a frame %v: the match made %.1f times", leaf, framed, float64(leaf)/float64(framed))
 	}
 }

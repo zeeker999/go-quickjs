@@ -217,17 +217,15 @@ const deepTailScript = `(function () {
 func TestDeepTailCalls(t *testing.T) {
 	t.Parallel()
 	const want = "705082704 100000 false false true true 150000 obj obj? c p super bound 2 arrow 100:100000:100000:100000 14285:200000 2:100000:undefined,3:75000:75001,3:50000:50001,3:25000:25001,3:0:1 RangeError deep true"
-	for _, tree := range []bool{true} {
-		r := New(Config{MaxCallDepth: 400})
-		v, err := r.Run(compileForTest(t, deepTailScript))
-		if err != nil {
-			t.Fatalf("tree tier %v: %v", tree, err)
-		}
-		if got := v.String().Go(); got != want {
-			t.Errorf("tree tier %v: got %s, want %s", tree, got, want)
-		}
-		r.Close()
+	r := New(Config{MaxCallDepth: 400})
+	v, err := r.Run(compileForTest(t, deepTailScript))
+	if err != nil {
+		t.Fatal(err)
 	}
+	if got := v.String().Go(); got != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+	r.Close()
 }
 
 // A parameter after a default, or after a pattern, is read from the
@@ -258,15 +256,13 @@ func TestTailCallArgumentsAfterDefaults(t *testing.T) {
 	return r.join(" ");
 })()`
 	const want = "x:z1 0:p1 x:w1 x:z1 0:p1 x:w1 x:z1 0:p1 x:w1"
-	for _, tree := range []bool{true} {
-		r := New(Config{})
-		v, err := r.Run(compileForTest(t, src))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := v.String().Go(); got != want {
-			t.Errorf("tree tier %v: got %s, want %s", tree, got, want)
-		}
-		r.Close()
+	r := New(Config{})
+	v, err := r.Run(compileForTest(t, src))
+	if err != nil {
+		t.Fatal(err)
 	}
+	if got := v.String().Go(); got != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+	r.Close()
 }

@@ -176,7 +176,7 @@ func (g *jitProgram) source() string {
 	return b.String()
 }
 
-// jitDifferential runs src, a test's own program, in the interpreter, twice,
+// jitDifferential runs src, a test's own program, in the interpreter
 // and with the JIT under several stress settings, and reports any
 // difference. It returns the JIT's counters summed over the stress runs.
 // Each run may take jitTestWindow: a test's program finishes, and one the
@@ -203,7 +203,7 @@ const jitTestWindow = time.Minute
 
 func jitDifferentialIn(t *testing.T, src string, generated bool) JITStats {
 	t.Helper()
-	run := func(tree, jit bool, c jitStressConfig, within time.Duration) (string, time.Duration, JITStats) {
+	run := func(jit bool, c jitStressConfig, within time.Duration) (string, time.Duration, JITStats) {
 		// A generated program can grow a string without bound -- o.x=s;
 		// s+=o.x doubles it -- which takes every run seconds and gigabytes
 		// to reach the engine's length limit. The memory limit stops it
@@ -232,24 +232,21 @@ func jitDifferentialIn(t *testing.T, src string, generated bool) JITStats {
 		{threshold: true, background: true, checks: 1},
 		{threshold: true, background: true, checks: 4, budget: 3, deopt: 7},
 	}
-	// The interpreter's second run and the JIT's.
+	// The interpreter's run and the JIT's.
 	interp, within := jitTestWindow, jitTestWindow
 	if generated {
-		interp, within = jitFuzzWindows(1 + len(stress))
+		interp, within = jitFuzzWindows(len(stress))
 	}
-	want, took, _ := run(false, false, jitStressConfig{}, interp)
+	want, took, _ := run(false, jitStressConfig{}, interp)
 	if want == jitTimedOut && !generated {
 		t.Fatalf("the interpreter took past %v\n%s", interp, src)
 	}
 	if outOfMemory(want) || want == jitTimedOut {
 		return JITStats{}
 	}
-	if got, _, _ := run(true, false, jitStressConfig{}, within); got != want && !outOfMemory(got) {
-		t.Fatalf("tree tier: %q\ninterpreter: %q, in %v\n%s", got, want, took, src)
-	}
 	var total JITStats
 	for _, c := range stress {
-		got, _, st := run(true, true, c, within)
+		got, _, st := run(true, c, within)
 		if got != want && !outOfMemory(got) {
 			t.Fatalf("JIT %+v: %q\ninterpreter: %q, in %v\n%s", c, got, want, took, src)
 		}

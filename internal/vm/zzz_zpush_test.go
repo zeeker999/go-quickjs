@@ -49,15 +49,13 @@ const pushTestWant = "300|300|s0,1,2,O,4,5,s6|296,O,298,299|30100:undefined|3,4,
 // push and pop answer as Node answers.
 func TestPurePushPop(t *testing.T) {
 	t.Parallel()
-	for _, tree := range []bool{true} {
-		r := New(Config{})
-		v, err := r.Run(compileForTest(t, pushTestSrc))
-		r.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := v.String().Go(); got != pushTestWant {
-			t.Errorf("tree tier %v: got\n%s\nwant\n%s", tree, got, pushTestWant)
-		}
+	r := New(Config{})
+	v, err := r.Run(compileForTest(t, pushTestSrc))
+	r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := v.String().Go(); got != pushTestWant {
+		t.Errorf("got\n%s\nwant\n%s", got, pushTestWant)
 	}
 }

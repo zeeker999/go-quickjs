@@ -154,21 +154,19 @@ const regexpReuseTestWant = `-384824464 -384824464 -384824464 85/28.23.7.4.16.1.
 // returned or handed to a getter left as they were.
 func TestRegExpReuse(t *testing.T) {
 	for _, idle := range []bool{true, false} {
-		for _, tree := range []bool{true} {
-			if idle {
-				runtime.GC()
-				debug.SetGCPercent(-1)
-			}
-			r := New(Config{})
-			v, err := r.Run(compileForTest(t, regexpReuseTestSrc))
-			r.Close()
-			debug.SetGCPercent(100)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := v.String().Go(); got != regexpReuseTestWant {
-				t.Errorf("tree tier %v, collector idle %v:\ngot  %s\nwant %s", tree, idle, got, regexpReuseTestWant)
-			}
+		if idle {
+			runtime.GC()
+			debug.SetGCPercent(-1)
+		}
+		r := New(Config{})
+		v, err := r.Run(compileForTest(t, regexpReuseTestSrc))
+		r.Close()
+		debug.SetGCPercent(100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := v.String().Go(); got != regexpReuseTestWant {
+			t.Errorf("collector idle %v:\ngot  %s\nwant %s", idle, got, regexpReuseTestWant)
 		}
 	}
 }

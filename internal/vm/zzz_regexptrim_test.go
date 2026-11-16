@@ -40,21 +40,19 @@ const regexpTrimTestWant = `"","<>",2,0,0:0,0,[""] "","< ><>",4,0,0:1,0,[" ",""]
 // Node's, with the collector idle and running.
 func TestRegExpTrimReplace(t *testing.T) {
 	for _, idle := range []bool{true, false} {
-		for _, tree := range []bool{true} {
-			if idle {
-				runtime.GC()
-				debug.SetGCPercent(-1)
-			}
-			r := New(Config{})
-			v, err := r.Run(compileForTest(t, regexpTrimTestSrc))
-			r.Close()
-			debug.SetGCPercent(100)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := v.String().Go(); got != regexpTrimTestWant {
-				t.Errorf("tree tier %v, collector idle %v:\ngot  %s\nwant %s", tree, idle, got, regexpTrimTestWant)
-			}
+		if idle {
+			runtime.GC()
+			debug.SetGCPercent(-1)
+		}
+		r := New(Config{})
+		v, err := r.Run(compileForTest(t, regexpTrimTestSrc))
+		r.Close()
+		debug.SetGCPercent(100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := v.String().Go(); got != regexpTrimTestWant {
+			t.Errorf("collector idle %v:\ngot  %s\nwant %s", idle, got, regexpTrimTestWant)
 		}
 	}
 }

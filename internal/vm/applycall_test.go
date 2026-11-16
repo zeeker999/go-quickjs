@@ -29,21 +29,19 @@ func TestApplyArgumentsCallsDirectly(t *testing.T) {
 		try { fwdClass() } catch (e) { out.push(e instanceof TypeError) }
 		try { fwdThrow() } catch (e) { out.push(/thrower/.test(e.stack), /fwdThrow/.test(e.stack)) }
 		[out.join(), Point.prototype.initialize]`
-	for _, tree := range []bool{true} {
-		r := New(Config{})
-		v, err := r.Run(compileForTest(t, src))
-		if err != nil {
-			t.Fatalf("tree=%v: %v", tree, err)
-		}
-		res := v.Object().elemsOf()
-		if got, want := res[0].String().Go(), "601,302,object,true,true,true,true"; got != want {
-			t.Errorf("tree=%v: got %s, want %s", tree, got, want)
-		}
-		if fd := res[1].Object().fn(); tree && fd.regCall == nil {
-			t.Errorf("initialize, called by apply, was not given its tree's call")
-		}
-		r.Close()
+	r := New(Config{})
+	v, err := r.Run(compileForTest(t, src))
+	if err != nil {
+		t.Fatal(err)
 	}
+	res := v.Object().elemsOf()
+	if got, want := res[0].String().Go(), "601,302,object,true,true,true,true"; got != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+	if fd := res[1].Object().fn(); fd.regCall == nil {
+		t.Errorf("initialize, called by apply, was not given its tree's call")
+	}
+	r.Close()
 }
 
 // TestForwarderMethodsByShape pins what leafForward answers once its

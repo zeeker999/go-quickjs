@@ -33,25 +33,22 @@ func TestStringChain(t *testing.T) {
 		{name: "wrap", src: `function f() { var s = 'x'; for (var i = 0; i < 2000; i++) s = '(' + s + ')'; return s.length + s.slice(1998, 2003) } f()`, want: "4001((x))", concat: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			for _, on := range []bool{true} {
-				fn := compileForTest(t, tt.src)
-				if got := hasOp(fn, "f", bytecode.OpConcat); got != tt.concat {
-					t.Errorf("f joins with concat: %v, want %v", got, tt.concat)
-				}
-				r := New(Config{})
-				v, err := r.Run(fn)
-				if err != nil {
-					r.Close()
-					t.Fatalf("tree %v: %v", on, err)
-				}
-				got, err := r.ToString(v)
-				if err != nil || got.Go() != tt.want {
-					t.Errorf("tree %v: got %v, %v; want %s", on, got, err, tt.want)
-				}
-				r.Close()
-				if on {
-				}
+			fn := compileForTest(t, tt.src)
+			if got := hasOp(fn, "f", bytecode.OpConcat); got != tt.concat {
+				t.Errorf("f joins with concat: %v, want %v", got, tt.concat)
 			}
+			r := New(Config{})
+			v, err := r.Run(fn)
+			if err != nil {
+				r.Close()
+				t.Fatal(err)
+			}
+			got, err := r.ToString(v)
+			if err != nil || got.Go() != tt.want {
+				t.Errorf("got %v, %v; want %s", got, err, tt.want)
+			}
+			r.Close()
+
 		})
 	}
 }
@@ -60,22 +57,20 @@ func TestStringChain(t *testing.T) {
 // makes, and no string between.
 func TestStringChainAllocs(t *testing.T) {
 	skipUnlessAllocsOrdinary(t)
-	for _, on := range []bool{true} {
-		r := New(Config{})
-		v, err := r.Run(compileForTest(t, `function f(a, b) { return 'key ' + a + ' and ' + b + ' end' }; for (let i = 0; i < 10; i++) f('x', 'y'); f`))
-		if err != nil {
+	r := New(Config{})
+	v, err := r.Run(compileForTest(t, `function f(a, b) { return 'key ' + a + ' and ' + b + ' end' }; for (let i = 0; i < 10; i++) f('x', 'y'); f`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := []Value{Str(NewString("x")), Str(NewString("y"))}
+	if n := testing.AllocsPerRun(100, func() {
+		if _, err := r.Call(v, Undefined, args); err != nil {
 			t.Fatal(err)
 		}
-		args := []Value{Str(NewString("x")), Str(NewString("y"))}
-		if n := testing.AllocsPerRun(100, func() {
-			if _, err := r.Call(v, Undefined, args); err != nil {
-				t.Fatal(err)
-			}
-		}); n != 1 {
-			t.Errorf("tree %v: %v allocations a call, want 1", on, n)
-		}
-		r.Close()
+	}); n != 1 {
+		t.Errorf("%v allocations a call, want 1", n)
 	}
+	r.Close()
 }
 
 // hasOp reports whether the function name, somewhere in fn, has op.

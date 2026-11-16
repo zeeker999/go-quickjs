@@ -36,15 +36,13 @@ func TestConstLiteralReads(t *testing.T) {
 })()`
 	const want = "ReferenceError/1 ; ReferenceError/2 ; 3 ; ReferenceError ; 2,2 ; 1 ; 5,5 ; a0a1a2 ; TypeError7 ; " +
 		"true,true,false,0,1.5,str,true,1e+21,true,object,string,true ; |str|1.5 ; 33"
-	for _, tree := range []bool{true} {
-		rt := quickjs.New()
-		v, err := rt.Eval(src)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := v.String(); got != want {
-			t.Errorf("tree tier %v: got\n%s\nwant\n%s", tree, got, want)
-		}
-		rt.Close()
+	rt := quickjs.New()
+	v, err := rt.Eval(src)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if got := v.String(); got != want {
+		t.Errorf("got\n%s\nwant\n%s", got, want)
+	}
+	rt.Close()
 }

@@ -207,15 +207,13 @@ const switchTestWant = "A.d3.-.A.3.s.Acf.AB.b!.12.25.-.-.caught:boom,S.d3.-.-.36
 // register code rather than by pureCall.
 func TestSwitchLookups(t *testing.T) {
 	t.Parallel()
-	for _, tree := range []bool{true} {
-		r := New(Config{})
-		v, err := r.Run(compileForTest(t, switchTestSrc))
-		r.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := v.String().Go(); got != switchTestWant {
-			t.Errorf("tree tier %v: got\n%s\nwant\n%s", tree, got, switchTestWant)
-		}
+	r := New(Config{})
+	v, err := r.Run(compileForTest(t, switchTestSrc))
+	r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := v.String().Go(); got != switchTestWant {
+		t.Errorf("got\n%s\nwant\n%s", got, switchTestWant)
 	}
 }

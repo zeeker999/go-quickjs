@@ -87,18 +87,16 @@ const typeofTestWant = "uOF?/10101010/n/p--/0/undefined:false,oFU?/01101010/on/p
 // rather than by pureCall.
 func TestTypeofTests(t *testing.T) {
 	t.Parallel()
-	for _, tree := range []bool{true} {
-		r := New(Config{})
-		dda := r.NewObject()
-		dda.MarkHTMLDDA()
-		r.global.setOwnRaw(r.atoms.intern("dda"), Obj(dda), propDefault)
-		v, err := r.Run(compileForTest(t, typeofTestSrc))
-		r.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := v.String().Go(); got != typeofTestWant {
-			t.Errorf("tree tier %v: got\n%s\nwant\n%s", tree, got, typeofTestWant)
-		}
+	r := New(Config{})
+	dda := r.NewObject()
+	dda.MarkHTMLDDA()
+	r.global.setOwnRaw(r.atoms.intern("dda"), Obj(dda), propDefault)
+	v, err := r.Run(compileForTest(t, typeofTestSrc))
+	r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := v.String().Go(); got != typeofTestWant {
+		t.Errorf("got\n%s\nwant\n%s", got, typeofTestWant)
 	}
 }

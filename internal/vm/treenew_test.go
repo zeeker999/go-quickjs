@@ -75,23 +75,19 @@ func TestClassConstructionsOnTrees(t *testing.T) {
 		"4,5,2 | 6 | true | true | 301 | 300 | 299 | 297 | 301 | 5 | 9 | Implicit | " +
 		`TypeError: class constructor C cannot be invoked without "new" | ` +
 		`TypeError: class constructor A cannot be invoked without "new" | same true`
-	for _, tree := range []bool{true} {
-		r := New(Config{})
-		v, err := r.Run(compileForTest(t, src))
-		if err != nil {
-			r.Close()
-			t.Fatalf("tree %v: %v", tree, err)
-		}
-		if got := v.String().Go(); got != want {
-			t.Errorf("tree %v: got %s\nwant %s", tree, got, want)
-		}
-		if tree {
-			if len(r.thisCells) <= 300 {
-				t.Errorf("%d this cells after constructions 300 deep", len(r.thisCells))
-			}
-		}
+	r := New(Config{})
+	v, err := r.Run(compileForTest(t, src))
+	if err != nil {
 		r.Close()
+		t.Fatal(err)
 	}
+	if got := v.String().Go(); got != want {
+		t.Errorf("got %s\nwant %s", got, want)
+	}
+	if len(r.thisCells) <= 300 {
+		t.Errorf("%d this cells after constructions 300 deep", len(r.thisCells))
+	}
+	r.Close()
 }
 
 // A construction of a derived class allocates the object it makes and

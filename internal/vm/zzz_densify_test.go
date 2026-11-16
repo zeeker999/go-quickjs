@@ -98,19 +98,17 @@ true2000`
 // A sparse array made dense again answers as it did: Node's answers.
 func TestDensify(t *testing.T) {
 	t.Parallel()
-	for _, tree := range []bool{true} {
-		r := New(Config{})
-		if _, err := r.Run(compileForTest(t, densifySrc)); err != nil {
-			t.Fatal(err)
-		}
-		v, err := r.Run(compileForTest(t, "main()"))
-		r.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := v.String().Go(); got != densifyWant {
-			t.Errorf("tree tier %v:\ngot  %s\nwant %s", tree, got, densifyWant)
-		}
+	r := New(Config{})
+	if _, err := r.Run(compileForTest(t, densifySrc)); err != nil {
+		t.Fatal(err)
+	}
+	v, err := r.Run(compileForTest(t, "main()"))
+	r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := v.String().Go(); got != densifyWant {
+		t.Errorf("\ngot  %s\nwant %s", got, densifyWant)
 	}
 }
 

@@ -42,15 +42,13 @@ const emptyAddTestWant = `s,string:s,s/string,s,ss,asbs,[s|s] ,string:,/string,,
 // otherwise, each answer Node's.
 func TestEmptyStringAdd(t *testing.T) {
 	t.Parallel()
-	for _, tree := range []bool{true} {
-		r := New(Config{})
-		v, err := r.Run(compileForTest(t, emptyAddTestSrc))
-		r.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := v.String().Go(); got != emptyAddTestWant {
-			t.Errorf("tree tier %v:\ngot  %s\nwant %s", tree, got, emptyAddTestWant)
-		}
+	r := New(Config{})
+	v, err := r.Run(compileForTest(t, emptyAddTestSrc))
+	r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := v.String().Go(); got != emptyAddTestWant {
+		t.Errorf("\ngot  %s\nwant %s", got, emptyAddTestWant)
 	}
 }

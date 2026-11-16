@@ -120,23 +120,21 @@ func regexpExecLeafForTest(r *Runtime) *regexpLeaf[struct{}] {
 // statics and lastIndex as any other: each answer is Node's, with the
 // collector idle.
 func TestRegExpDeadExec(t *testing.T) {
-	for _, tree := range []bool{true} {
-		gc := debug.SetGCPercent(-1)
-		r := New(Config{})
-		v, err := r.Run(compileForTest(t, regexpDeadTestSrc))
-		dummy := regexpExecLeafForTest(r).dummy
-		r.Close()
-		debug.SetGCPercent(gc)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := v.String().Go(); got != regexpDeadTestWant {
-			t.Errorf("tree tier %v:\ngot  %s\nwant %s", tree, got, regexpDeadTestWant)
-		}
-		// The calls gave back the dummy.
-		if (dummy != nil) != tree {
-			t.Errorf("tree tier %v: exec's dummy made: %v", tree, dummy != nil)
-		}
+	gc := debug.SetGCPercent(-1)
+	r := New(Config{})
+	v, err := r.Run(compileForTest(t, regexpDeadTestSrc))
+	dummy := regexpExecLeafForTest(r).dummy
+	r.Close()
+	debug.SetGCPercent(gc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := v.String().Go(); got != regexpDeadTestWant {
+		t.Errorf("\ngot  %s\nwant %s", got, regexpDeadTestWant)
+	}
+	// The calls gave back the dummy.
+	if dummy == nil {
+		t.Errorf("exec's dummy made: %v", dummy != nil)
 	}
 }
 
@@ -186,21 +184,17 @@ for (var re of RES) {
 }
 out.join('|')`
 	fail := "SyntaxError,regular expression is too complex,,0,0"
-	for _, tree := range []bool{true} {
-		r := New(Config{})
-		// The interpreter, which makes these calls as before, of one.
-		res, want := "var RES = [/(a+)+b/, /(a+)+b/g];", fail+"|"+fail
-		if !tree {
-			res, want = "var RES = [/(a+)+b/];", fail
-		}
-		v, err := r.Run(compileForTest(t, res+src))
-		r.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := v.String().Go(); got != want {
-			t.Errorf("tree tier %v:\ngot  %s\nwant %s", tree, got, want)
-		}
+	r := New(Config{})
+	// The interpreter, which makes these calls as before, of one.
+	res, want := "var RES = [/(a+)+b/, /(a+)+b/g];", fail+"|"+fail
+
+	v, err := r.Run(compileForTest(t, res+src))
+	r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := v.String().Go(); got != want {
+		t.Errorf("\ngot  %s\nwant %s", got, want)
 	}
 }
 
@@ -341,18 +335,16 @@ function rTpl(s, re, n) { for (var i = 0; i < n; i++) s.replace(re, '[$1]') }
 // statics and lastIndex as any other, and calls a replacement function as
 // it would: each answer is Node's, with the collector idle.
 func TestRegExpDeadReplace(t *testing.T) {
-	for _, tree := range []bool{true} {
-		gc := debug.SetGCPercent(-1)
-		r := New(Config{})
-		v, err := r.Run(compileForTest(t, regexpDeadReplaceTestSrc))
-		r.Close()
-		debug.SetGCPercent(gc)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := v.String().Go(); got != regexpDeadReplaceTestWant {
-			t.Errorf("tree tier %v:\ngot  %s\nwant %s", tree, got, regexpDeadReplaceTestWant)
-		}
+	gc := debug.SetGCPercent(-1)
+	r := New(Config{})
+	v, err := r.Run(compileForTest(t, regexpDeadReplaceTestSrc))
+	r.Close()
+	debug.SetGCPercent(gc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := v.String().Go(); got != regexpDeadReplaceTestWant {
+		t.Errorf("\ngot  %s\nwant %s", got, regexpDeadReplaceTestWant)
 	}
 }
 
@@ -374,25 +366,23 @@ var regexpDeadReplaceKinds = []struct{ call, want, many string }{
 // them; and a loop of them makes no string for each.
 func TestRegExpDeadReplaceKinds(t *testing.T) {
 	for _, c := range regexpDeadReplaceKinds {
-		for _, tree := range []bool{true} {
-			r := New(Config{})
-			if _, err := r.Run(compileForTest(t, regexpDeadReplaceKindsSrc)); err != nil {
-				t.Fatal(err)
-			}
-			v, err := r.Run(compileForTest(t, "''+("+c.call+")"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := v.String().Go(); got != c.want {
-				t.Errorf("tree tier %v: %s = %s, want Node's %s", tree, c.call, got, c.want)
-			}
-			if tree && allocsOrdinary() {
-				if made := regexpDeadMallocs(t, r, c.many, 2000); made > 400 {
-					t.Errorf("%s: 2000 replaces whose results nothing reads made %d objects", c.many, made)
-				}
-			}
-			r.Close()
+		r := New(Config{})
+		if _, err := r.Run(compileForTest(t, regexpDeadReplaceKindsSrc)); err != nil {
+			t.Fatal(err)
 		}
+		v, err := r.Run(compileForTest(t, "''+("+c.call+")"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := v.String().Go(); got != c.want {
+			t.Errorf("%s = %s, want Node's %s", c.call, got, c.want)
+		}
+		if allocsOrdinary() {
+			if made := regexpDeadMallocs(t, r, c.many, 2000); made > 400 {
+				t.Errorf("%s: 2000 replaces whose results nothing reads made %d objects", c.many, made)
+			}
+		}
+		r.Close()
 	}
 }
 
@@ -441,20 +431,16 @@ for (var re of RES) {
   out.push(u === d ? u : u + ' != ' + d);
 }
 out.join('|')`
-	for _, tree := range []bool{true} {
-		r := New(Config{})
-		res, want := "var RES = [/(a+)+b/, /(a+)+b/g];", "SyntaxError,regular expression is too complex,,0,3|SyntaxError,regular expression is too complex,,0,0"
-		if !tree {
-			res, want = "var RES = [/(a+)+b/g];", "SyntaxError,regular expression is too complex,,0,0"
-		}
-		v, err := r.Run(compileForTest(t, res+src))
-		r.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := v.String().Go(); got != want {
-			t.Errorf("tree tier %v:\ngot  %s\nwant %s", tree, got, want)
-		}
+	r := New(Config{})
+	res, want := "var RES = [/(a+)+b/, /(a+)+b/g];", "SyntaxError,regular expression is too complex,,0,3|SyntaxError,regular expression is too complex,,0,0"
+
+	v, err := r.Run(compileForTest(t, res+src))
+	r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := v.String().Go(); got != want {
+		t.Errorf("\ngot  %s\nwant %s", got, want)
 	}
 }
 
@@ -560,24 +546,22 @@ var regexpDeadTruth = []struct{ call, want string }{
 // Node's. The subject had stood for the string, and 'a'.replace(/a/g, "")
 // been true.
 func TestRegExpDeadReplaceTruth(t *testing.T) {
-	for _, tree := range []bool{true} {
-		gc := debug.SetGCPercent(-1)
-		r := New(Config{})
-		if _, err := r.Run(compileForTest(t, regexpDeadTruthSrc)); err != nil {
-			t.Fatal(err)
-		}
-		for range 3 {
-			for _, c := range regexpDeadTruth {
-				v, err := r.Run(compileForTest(t, "''+("+c.call+")"))
-				if err != nil {
-					t.Fatal(err)
-				}
-				if got := v.String().Go(); got != c.want {
-					t.Errorf("tree tier %v: %s = %s, want Node's %s", tree, c.call, got, c.want)
-				}
+	gc := debug.SetGCPercent(-1)
+	r := New(Config{})
+	if _, err := r.Run(compileForTest(t, regexpDeadTruthSrc)); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		for _, c := range regexpDeadTruth {
+			v, err := r.Run(compileForTest(t, "''+("+c.call+")"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := v.String().Go(); got != c.want {
+				t.Errorf("%s = %s, want Node's %s", c.call, got, c.want)
 			}
 		}
-		r.Close()
-		debug.SetGCPercent(gc)
 	}
+	r.Close()
+	debug.SetGCPercent(gc)
 }

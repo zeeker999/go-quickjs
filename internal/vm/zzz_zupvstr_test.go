@@ -58,15 +58,13 @@ const upvalueAddTestWant = "<x><x>é0é1é2😀|14|3|16|18|<x><x>é0é1é2😀y-
 // An addition to a captured binding answers as Node answers.
 func TestTreeUpvalueAdd(t *testing.T) {
 	t.Parallel()
-	for _, tree := range []bool{true} {
-		r := New(Config{})
-		v, err := r.Run(compileForTest(t, upvalueAddTestSrc))
-		r.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := v.String().Go(); got != upvalueAddTestWant {
-			t.Errorf("tree tier %v: got\n%s\nwant\n%s", tree, got, upvalueAddTestWant)
-		}
+	r := New(Config{})
+	v, err := r.Run(compileForTest(t, upvalueAddTestSrc))
+	r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := v.String().Go(); got != upvalueAddTestWant {
+		t.Errorf("got\n%s\nwant\n%s", got, upvalueAddTestWant)
 	}
 }

@@ -308,11 +308,9 @@ func runGeneratorCases(t *testing.T, mk func() *Runtime, rounds int) {
 // TestGeneratorProtocol runs generatorCases.
 func TestGeneratorProtocol(t *testing.T) {
 	t.Parallel()
-	for _, on := range []bool{true} {
-		t.Run(map[bool]string{false: "interpreter", true: "tree"}[on], func(t *testing.T) {
-			runGeneratorCases(t, func() *Runtime { return New(Config{}) }, 3)
-		})
-	}
+	t.Run("tree", func(t *testing.T) {
+		runGeneratorCases(t, func() *Runtime { return New(Config{}) }, 3)
+	})
 }
 
 // TestResumeResultInRegisters pins that a resumption's result is a struct

@@ -28,29 +28,25 @@ func TestPureByTree(t *testing.T) {
 			if (i == 150) t.mark();
 		}
 		[n, T.prototype.held, T.prototype.mark, T.prototype.one, T.prototype.viaHeld]`
-	for _, tree := range []bool{true} {
-		r := New(Config{})
-		v, err := r.Run(compileForTest(t, src))
-		if err != nil {
-			t.Fatalf("tree=%v: %v", tree, err)
-		}
-		res := v.Object().elemsOf()
-		if got := res[0].Number(); got != 300+149*3 {
-			t.Errorf("tree=%v: n = %v, want %v", tree, got, 300+149*3)
-		}
-		// Which of them are given their register code's call.
-		if tree {
-			for i, want := range []bool{true, true, false, false} {
-				fd := res[i+1].Object().fn()
-				name := []string{"held", "mark", "one", "viaHeld"}[i]
-				if fd.closure.fn.Leaf != bytecode.LeafPure {
-					t.Fatalf("%s is not a pure body", name)
-				}
-				if got := fd.regCall != nil; got != want {
-					t.Errorf("%s: given its tree's call = %v, want %v", name, got, want)
-				}
-			}
-		}
-		r.Close()
+	r := New(Config{})
+	v, err := r.Run(compileForTest(t, src))
+	if err != nil {
+		t.Fatal(err)
 	}
+	res := v.Object().elemsOf()
+	if got := res[0].Number(); got != 300+149*3 {
+		t.Errorf("n = %v, want %v", got, 300+149*3)
+	}
+	// Which of them are given their register code's call.
+	for i, want := range []bool{true, true, false, false} {
+		fd := res[i+1].Object().fn()
+		name := []string{"held", "mark", "one", "viaHeld"}[i]
+		if fd.closure.fn.Leaf != bytecode.LeafPure {
+			t.Fatalf("%s is not a pure body", name)
+		}
+		if got := fd.regCall != nil; got != want {
+			t.Errorf("%s: given its tree's call = %v, want %v", name, got, want)
+		}
+	}
+	r.Close()
 }

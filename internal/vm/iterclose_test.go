@@ -24,19 +24,17 @@ func TestIteratorsClosedBeforeFinally(t *testing.T) {
 		{"generatorReturnThroughFinally", `var log = []; function* g(n) { try { yield 1; yield 2 } finally { log.push('close ' + n) } } function* f() { try { for (const x of g('in')) { yield x; return 'r' } } finally { log.push('F') } } var it = f(); it.next(); var r = it.next(); r.value + r.done + ' ' + log.join(',')`, "rtrue close in,F"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			for _, on := range []bool{true} {
-				r := New(Config{})
-				v, err := r.Run(compileForTest(t, tt.src))
-				if err != nil {
-					r.Close()
-					t.Fatalf("tree %v: %v", on, err)
-				}
-				got, err := r.ToString(v)
-				if err != nil || got.Go() != tt.want {
-					t.Errorf("tree %v: got %v, %v; want %s", on, got, err, tt.want)
-				}
+			r := New(Config{})
+			v, err := r.Run(compileForTest(t, tt.src))
+			if err != nil {
 				r.Close()
+				t.Fatal(err)
 			}
+			got, err := r.ToString(v)
+			if err != nil || got.Go() != tt.want {
+				t.Errorf("got %v, %v; want %s", got, err, tt.want)
+			}
+			r.Close()
 		})
 	}
 }

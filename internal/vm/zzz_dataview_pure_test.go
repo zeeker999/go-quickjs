@@ -169,20 +169,18 @@ const dataViewPureWant = "Int8:15,15 Uint8:15,15 Int16:15,15 Uint16:15,15 Int32:
 // is Node's.
 func TestDataViewSetterInPureBody(t *testing.T) {
 	t.Parallel()
-	for _, tree := range []bool{true} {
-		r := New(Config{})
-		if _, err := r.Run(compileForTest(t, dataViewPureSrc)); err != nil {
+	r := New(Config{})
+	if _, err := r.Run(compileForTest(t, dataViewPureSrc)); err != nil {
+		t.Fatal(err)
+	}
+	for src, want := range map[string]string{"run()": dataViewPureWant, "rx()": "5:c:0"} {
+		v, err := r.Run(compileForTest(t, src))
+		if err != nil {
 			t.Fatal(err)
 		}
-		for src, want := range map[string]string{"run()": dataViewPureWant, "rx()": "5:c:0"} {
-			v, err := r.Run(compileForTest(t, src))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := v.String().Go(); got != want {
-				t.Errorf("tree tier %v: %s = %s, want Node's %s", tree, src, got, want)
-			}
+		if got := v.String().Go(); got != want {
+			t.Errorf("%s = %s, want Node's %s", src, got, want)
 		}
-		r.Close()
 	}
+	r.Close()
 }

@@ -412,16 +412,14 @@ func TestStrAppendRandom(t *testing.T) {
 			}) {
 				return
 			}
-			for _, tree := range []bool{true} {
-				t.Run(fmt.Sprintf("tree=%v", tree), func(t *testing.T) {
-					r := New(Config{})
-					got := strFuzzRun(t, r, src, false)
-					r.Close()
-					if got != want && !t.Failed() {
-						t.Errorf("seed %d, tree tier %v: %s\n%s", seed, tree, firstLogDifference(got, want), src)
-					}
-				})
-			}
+			t.Run(fmt.Sprintf(""), func(t *testing.T) {
+				r := New(Config{})
+				got := strFuzzRun(t, r, src, false)
+				r.Close()
+				if got != want && !t.Failed() {
+					t.Errorf("seed %d: %s\n%s", seed, firstLogDifference(got, want), src)
+				}
+			})
 		})
 	}
 }

@@ -23,39 +23,37 @@ func sharedElemsForTest(v Value) (bool, unsafe.Pointer) {
 // literal with anything but constants, or none, has no site.
 func TestSharedArrayLiteral(t *testing.T) {
 	t.Parallel()
-	for _, tree := range []bool{true} {
-		r := New(Config{})
-		v, err := r.Run(compileForTest(t, `
-		function lit() { return [1, 2.5, 'x', true, null, undefined, '', -3]; }
-		function notConst(x) { return [1, x]; }
-		function empty() { return []; }
-		[lit(), lit(), notConst(1), empty(), JSON.stringify(lit())]`))
+	r := New(Config{})
+	v, err := r.Run(compileForTest(t, `
+	function lit() { return [1, 2.5, 'x', true, null, undefined, '', -3]; }
+	function notConst(x) { return [1, x]; }
+	function empty() { return []; }
+	[lit(), lit(), notConst(1), empty(), JSON.stringify(lit())]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	get := func(i int) Value {
+		e, err := r.getIndexed(v, Int(i))
 		if err != nil {
 			t.Fatal(err)
 		}
-		get := func(i int) Value {
-			e, err := r.getIndexed(v, Int(i))
-			if err != nil {
-				t.Fatal(err)
-			}
-			return e
-		}
-		s1, p1 := sharedElemsForTest(get(0))
-		s2, p2 := sharedElemsForTest(get(1))
-		if s1 != tree || s2 != tree || (p1 == p2) != tree {
-			t.Errorf("tree %v: literal arrays shared %v %v, one storage %v", tree, s1, s2, p1 == p2)
-		}
-		if s, _ := sharedElemsForTest(get(2)); s {
-			t.Errorf("tree %v: a literal of a variable shares its elements", tree)
-		}
-		if s, _ := sharedElemsForTest(get(3)); s {
-			t.Errorf("tree %v: an empty literal shares its elements", tree)
-		}
-		if got := get(4).String().Go(); got != `[1,2.5,"x",true,null,null,"",-3]` {
-			t.Errorf("tree %v: got %s", tree, got)
-		}
-		r.Close()
+		return e
 	}
+	s1, p1 := sharedElemsForTest(get(0))
+	s2, p2 := sharedElemsForTest(get(1))
+	if !s1 || !s2 || p1 != p2 {
+		t.Errorf("literal arrays shared %v %v, one storage %v", s1, s2, p1 == p2)
+	}
+	if s, _ := sharedElemsForTest(get(2)); s {
+		t.Errorf("a literal of a variable shares its elements")
+	}
+	if s, _ := sharedElemsForTest(get(3)); s {
+		t.Errorf("an empty literal shares its elements")
+	}
+	if got := get(4).String().Go(); got != `[1,2.5,"x",true,null,null,"",-3]` {
+		t.Errorf("got %s", got)
+	}
+	r.Close()
 }
 
 // TestSharedArrayLiteralWrites pins that every way a script can write an
@@ -172,7 +170,6 @@ func TestSharedArrayLiteralWrites(t *testing.T) {
 	}
 	for _, form := range []string{"function", "script", "interpreter"} {
 		for _, w := range writes {
-			var got [2]string
 			// Inside a function, or as the script's own code.
 			run := `(function () { ` + w + ` })();`
 			switch form {
@@ -182,19 +179,18 @@ func TestSharedArrayLiteralWrites(t *testing.T) {
 				// A function with a direct eval.
 				run = `(function () { ` + w + `; if (a.length < 0) eval(''); })();`
 			}
-			for k, tree := range []bool{true} {
-				r := New(Config{})
-				v, err := r.Run(compileForTest(t, `
+			r := New(Config{})
+			v, err := r.Run(compileForTest(t, `
 			var lit = function () { return [1, 2.5, 'x', true, null, undefined, 'z']; };
 			var a = lit();
 			a`))
-				if err != nil {
-					t.Fatal(err)
-				}
-				if s, _ := sharedElemsForTest(v); s != tree {
-					t.Fatalf("tree %v: the array written is shared: %v", tree, s)
-				}
-				v, err = r.Run(compileForTest(t, `
+			if err != nil {
+				t.Fatal(err)
+			}
+			if s, _ := sharedElemsForTest(v); !s {
+				t.Fatalf("the array written is not shared: %v", s)
+			}
+			v, err = r.Run(compileForTest(t, `
 			var thrown = '';
 			try { `+run+` } catch (e) { thrown = e.name; }
 			// A write after it, which finds the array's flag as the write left
@@ -204,15 +200,14 @@ func TestSharedArrayLiteralWrites(t *testing.T) {
 			var vals = [];
 			for (var i = 0; i < a.length; i++) vals.push(a[i] === a ? 'self' : typeof a[i] === 'object' && a[i] !== null ? 'obj' : String(a[i]));
 			[thrown, a.length, keys, vals.join(), Object.isFrozen(a), JSON.stringify(lit()), JSON.stringify(lit())].join(' | ')`))
-				if err != nil {
-					t.Fatalf("%s: %v", w, err)
-				}
-				got[k] = v.String().Go()
-				r.Close()
+			if err != nil {
+				t.Fatalf("%s: %v", w, err)
 			}
+			got := v.String().Go()
+			r.Close()
 			const pristine = `[1,2.5,"x",true,null,null,"z"] | [1,2.5,"x",true,null,null,"z"]`
-			if len(got[0]) < len(pristine) || got[0][len(got[0])-len(pristine):] != pristine {
-				t.Errorf("%s, %s: the literal's next arrays changed: %s", form, w, got[0])
+			if len(got) < len(pristine) || got[len(got)-len(pristine):] != pristine {
+				t.Errorf("%s, %s: the literal's next arrays changed: %s", form, w, got)
 			}
 		}
 	}
@@ -364,30 +359,28 @@ func TestSharedArrayLiteralConstants(t *testing.T) {
 		`-0,number:NaN,number:Infinity,number:-1.5,number:-2147483648 | ` +
 		`1200:long,0:,2:é漢,7:tab	 | number:1,hole,number:3 | bigint:1,number:2 | [1:w,number:2],[number:3] | [number:1,number:2],[number:3] | [number:1,number:2],[number:3]`
 	sites := `[nums(), strs(), holes(), bigs(), nested(), nested()[0], negs()]`
-	for _, tree := range []bool{true} {
-		r := New(Config{})
-		v, err := r.Run(compileForTest(t, src))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := v.String().Go(); got != want {
-			t.Errorf("tree %v:\n got %s\nwant %s", tree, got, want)
-		}
-		v, err = r.Run(compileForTest(t, sites))
-		if err != nil {
-			t.Fatal(err)
-		}
-		for i, shared := range []bool{tree, tree, false, false, false, tree, false} {
-			e, err := r.getIndexed(v, Int(i))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if s, _ := sharedElemsForTest(e); s != shared {
-				t.Errorf("tree %v: site %d shared %v, want %v", tree, i, s, shared)
-			}
-		}
-		r.Close()
+	r := New(Config{})
+	v, err := r.Run(compileForTest(t, src))
+	if err != nil {
+		t.Fatal(err)
 	}
+	if got := v.String().Go(); got != want {
+		t.Errorf("\n got %s\nwant %s", got, want)
+	}
+	v, err = r.Run(compileForTest(t, sites))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, shared := range []bool{true, true, false, false, false, true, false} {
+		e, err := r.getIndexed(v, Int(i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s, _ := sharedElemsForTest(e); s != shared {
+			t.Errorf("site %d shared %v, want %v", i, s, shared)
+		}
+	}
+	r.Close()
 }
 
 // TestSharedArrayLiteralRuntimes pins that a literal's shared storage and

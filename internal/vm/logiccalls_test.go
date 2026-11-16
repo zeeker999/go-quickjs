@@ -61,15 +61,13 @@ func TestLogicalCallsAndNullish(t *testing.T) {
 		}
 		r[0] + ' | ' + (r[0] === r[1] && r[1] === r[2])`
 	const want = "false,2,0,0,0,0,0,false,3,4,2,1,2,1,3,4,5,4,2,3,2,4,true,6,6,3,4,3,f1f2g2f1f2g2g3Lf1g1f2g2g3Lf1g1f2g3L,0,0,1,1,,,x,x,7,null,7,null,NaN,NaN,false,false,0,0,0,0,2,2,6,g1,3,0,,c,b,false,9,null,0,0,2,3,LL | true"
-	for _, tree := range []bool{true} {
-		r := New(Config{})
-		v, err := r.Run(compileForTest(t, src))
-		r.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := v.String().Go(); got != want {
-			t.Errorf("tree tier %v: got\n%s\nwant\n%s", tree, got, want)
-		}
+	r := New(Config{})
+	v, err := r.Run(compileForTest(t, src))
+	r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := v.String().Go(); got != want {
+		t.Errorf("got\n%s\nwant\n%s", got, want)
 	}
 }

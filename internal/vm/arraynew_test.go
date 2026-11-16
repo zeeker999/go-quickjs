@@ -35,21 +35,19 @@ func TestArrayConstructionLeaf(t *testing.T) {
 		}
 		run()`
 	const want = "true:0:::true true:3::u.u.u:true true:0:::true true:17::u.u.u.u.u.u.u.u.u.u.u.u.u.u.u.u.u:true 70000 true:1:0:3:true true:2:0.1:1.2:true true:1:0:u:true true:3:0.1.2:null.x.3.5:true true:2::u.u:true true:1:0:a:true true:0:::true true:3:0.1.2:4.5.6:true true:2::u.u:true RangeError RangeError RangeError RangeError RangeError 4294967295 true:0:::true 2 sub true true 3 2 true:3:1:u.m.u:true false true true:0:::true true:3::u.u.u:true true:0:::true true:17::u.u.u.u.u.u.u.u.u.u.u.u.u.u.u.u.u:true 70000 true:1:0:3:true true:2:0.1:1.2:true true:1:0:u:true true:3:0.1.2:null.x.3.5:true true:2::u.u:true true:1:0:a:true true:0:::true true:3:0.1.2:4.5.6:true true:2::u.u:true RangeError RangeError RangeError RangeError RangeError 4294967295 true:0:::true 2 sub true true 3 2 true:3:1:u.m.u:true false true true:0:::true true:3::u.u.u:true true:0:::true true:17::u.u.u.u.u.u.u.u.u.u.u.u.u.u.u.u.u:true 70000 true:1:0:3:true true:2:0.1:1.2:true true:1:0:u:true true:3:0.1.2:null.x.3.5:true true:2::u.u:true true:1:0:a:true true:0:::true true:3:0.1.2:4.5.6:true true:2::u.u:true RangeError RangeError RangeError RangeError RangeError 4294967295 true:0:::true 2 sub true true 3 2 true:3:1:u.m.u:true false true"
-	for _, tree := range []bool{true} {
-		r := New(Config{})
-		v, err := r.Run(compileForTest(t, src))
-		if err != nil {
-			r.Close()
-			t.Fatalf("tree %v: %v", tree, err)
-		}
-		if got := v.String().Go(); got != want {
-			t.Errorf("tree %v: got %s\nwant %s", tree, got, want)
-		}
-		if op := r.proto.arrayCtor.fn().elemOp; op != elemArrayNew {
-			t.Errorf("Array's op is %d, want elemArrayNew", op)
-		}
+	r := New(Config{})
+	v, err := r.Run(compileForTest(t, src))
+	if err != nil {
 		r.Close()
+		t.Fatal(err)
 	}
+	if got := v.String().Go(); got != want {
+		t.Errorf("got %s\nwant %s", got, want)
+	}
+	if op := r.proto.arrayCtor.fn().elemOp; op != elemArrayNew {
+		t.Errorf("Array's op is %d, want elemArrayNew", op)
+	}
+	r.Close()
 	check := leafChecks[elemArrayNew]
 	for _, tc := range []struct {
 		args []Value
