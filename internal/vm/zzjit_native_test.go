@@ -6841,10 +6841,9 @@ func TestJITSSALooplessCalleeRecompiledAfterEviction(t *testing.T) {
 // they stopped calling natively for leaving too often (notNative), as the
 // test marks them -- is Go's, which makes it, native code going on after it
 // (mir's call): a call, a method call with its receiver,
-// constructions whose callee returns nothing or a primitive, and a callee
-// that throws. One whose operands Go's arguments cannot hold has Go run
-// the callee from its start, and goes on natively after the call
-// (abi.ExitEnter), its own frame never written.
+// constructions whose callee returns nothing or a primitive, a callee
+// that throws, and a call of sixteen arguments, which register code's
+// window hands Go as any other's.
 func TestJITSSAEntersCalleesWithoutCode(t *testing.T) {
 	// Native calls are Go's while the collector marks: it does not, so that
 	// what the test counts is the calls'.
@@ -6866,13 +6865,12 @@ func TestJITSSAEntersCalleesWithoutCode(t *testing.T) {
 	for _, tc := range []struct {
 		name, run string
 		caller    string
-		entered   bool
 	}{
-		{"call", `[calls(300),calls(300)]`, "calls", false},
-		{"method", `[methods(o,300),methods(o,300)]`, "methods", false},
-		{"construct", `[constructs(300),constructs(300)]`, "constructs", false},
-		{"throw", `var r=[];for(let k=0;k<3;k++){try{r.push(throws(300))}catch(e){r.push(e.message)}}r`, "throws", false},
-		{"wide", `[wides(300),wides(300)]`, "wides", true},
+		{"call", `[calls(300),calls(300)]`, "calls"},
+		{"method", `[methods(o,300),methods(o,300)]`, "methods"},
+		{"construct", `[constructs(300),constructs(300)]`, "constructs"},
+		{"throw", `var r=[];for(let k=0;k<3;k++){try{r.push(throws(300))}catch(e){r.push(e.message)}}r`, "throws"},
+		{"wide", `[wides(300),wides(300)]`, "wides"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			src := setup + ";" + tc.run + ".map(String).join()"
@@ -6917,12 +6915,7 @@ func TestJITSSAEntersCalleesWithoutCode(t *testing.T) {
 			if got, want := gv.String().Go(), wv.String().Go(); got != want {
 				t.Fatalf("got %s, interpreter %s", got, want)
 			}
-			switch {
-			case tc.entered:
-				// Nothing counts a native call whose callee Go ran from
-				// its start (abi.ExitEnter): none is seen to have.
-				t.Fatalf("no native call ran its callee from its start: %+v", r.JITStats())
-			case r.jit.goCalls == goCalls:
+			if r.jit.goCalls == goCalls {
 				t.Fatalf("Go made none of the calls: %+v", r.JITStats())
 			}
 		})
