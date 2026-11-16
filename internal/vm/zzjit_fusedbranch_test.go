@@ -19,12 +19,15 @@ import (
 // made; compiled at once and with what the sites learned; and each
 // function runs natively. dies is a negation whose operand's last use is
 // the comparison, values emitted after it -- its block's end loads a
-// captured binding for the join -- which must not take its register.
+// captured binding for the join -- which must not take its register. The
+// JIT's clocks are held for the run (JITHoldClocks): under qemu the
+// time-based flush had let shorter's code go before the test looked at
+// it. Held clocks are the process's, so the test is not parallel.
 func TestJITFusedBranches(t *testing.T) {
-	t.Parallel()
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
+	t.Cleanup(JITHoldClocks())
 	setup := `
 		function C(){} function D(){} D.prototype=Object.create(C.prototype);
 		var o1={}, o2={}, f1=function(){};
