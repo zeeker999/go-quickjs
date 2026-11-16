@@ -229,9 +229,10 @@ func (r *Runtime) jitRegForAs(cl *closure, c *regCode, callee bool) *jitRegEntry
 // more than its budget after (settle): the programs of the callees it
 // inlined, lowered as it built, count past the room it asked for, and a
 // compile refused or deferred had left them over the budget.
-func (r *Runtime) jitRegCompileFor(cl *closure, c *regCode, key jitKey, callee bool) *jitRegEntry {
-	defer r.jit.settle()
-	e := r.jitRegCompile(cl, c, key, callee, 0)
+func (r *Runtime) jitRegCompileFor(cl *closure, c *regCode, key jitKey, callee bool) (e *jitRegEntry) {
+	// The code it returns, which its caller enters, is kept (settleKeeping).
+	defer func() { r.jit.settleKeeping(e) }()
+	e = r.jitRegCompile(cl, c, key, callee, 0)
 	if e == nil {
 		return nil
 	}
@@ -1094,7 +1095,7 @@ func (s *jitState) regVictims(v []jitVictim, now uint64) []jitVictim {
 		}
 		class := uint8(jitVictimRefusal)
 		if e.code != nil {
-			if e.used+jitCodeAge > now {
+			if e.used+jitCodeAge > now && !s.settling {
 				continue
 			}
 			class = jitVictimCode
@@ -1219,7 +1220,7 @@ func (s *jitState) regReclaim(x *jitVictim, now uint64) {
 		}
 		return
 	}
-	if s.regCache[x.key] != e || s.regInUse(e) || (e.code != nil) != (x.class == jitVictimCode) || e.code != nil && e.used+jitCodeAge > now {
+	if s.regCache[x.key] != e || s.regInUse(e) || (e.code != nil) != (x.class == jitVictimCode) || e.code != nil && e.used+jitCodeAge > now && !s.settling {
 		return
 	}
 	if e.code == nil && e.life != nil && s.regLearned[x.key] == e.life && s.regLifeSpare(x.key, e.life, s.regCalledFns()) {

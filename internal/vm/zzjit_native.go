@@ -1136,6 +1136,9 @@ type jitState struct {
 	scans, serial, evicted, flushed, refusedRoom uint64
 	floor                                        int
 	floorAt, agedAt, flushedAt                   uint64
+	// settling marks settle's look past the budget, which takes young
+	// code too (regVictims, regReclaim).
+	settling bool
 
 	// What follows is last so that it moves no field before it, which
 	// the interpreter's and the native code's calls of Go read.
@@ -1511,10 +1514,41 @@ func (s *jitState) flush() {
 }
 
 // settle has the JIT hold no more than its budget once a compile has
-// ended.
+// ended. Room for a compile is never made of young code (jitCodeAge), so
+// that two functions do not take each other's room in turn; but what grew
+// since the room was made -- a function's state measured again as its code
+// is let go of (regLetGo), the programs a compile lowered for its callees
+// -- had the JIT hold past its budget with young code alone left to
+// reclaim, and nothing that would take it: 479,888 bytes of a 458,752-byte
+// budget, its floor noted above the budget. Past it, settle's look takes
+// young code too, the least recently used first, and none that runs.
 func (s *jitState) settle() {
-	if s.held() > s.budget {
-		s.makeRoom(0)
+	if s.held() <= s.budget || s.makeRoom(0) {
+		return
+	}
+	s.settling = true
+	s.floorAt, s.victims, s.victimsAt, s.victimPos, s.victimLeft = 0, nil, 0, 0, 0
+	s.makeRoom(0)
+	// Its list and its floor, which counted young code as reclaimable,
+	// are not the next look's.
+	s.settling = false
+	s.floorAt, s.victims, s.victimsAt, s.victimPos, s.victimLeft = 0, nil, 0, 0, 0
+}
+
+// settleKeeping is settle, keeping keep, register code a compile just made,
+// which its caller is about to enter, and the code it goes with (regRunning's
+// busy).
+func (s *jitState) settleKeeping(keep ...*jitRegEntry) {
+	for _, e := range keep {
+		if e != nil {
+			e.busy++
+		}
+	}
+	s.settle()
+	for _, e := range keep {
+		if e != nil {
+			e.busy--
+		}
 	}
 }
 
