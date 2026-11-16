@@ -265,6 +265,17 @@ func (f *jitRegFeedback) regCallTargets(t *jitRegTargets, pc int, w bytecode.RIn
 			if t.n != 0 && l != nil && !jitRegCallKnown(l, rpc, e.callee) {
 				l.nativeCalls = append(l.nativeCalls, jitInline{pc: rpc, cl: e.cl, obj: e.callee})
 			}
+		} else if e.kind&regCallThrough != 0 && method && argc >= 1 && e.cl != nil && e.rc != nil && l != nil {
+			// G.call(x, ...), which the interpreter makes entering G, its
+			// cache G's (regCallThrough): G called natively through call
+			// (regCallSite's via), as the call's exits would teach it
+			// (jitRegViaSeen) -- what a site the interpreter had made the
+			// call's own (callThrough) taught.
+			n := t.n
+			f.regAddTarget(t, pc, argc, method, e.callee, e.cl, e.rc, nil, nil, false, true)
+			if t.n > n && !slices.ContainsFunc(l.nativeCalls, func(x jitInline) bool { return x.pc == rpc && x.obj == e.callee && x.via }) {
+				l.nativeCalls = append(l.nativeCalls, jitInline{pc: rpc, cl: e.cl, obj: e.callee, via: true})
+			}
 		} else {
 			unfilled = e.callee == nil
 		}

@@ -557,6 +557,15 @@ func (f *jitRegFeedback) callTarget(pc int) (*Object, *closure, bool) {
 		return nil, nil, false
 	}
 	k := &calls[w.C()]
+	if k.kind&regCallThrough != 0 {
+		// f.call(t, ...), whose cache the interpreter makes f's, entering f
+		// one register on (regCallThrough): the call's function, in the
+		// window, is the realm's Function.prototype.call, as the stack
+		// form's call sees it -- taken for a call of f, a leaf's check of
+		// f failed at every call (hasOwnProperty.call(o, k)).
+		r := f.fb.r
+		return r.callFn, nil, r.callFn != nil
+	}
 	return k.callee, k.cl, true
 }
 
