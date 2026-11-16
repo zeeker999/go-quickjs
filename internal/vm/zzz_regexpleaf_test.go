@@ -372,40 +372,65 @@ out.join('|')`
 	if !leafChecks[elemRegExpExec](r, recv, args) {
 		t.Fatal("exec's check fails")
 	}
+	l := regexpExecLeafForTest(r)
+	re := recv.Object().dataOf().(*regexpData).re
 	if _, err := fd.native(r, recv, args); err != errRegExpLeafAgain {
 		t.Fatalf("the leaf's call: %v, want errRegExpLeafAgain", err)
+	}
+	// The call made again finds the failure without matching again: a
+	// leaf's failed call costs what a call with a frame of a global
+	// pattern, never a leaf's, does -- one match spending the budget, not
+	// two. The leaf's call remembers the match it found past the budget
+	// (spend); the call made again with a frame finds it there and lets it
+	// go (spends, framed), matching nothing. Asserted on that work, not on
+	// time, which a loaded machine stretched past any bound.
+	if !l.spends(re, s.String(), 0) {
+		t.Fatal("the leaf's call did not remember its match: the call made again matches again")
 	}
 	if _, err := r.callObject(r.regexpExecFn, recv, args, Undefined); err == nil || err == errRegExpLeafAgain {
 		t.Fatalf("the call with a frame: %v, want the SyntaxError", err)
 	}
+	if l.spent.s != nil {
+		t.Fatal("the call with a frame matched again: the match it found remembered is still there")
+	}
 
-	// The call made again finds the failure without matching again: a
-	// leaf's failed call costs what a call with a frame of a global
-	// pattern, never a leaf's, does -- one match spending the budget, not
-	// two.
+	// So for the interpreter's leaf call and the call it makes again with
+	// a frame: exec's function watched, the leaf's call remembers the match
+	// and the call with a frame finds it and lets it go.
 	if testing.Short() {
 		return
 	}
 	if _, err := r.Run(compileForTest(t, `function g(re, s) { try { re.exec(s) } catch (e) {} }`)); err != nil {
 		t.Fatal(err)
 	}
-	// In the process's CPU time, which the machine's other processes --
-	// go test's other packages -- do not move as they do the clock.
-	best := func(src string) time.Duration {
-		b := time.Duration(1 << 62)
-		for range 3 {
-			start := processCPUForTest()
-			if _, err := r.Run(compileForTest(t, src)); err != nil {
-				t.Fatal(err)
+	native := fd.native
+	t.Cleanup(func() { fd.native = native })
+	leafCalls, framedCalls := 0, 0
+	fd.native = func(r *Runtime, this Value, args []Value) (Value, error) {
+		re, s := this.Object().dataOf().(*regexpData).re, args[0].String()
+		if !l.framed(r) {
+			leafCalls++
+			v, err := native(r, this, args)
+			if err == errRegExpLeafAgain && !l.spends(re, s, 0) {
+				t.Error("the leaf's call erred without remembering its match")
 			}
-			b = min(b, processCPUForTest()-start)
+			return v, err
 		}
-		return b
+		framedCalls++
+		if !l.spends(re, s, 0) {
+			t.Error("the call with a frame found no match remembered: it matches again")
+		}
+		v, err := native(r, this, args)
+		if l.spent.s != nil {
+			t.Error("the call with a frame matched again")
+		}
+		return v, err
 	}
-	leaf := best(`g(/(a+)+b/, 'a'.repeat(32) + 'cb')`)
-	framed := best(`g(/(a+)+b/g, 'a'.repeat(32) + 'cb')`)
-	if leaf > framed*3/2 {
-		t.Errorf("a leaf's failed call took %v, one with a frame %v: the match made twice", leaf, framed)
+	if _, err := r.Run(compileForTest(t, `g(/(a+)+b/, 'a'.repeat(32) + 'cb')`)); err != nil {
+		t.Fatal(err)
+	}
+	if leafCalls != 1 || framedCalls != 1 {
+		t.Errorf("exec called %d times as a leaf and %d with a frame, want 1 and 1", leafCalls, framedCalls)
 	}
 }
 
