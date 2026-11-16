@@ -696,60 +696,6 @@ func armEmit(v *variant) (*block, error) {
 		a.BCond(NE, g.exit)
 		a.Load(r9, rS, offObjShape)
 		a.Cbz(r9, g.exit, true)
-		// The set, in rD, of what the string and the layout hold, never
-		// their addresses (hasSet): the string's part -- its bytes'
-		// count and its first and last eight, or two, a flat string's, 0
-		// for a rope's -- times hasCacheKeyMul, with the layout's last key and
-		// count of keys, times hasCacheMul, its top bits; rW, the
-		// instruction, read again after.
-		rope, short, xdone := a.NewLabel(), a.NewLabel(), a.NewLabel()
-		a.Load(rW, r8, offStrLeft)
-		a.Cbnz(rW, rope, true)
-		a.Load(rD, r8, offStrS+8)
-		a.Load(rW, r8, offStrS)
-		mid := a.NewLabel()
-		a.CmpImm(rD, 8, true)
-		a.BCond(LO, mid)
-		a.Op(Add, rC, rW, rD, true)
-		a.Load(rC, rC, -8)
-		a.Op(Eor, rD, rD, rC, true)
-		a.MovImm(rC, hasCacheKeyMul)
-		a.Mul(rD, rD, rC)
-		a.Load(rC, rW, 0)
-		a.Op(Eor, rD, rD, rC, true)
-		a.B(xdone)
-		a.Bind(mid)
-		a.CmpImm(rD, 2, true)
-		a.BCond(LO, short)
-		a.Op(Add, rC, rW, rD, true)
-		a.LoadU16(rC, rC, -2)
-		a.ShiftImm(Lsl, rC, rC, 48, true)
-		a.Op(Eor, rD, rD, rC, true)
-		a.LoadU16(rC, rW, 0)
-		a.ShiftImm(Lsl, rC, rC, 32, true)
-		a.Op(Eor, rD, rD, rC, true)
-		a.B(xdone)
-		a.Bind(short)
-		a.Cbz(rD, xdone, true)
-		a.LoadU8(rC, rW, 0)
-		a.ShiftImm(Lsl, rW, rC, 32, true)
-		a.Op(Eor, rD, rD, rW, true)
-		a.ShiftImm(Lsl, rC, rC, 48, true)
-		a.Op(Eor, rD, rD, rC, true)
-		a.B(xdone)
-		a.Bind(rope)
-		a.MovImm(rD, 0)
-		a.Bind(xdone)
-		a.MovImm(rW, hasCacheKeyMul)
-		a.Mul(rD, rD, rW)
-		a.LoadU32(rW, r9, offShapeKey)
-		a.Op(Eor, rD, rD, rW, true)
-		a.LoadU32(rW, r9, offShapeN)
-		a.ShiftImm(Lsl, rW, rW, 32, true)
-		a.Op(Eor, rD, rD, rW, true)
-		a.MovImm(rW, hasCacheMul)
-		a.Mul(rD, rD, rW)
-		a.ShiftImm(Lsr, rD, rD, 64-hasCacheBits+1, true)
 		// The cache of the realm running now, the Runtime's first word,
 		// at the offset the context gives (ncHas).
 		a.Load(rC, rCtx, ncRT)
@@ -757,10 +703,19 @@ func armEmit(v *variant) (*block, error) {
 		g.addMem(rC, rCtx, ncHas)
 		a.Load(rC, rC, 0)
 		a.Cbz(rC, g.exit, true)
-		a.MovImm(rW, uint64(2*sizeH))
+		// The set: ((key>>4) ^ (layout>>4)) * hasCacheMul, its top bits,
+		// of hasCacheWays entries, the newest first; rW, the instruction,
+		// read again after.
+		a.ShiftImm(Lsr, rD, r8, 4, true)
+		a.ShiftImm(Lsr, rW, r9, 4, true)
+		a.Op(Eor, rD, rD, rW, true)
+		a.MovImm(rW, hasCacheMul)
+		a.Mul(rD, rD, rW)
+		a.ShiftImm(Lsr, rD, rD, 64-hasCacheBits+hasCacheWaysLog, true)
+		a.MovImm(rW, uint64(hasCacheWays*sizeH))
 		a.Mul(rD, rD, rW)
 		a.Op(Add, rC, rC, rD, true)
-		for i := int32(0); i < 2; i++ {
+		for i := int32(0); i < hasCacheWays; i++ {
 			next := a.NewLabel()
 			e := i * sizeH
 			g.cmpMem(r8, rC, e+offHKey)

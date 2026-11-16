@@ -101,8 +101,6 @@ var (
 	offRtArgStack   int32
 	offRtBackEdges  int32
 	offShapeIndex   int32
-	offShapeN       int32
-	offShapeKey     int32
 	offIdxIndexKeys int32
 	offStrS         int32
 	offStrLeft      int32
@@ -366,8 +364,6 @@ func loadOffsets() {
 	offRtArgStack = rtRel(off("Runtime.argStack"))
 	offRtBackEdges = rtRel(off("Runtime.backEdges"))
 	offShapeIndex = off("shape.index")
-	offShapeN = off("shape.n")
-	offShapeKey = off("shape.key")
 	offIdxIndexKeys = off("propIndex.indexKeys")
 	offStrS = off("String.s")
 	offStrLeft = off("String.left")

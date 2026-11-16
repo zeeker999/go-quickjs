@@ -5158,77 +5158,22 @@ func (c *compiler) keyedHas(v *ssa.Value, slow amd64.Label) {
 		c.a.Load(scratchC, scratchB, c.enc.ObjectShape)
 		c.a.Op(amd64.Test, scratchC, scratchC, true)
 		fail.jump(amd64.CondE)
-		// The set, of what the string and the shape hold, never their
-		// addresses (abi.HasCacheMul): the string's part, x, in scratchA,
-		// of its bytes' count and its first and last eight, or two, those
-		// of a flat string, and 0 for a rope's.
-		rope, short, xdone := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
-		c.a.MovQFromX(scratchB, xScratch2)
-		c.a.Load(scratchA, scratchB, c.enc.StringLeft)
-		c.a.Op(amd64.Test, scratchA, scratchA, true)
-		c.a.Jcc(amd64.CondNE, rope)
-		c.a.Load(scratchA, scratchB, c.enc.StringData+8)
-		c.a.Load(scratchB, scratchB, c.enc.StringData)
-		mid := c.a.NewLabel()
-		c.a.OpImm(amd64.Cmp, scratchA, 8, true)
-		c.a.Jcc(amd64.CondB, mid)
-		c.a.MovRR(scratchC, scratchA)
-		c.a.Op(amd64.Add, scratchC, scratchB, true)
-		c.a.Load(scratchC, scratchC, -8)
-		c.a.Op(amd64.Xor, scratchA, scratchC, true)
-		c.movImm(scratchC, abi.HasCacheKeyMul)
-		c.a.Imul(scratchA, scratchC)
-		c.a.Load(scratchC, scratchB, 0)
-		c.a.Op(amd64.Xor, scratchA, scratchC, true)
-		c.a.Jmp(xdone)
-		c.a.Bind(mid)
-		c.a.OpImm(amd64.Cmp, scratchA, 2, true)
-		c.a.Jcc(amd64.CondB, short)
-		c.a.MovRR(scratchC, scratchA)
-		c.a.Op(amd64.Add, scratchC, scratchB, true)
-		c.a.LoadU16(scratchC, scratchC, -2)
-		c.a.ShiftImm(amd64.Shl, scratchC, 48, true)
-		c.a.Op(amd64.Xor, scratchA, scratchC, true)
-		c.a.LoadU16(scratchC, scratchB, 0)
-		c.a.ShiftImm(amd64.Shl, scratchC, 32, true)
-		c.a.Op(amd64.Xor, scratchA, scratchC, true)
-		c.a.Jmp(xdone)
-		// One byte, b: 1 ^ b<<32 ^ b<<48; none: 0, the count.
-		c.a.Bind(short)
-		c.a.Op(amd64.Test, scratchA, scratchA, true)
-		c.a.Jcc(amd64.CondE, xdone)
-		c.a.LoadU8(scratchC, scratchB, 0)
+		c.a.MovQFromX(scratchA, xScratch2)
+		c.a.ShiftImm(amd64.Shr, scratchA, 4, true)
 		c.a.MovRR(scratchB, scratchC)
-		c.a.ShiftImm(amd64.Shl, scratchC, 32, true)
-		c.a.Op(amd64.Xor, scratchA, scratchC, true)
-		c.a.ShiftImm(amd64.Shl, scratchB, 48, true)
-		c.a.Op(amd64.Xor, scratchA, scratchB, true)
-		c.a.Jmp(xdone)
-		c.a.Bind(rope)
-		c.a.Op(amd64.Xor, scratchA, scratchA, true)
-		c.a.Bind(xdone)
-		c.movImm(scratchB, abi.HasCacheKeyMul)
-		c.a.Imul(scratchA, scratchB)
-		// The shape's part, its last key's atom and its count of keys, the
-		// shape in scratchC again.
-		c.a.MovQFromX(scratchC, xScratch1)
-		c.a.Load(scratchC, scratchC, c.enc.ObjectShape)
-		c.a.LoadU32(scratchB, scratchC, c.enc.ShapeLastKey)
-		c.a.Op(amd64.Xor, scratchA, scratchB, true)
-		c.a.LoadU32(scratchB, scratchC, c.enc.ShapeN)
-		c.a.ShiftImm(amd64.Shl, scratchB, 32, true)
+		c.a.ShiftImm(amd64.Shr, scratchB, 4, true)
 		c.a.Op(amd64.Xor, scratchA, scratchB, true)
 		c.movImm(scratchB, abi.HasCacheMul)
 		c.a.Imul(scratchA, scratchB)
-		c.a.ShiftImm(amd64.Shr, scratchA, 64-abi.HasCacheBits+1, true)
-		c.a.ShiftImm(amd64.Shl, scratchA, hasEntryShift+1, true)
+		c.a.ShiftImm(amd64.Shr, scratchA, 64-abi.HasCacheBits+abi.HasCacheWaysLog, true)
+		c.a.ShiftImm(amd64.Shl, scratchA, hasEntryShift+abi.HasCacheWaysLog, true)
 		c.movImm(scratchB, uint64(c.f.HasCache))
 		c.a.Op(amd64.Add, scratchA, scratchB, true)
-		// The set's first entry, then its second.
+		// The set's entries, the newest first.
 		hit := c.a.NewLabel()
-		for way := range 2 {
+		for way := range abi.HasCacheWays {
 			next := slow
-			if way == 0 {
+			if way < abi.HasCacheWays-1 {
 				next = c.a.NewLabel()
 			}
 			c.a.MovQFromX(scratchB, xScratch2)
@@ -5243,7 +5188,7 @@ func (c *compiler) keyedHas(v *ssa.Value, slow amd64.Label) {
 			c.loadProtoPlain(scratchB, scratchB)
 			c.a.CmpMem(scratchB, scratchA, abi.HasEntryProto, true)
 			c.a.Jcc(amd64.CondNE, next)
-			if way == 0 {
+			if way < abi.HasCacheWays-1 {
 				c.a.Jmp(hit)
 				c.a.Bind(next)
 				c.a.OpImm(amd64.Add, scratchA, abi.HasEntrySize, true)

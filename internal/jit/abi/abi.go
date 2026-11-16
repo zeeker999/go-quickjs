@@ -1509,10 +1509,6 @@ type Encoding struct {
 	ObjectShape, ObjectProps, ShapeKeys, KeySize, PropertyKey, PropertyFlags int32
 	ObjectPropsLen, ObjectPropsCap                                           int32
 	ShapeProto                                                               int32
-	// ShapeN is the offset of a shape's count of keys, an int32, and
-	// ShapeLastKey of the atom of the key it grew by last, a uint32: what
-	// the in operator's cache hashes a layout by (HasCacheMul).
-	ShapeN, ShapeLastKey int32
 	// A shared shape's first transition: the pointer at ShapeNext, the
 	// shape a property added makes -- nil for none -- of the key, the
 	// uint32 at ShapeNextKey, and the attributes, the byte at
@@ -1736,30 +1732,27 @@ const (
 // The VM's cache of the in operator's answers (its hasCache), which native
 // code reads, never writes, before it calls Go for one (ssa.GoHas): at
 // ssa.Func's HasCache, 1<<HasCacheBits entries of HasEntrySize bytes, in
-// sets of two. A key string's, of pointer word k, in an object whose shape
-// -- the pointer at ObjectShape -- is s is one of set (h * HasCacheMul) >>
-// (64 - HasCacheBits + 1), the entries 2*set and 2*set+1, where h is x *
-// HasCacheKeyMul ^ the uint32 at ShapeLastKey ^ the uint32 at ShapeN << 32,
-// and x the string's: for a flat one (nil at StringLeft) whose bytes --
-// at StringData, as many as the int after it -- are n >= 8, (n ^ its last
-// eight, a little-endian uint64) * HasCacheKeyMul ^ its first eight; for
-// n >= 2, n ^ (its first two, a little-endian uint16) << 32 ^ (its last
-// two) << 48; for n == 1, 1 ^ b << 32 ^ b << 48 of its byte b; else 0. Nothing of it is
-// an address, so that which entries share a set is the same in every
-// run. An entry answers where the pointer at HasEntryKey is k, the one at
+// sets of HasCacheWays, 1<<HasCacheWaysLog. A key string's, of pointer
+// word k, in an object whose shape -- the pointer at ObjectShape -- is s
+// is one of set ((k>>4 ^ s>>4) * HasCacheMul) >> (64 - HasCacheBits +
+// HasCacheWaysLog), the entries HasCacheWays*set on, the newest first:
+// slotted by address, as V8's stub caches are, and up to HasCacheWays
+// keys of one layout keep their entries whatever their addresses. An
+// entry answers where the pointer at HasEntryKey is k, the one at
 // HasEntryShape s and the one at HasEntryProto the object's prototype, and
 // the byte the pointer at HasEntryCell points to, its chain's validity
 // cell's flag, is set: the answer is the byte at HasEntryHas, 1 for true.
 const (
-	HasCacheBits   = 8
-	HasCacheMul    = 0x9E3779B97F4A7C15
-	HasCacheKeyMul = 0xFF51AFD7ED558CCD
-	HasEntrySize   = 64
-	HasEntryKey    = 0
-	HasEntryShape  = 8
-	HasEntryProto  = 16
-	HasEntryCell   = 24
-	HasEntryHas    = 32
+	HasCacheBits    = 8
+	HasCacheWaysLog = 2
+	HasCacheWays    = 1 << HasCacheWaysLog
+	HasCacheMul     = 0x9E3779B97F4A7C15
+	HasEntrySize    = 64
+	HasEntryKey     = 0
+	HasEntryShape   = 8
+	HasEntryProto   = 16
+	HasEntryCell    = 24
+	HasEntryHas     = 32
 )
 
 // The VM's table of the key strings it has handed out with their atoms

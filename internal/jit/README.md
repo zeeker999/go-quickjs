@@ -1228,6 +1228,13 @@ and throws nothing. A proxy on the chain, whose has trap would run, a module
 namespace, a key that is an object, whose conversion calls its `toString` or
 `Symbol.toPrimitive`, and a right operand that is no object, which throws,
 Go refuses: the code leaves for Go to make it there, and goes on after it.
+Before it calls Go for a key string, native code (mir's `keyedHas`), like
+the interpreter's handler, looks in the realm's cache of the operator's
+answers (the VM's hasCache, `abi.HasCacheWays`), which Go fills. The cache
+is slotted by the string's and the layout's addresses, as V8's stub caches
+are slotted by maps and names, four entries to a set, the newest first: up
+to four keys of one layout never displace each other, wherever their
+addresses fall, and a fifth takes the place of the oldest.
 
 **The delete operator.** `delete o[k]` and `delete o.k`
 (`ir.DeleteProperty`) are a call of Go from native code (`ssa.GoDelete`,

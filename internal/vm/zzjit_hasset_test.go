@@ -2,17 +2,21 @@
 
 package vm
 
-import "testing"
+import (
+	"fmt"
+	"strings"
+	"testing"
+)
 
-// The in operator's cache (hasCache) finds an answer's set by what the key
-// string and the object's layout hold (hasSet), never by their addresses,
-// so that native code does the same work in every run, the collector
-// marking or not. prop_in_keyed's four keys of one layout had, in a run,
-// three in one set of two -- by the strings' and the layout's addresses --
-// and every visit of them called Go: 72 calls of 96 turns, and none in the
-// run beside it while the collector marked (TestJITSameWorkWhileMarking).
-// Its four answers each have an entry its code finds: no call of Go, and
-// the same exits, while the collector marks or not.
+// The in operator's cache (hasCache) holds four answers to a set, the
+// newest first, so that the four keys of one layout prop_in_keyed asks in
+// turn keep their entries wherever their addresses put them: with two to a
+// set, three of them had shared one in a run -- by the strings' and the
+// layout's addresses -- and every visit of them called Go, 72 calls of 96
+// turns, and none in the run beside it while the collector marked
+// (TestJITSameWorkWhileMarking). Its four answers each have an entry its
+// code finds: no call of Go, and the same exits, while the collector marks
+// or not.
 func TestJITInKeyedSameWorkWhileMarking(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
@@ -75,12 +79,11 @@ function prop_in_keyed(n)
 }
 
 // Keys made by concatenation -- of 64 bytes or more (ropeThreshold) -- are
-// ropes until something reads their text:
-// hasSet gives a rope the part of no bytes, but no entry is ever noted
-// for one. A key's first in reaches Go (hasQuick), which atomizes it --
-// toPropertyName flattens it in place -- before the answer is noted, by
-// the flat string's set, and the next in of the same string, flat now,
-// finds it there, in native code and in the interpreter's handler alike.
+// ropes until something reads their text. A key's first in reaches Go
+// (hasQuick), which atomizes it -- toPropertyName flattens it in place --
+// before the answer is noted, and the next in of the same string finds it
+// there, by its pointer, in native code and in the interpreter's handler
+// alike.
 // (A key made anew at each in is a new string, which no entry, noted by
 // the string's pointer, ever answers.) Twenty such keys of one layout:
 // none called Go once each had been asked.
@@ -129,5 +132,88 @@ function inRopes(n) { var s = 0; for (var j = 0; j < n; j++) if (keys[j % 20] in
 	}
 	if calls != 0 {
 		t.Errorf("%d calls of Go in 200 turns over %d keys made as ropes, want none", calls, ropes)
+	}
+}
+
+// Four keys of one layout whose addresses put them in one set of hasCache
+// each keep their entry: asked in turn, none calls Go once each has been
+// asked. A fifth key of the set takes the newest place, and the oldest of
+// the four -- the first noted -- leaves.
+func TestJITHasCacheFourWays(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	if _, err := r.Run(compileForTest(t, `var global_res, obj = { a: 1, b: 2, c: 3 }, keys = []
+for (var i = 0; i < 4000; i++) keys.push("key" + i)
+function inSome(ks, n) { var s = 0; for (var j = 0; j < n; j++) if (ks[j % ks.length] in obj) s++; global_res = s; return n }`)); err != nil {
+		t.Fatal(err)
+	}
+	global := func(name string) Value {
+		v, err := r.GetProp(Obj(r.Global()), r.Intern(name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	sh := r.ensureShape(global("obj").Object())
+	keys := global("keys").Object().elemsOf()
+	sets := map[uint64][]int{}
+	var five []int
+	for i, k := range keys {
+		set := hasSetOf(k.ref, sh)
+		if sets[set] = append(sets[set], i); len(sets[set]) == 5 {
+			five = sets[set]
+			break
+		}
+	}
+	if five == nil {
+		t.Fatal("no five keys share a set")
+	}
+	idx := make([]string, len(five))
+	for i, k := range five {
+		idx[i] = fmt.Sprintf("keys[%d]", k)
+	}
+	if _, err := r.Run(compileForTest(t, `var pick4 = [`+strings.Join(idx[:4], ", ")+`], pick5 = [`+strings.Join(idx, ", ")+`]`)); err != nil {
+		t.Fatal(err)
+	}
+	fn := global("inSome")
+	calls := 0
+	jitGoCallWork = func() { calls++ }
+	defer func() { jitGoCallWork = nil }()
+	run := func(pick string, n int) {
+		t.Helper()
+		if res := r.RegNativeCall(fn, []Value{global(pick), Float(float64(n))}, false); res.Err != nil {
+			t.Fatal(res.Err)
+		}
+	}
+	for range 2 {
+		run("pick4", 40)
+	}
+	calls = 0
+	run("pick4", 400)
+	if calls != 0 {
+		t.Errorf("four keys of one set: %d calls of Go in 400 turns, want none", calls)
+	}
+	set := hasSetOf(keys[five[0]].ref, sh)
+	ways := r.has[set*hasCacheWays : (set+1)*hasCacheWays]
+	for w, i := range []int{3, 2, 1, 0} {
+		if ways[w].key != keys[five[i]].ref {
+			t.Fatalf("way %d holds another key than the %dth noted", w, i+1)
+		}
+	}
+	run("pick5", 5)
+	if ways[0].key != keys[five[4]].ref {
+		t.Error("the fifth key is not the newest of its set")
+	}
+	for w := range ways {
+		if ways[w].key == keys[five[0]].ref {
+			t.Errorf("the oldest key is still in way %d", w)
+		}
+	}
+	for w, i := range []int{3, 2, 1} {
+		if ways[w+1].key != keys[five[i]].ref {
+			t.Errorf("way %d holds another key than the %dth noted", w+1, i+1)
+		}
 	}
 }

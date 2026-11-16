@@ -74,8 +74,6 @@ var jitEncoding = abi.Encoding{
 	StoreRef:         jit.StoreRef(),
 	Round:            runtime.GOARCH == "arm64" || cpu.X86.HasSSE41,
 	ShapeKeys:        int32(unsafe.Offsetof(shape{}.keys)),
-	ShapeN:           int32(unsafe.Offsetof(shape{}.n)),
-	ShapeLastKey:     int32(unsafe.Offsetof(shape{}.key)),
 	ShapeNext:        int32(unsafe.Offsetof(shape{}.next)),
 	ShapeNextKey:     int32(unsafe.Offsetof(shape{}.nextKey)),
 	ShapeNextFlags:   int32(unsafe.Offsetof(shape{}.nextFlags)),
@@ -2856,8 +2854,8 @@ var _ [0]struct{} = [hasCacheBits - abi.HasCacheBits]struct{}{}
 var _ [0]struct{} = [abi.HasCacheBits - hasCacheBits]struct{}{}
 var _ [0]struct{} = [hasCacheMul - abi.HasCacheMul]struct{}{}
 var _ [0]struct{} = [abi.HasCacheMul - hasCacheMul]struct{}{}
-var _ [0]struct{} = [hasCacheKeyMul - abi.HasCacheKeyMul]struct{}{}
-var _ [0]struct{} = [abi.HasCacheKeyMul - hasCacheKeyMul]struct{}{}
+var _ [0]struct{} = [hasCacheWaysLog - abi.HasCacheWaysLog]struct{}{}
+var _ [0]struct{} = [abi.HasCacheWaysLog - hasCacheWaysLog]struct{}{}
 
 // WalkedCloseCell is where native code finds the validity cell that says
 // closing an array walked in place runs nothing (arrayIterNoReturn): the

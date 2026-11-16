@@ -28,16 +28,18 @@ import "unsafe"
 // object's or an array's answer, of a chain of them (hasQuick), is
 // remembered, whose layout is one a cache may remember, so that it is
 // replaced at any change of the object's keys. Elements do not matter to a
-// name. An entry is one of the two of its set (hasSet), found by what the
-// string and the layout hold, never by their addresses: which answers
-// share a set, and so displace each other, is the same in every run of a
-// program, however its objects fall in memory -- by addresses, three of
-// prop_in_keyed's four keys had shared one in a run, and every visit of
-// them called Go, and not in another. The first of a set is the newer,
-// and a new entry takes its place, the older going to the second's, so
-// that two answers asked in turn -- "a" in o and "b" in o -- keep their
-// places. Native code finds them so too, their fields at the offsets the
-// JIT's abi names (abi.HasEntrySize and the others).
+// name. An entry is one of the hasCacheWays of its set, found by the
+// string's and the layout's addresses (hasSetOf), as V8's stub caches are
+// found by their maps' and names' addresses: the first is the newest, and
+// a new entry takes its place, the others each moving one way on and the
+// oldest leaving, so that up to four answers asked in turn of one layout
+// -- "a" in o, "z" in o, "c" in o, "y" in o -- keep their places however
+// their addresses fall, and never displace each other. With two ways to a
+// set, three keys of one layout whose addresses shared a set displaced
+// each other at every turn, each a call of Go, in one run and not in
+// another (prop_in_keyed's 72 calls in 96 turns). Native code finds them
+// so too, newest first, their fields at the offsets the JIT's abi names
+// (abi.HasEntrySize, abi.HasCacheWays and the others).
 type hasCache [hasCacheSize]hasEntry
 
 // hasEntry is an entry of hasCache, of 64 bytes.
@@ -52,13 +54,14 @@ type hasEntry struct {
 
 const (
 	// hasCacheBits is the bits of an entry's index: 256 entries, in sets
-	// of two, the set the top hasCacheBits-1 bits of the hash.
-	hasCacheBits = 8
-	hasCacheSize = 1 << hasCacheBits
-	// hasCacheMul is the multiplier of the hash, Fibonacci's, and
-	// hasCacheKeyMul the key's part's (hasSet).
-	hasCacheMul    = 0x9E3779B97F4A7C15
-	hasCacheKeyMul = 0xFF51AFD7ED558CCD
+	// of hasCacheWays, 1<<hasCacheWaysLog, the set the top
+	// hasCacheBits-hasCacheWaysLog bits of the hash.
+	hasCacheBits    = 8
+	hasCacheSize    = 1 << hasCacheBits
+	hasCacheWaysLog = 2
+	hasCacheWays    = 1 << hasCacheWaysLog
+	// hasCacheMul is the multiplier of the hash, Fibonacci's.
+	hasCacheMul = 0x9E3779B97F4A7C15
 )
 
 var (
@@ -86,31 +89,23 @@ var (
 	// o's layout and its chain's cell can be kept.
 	hasNote func(r *Runtime, key Value, o *Object, has bool)
 
-	// hasSet is the set of hasCache that answers key in an object of
-	// layout sh: of what the string holds -- its length in bytes and,
-	// of eight or more, its first eight and its last eight, of fewer, its
-	// first two and its last two, those of a flat string (a rope's are
-	// none) -- multiplied, with the layout's count of keys and its last
-	// key's atom, then all of it multiplied, as native code makes it
-	// (abi.HasCacheMul). Names that differ only in their middle --
-	// "item1" to "item99", "k12" and "k21", "prop_1_x" to "prop_99_x" --
-	// differ in length or within eight bytes of an end. A remembered layout's keys never change (remember), so its
-	// count and its last key are the same at every look.
-	hasSet func(key *String, sh *shape) uint64
-
-	// hasLE is the first n bytes of s, a little-endian number, as native
-	// code loads them.
-	hasLE func(s string, n int) uint64
+	// hasSetOf is the set of hasCache a key string's answer of an object
+	// of layout sh is in, of the string's and the layout's addresses, as
+	// native code finds it (abi.HasCacheMul).
+	hasSetOf func(key unsafe.Pointer, sh *shape) uint64
 )
 
 func init() {
+	hasSetOf = func(key unsafe.Pointer, sh *shape) uint64 {
+		return (uint64(uintptr(key))>>4 ^ uint64(uintptr(unsafe.Pointer(sh)))>>4) * hasCacheMul >> (64 - hasCacheBits + hasCacheWaysLog)
+	}
 	hasCached = func(r *Runtime, key Value, o *Object) (bool, bool) {
 		c, sh := r.has, o.shape
 		if c == nil || !key.IsString() || sh == nil {
 			return false, false
 		}
-		set := hasSet(key.String(), sh)
-		for i := set * 2; i < set*2+2; i++ {
+		set := hasSetOf(key.ref, sh)
+		for i := set * hasCacheWays; i < (set+1)*hasCacheWays; i++ {
 			// The layout says the prototype, but for an object that keeps
 			// it in its table (objPolyProto): only that one is compared.
 			if e := &c[i]; e.key == key.ref && e.shape == sh && e.cell.valid && (o.flags&objPolyProto == 0 && e.proto == sh.proto || o.flags&objPolyProto != 0 && e.proto == (*Object)(o.valp.ref)) {
@@ -143,35 +138,20 @@ func init() {
 		if r.has == nil {
 			r.has = new(hasCache)
 		}
-		set := hasSet(key.String(), sh)
-		ways := r.has[set*2 : set*2+2]
-		if e := &ways[0]; e.key != key.ref || e.shape != sh || e.proto != o.proto() {
-			// The newer is now the older, unless it is this one's, which
-			// its new cell replaces.
-			ways[1] = ways[0]
+		set := hasSetOf(key.ref, sh)
+		ways := r.has[set*hasCacheWays : (set+1)*hasCacheWays]
+		// The ways before this answer's entry, if it has one -- which its
+		// new cell replaces -- else all but the oldest, each move one way
+		// on, and the answer is the newest.
+		last := hasCacheWays - 1
+		for i := range ways {
+			if e := &ways[i]; e.key == key.ref && e.shape == sh && e.proto == o.proto() {
+				last = i
+				break
+			}
 		}
+		copy(ways[1:last+1], ways[:last])
 		ways[0] = hasEntry{key: key.ref, shape: remember(sh), proto: o.proto(), cell: cell, has: has}
-	}
-	hasLE = func(s string, n int) uint64 {
-		var v uint64
-		for i := n - 1; i >= 0; i-- {
-			v = v<<8 | uint64(s[i])
-		}
-		return v
-	}
-	hasSet = func(key *String, sh *shape) uint64 {
-		var x uint64
-		switch b, n := key.s, len(key.s); {
-		case key.left != nil || n == 0:
-		case n >= 8:
-			x = (uint64(n)^hasLE(b[n-8:], 8))*hasCacheKeyMul ^ hasLE(b, 8)
-		case n >= 2:
-			x = uint64(n) ^ hasLE(b, 2)<<32 ^ hasLE(b[n-2:], 2)<<48
-		default:
-			x = 1 ^ uint64(b[0])<<32 ^ uint64(b[0])<<48
-		}
-		h := x*hasCacheKeyMul ^ uint64(uint32(sh.key)) ^ uint64(uint32(sh.n))<<32
-		return h * hasCacheMul >> (64 - hasCacheBits + 1)
 	}
 	hasIndexQuick = func(o *Object, i uint32) (bool, bool) {
 		for p := o; p != nil; p = p.proto() {
