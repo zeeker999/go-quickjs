@@ -146,7 +146,7 @@ func TestJITSortNative(t *testing.T) {
 
 func testJITSortNative(t *testing.T, built *jitBuiltForTest) {
 	r, drive := jitSortsForTest(t, jitStressConfig{})
-	entry := func(name string) jitNamedForTest { return jitNamedOfForTest(r, built, name) }
+	entry := func(name string) jitNamedStateForTest { return jitNamedOfForTest(r, built, name) }
 	for _, c := range []struct{ fn, src string }{
 		{"up_i32", "up_i32(i32, c_i32)"}, {"down_i32", "down_i32(i32, c_i32)"},
 		{"up_f64", "up_f64(f64, c_f64)"}, {"down_f64", "down_f64(f64, c_f64)"},

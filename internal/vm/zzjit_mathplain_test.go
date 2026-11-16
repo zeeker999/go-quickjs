@@ -76,7 +76,7 @@ func TestJITMathPlainCall(t *testing.T) {
 		}
 	}
 	treeId := r.global.getOwn(r.atoms.intern("treeId")).value().Object().fn().closure
-	if e, link := jitLinkOfForTest(r, treeId); e == nil || link == nil {
+	if e, link := jitEntryLinkOfForTest(r, treeId); e == nil || link == nil {
 		t.Error("treeId has no code native callers call")
 	} else {
 		for range 20 {

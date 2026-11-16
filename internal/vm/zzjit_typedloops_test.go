@@ -88,7 +88,7 @@ func TestJITTypedArrayLoops(t *testing.T) {
 	// function fails, and the call is Go's.
 	jitAgreesForTest(t, typedLoopsSetup+drivers, append(rounds, `(Int32Array.prototype.forEach = function (f) { f(100) }, drive_eachSum(30, i32))`)...)
 	r := jitAgreesForTest(t, typedLoopsSetup+drivers, rounds...)
-	entry := func(name string) jitNamedForTest { return jitNamedOfForTest(r, built, name) }
+	entry := func(name string) jitNamedStateForTest { return jitNamedOfForTest(r, built, name) }
 	if r.jit.loopsFinished == 0 {
 		t.Error("Go went on with no loop")
 	}

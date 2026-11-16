@@ -60,7 +60,7 @@ func TestJITPoolsWhileMarking(t *testing.T) {
 		if regJITForTest() {
 			// Its register code's state that outlives its compiles, which
 			// holds the pool (jitRegFeedback's CellsPool).
-			e = jitEntryNamedForTest(r, name)
+			e = jitCodeEntryNamedForTest(r, name)
 		} else {
 			for k, x := range r.jit.cache {
 				if fn := k.Value(); fn != nil && fn.Name == name {

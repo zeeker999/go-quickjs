@@ -42,7 +42,7 @@ func TestJITCallersInlineDecidedCallee(t *testing.T) {
 	rounds := []string{`drive(50, set)`, `drive(50, set)`, `drive(50, set)`, `drive(500, set)`, `drive(500, set)`}
 	r := jitAgreesForTest(t, decidedSetup, rounds...)
 	if inlined, called, ok := jitInlinedAtForTest(r, built, "contains"); !ok || inlined != 1 || called != 1 {
-		t.Fatalf("contains does not inline Set.hasSome with the closure it gives it: %+v", jitEntryNamedForTest(r, "contains"))
+		t.Fatalf("contains does not inline Set.hasSome with the closure it gives it: %+v", jitCodeEntryNamedForTest(r, "contains"))
 	}
 	rounds = append(rounds, `drive(500, other)`, `drive(500, set)`, `drive(500, other)`)
 	jitAgreesForTest(t, decidedSetup, rounds...)

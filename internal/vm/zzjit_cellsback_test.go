@@ -73,7 +73,7 @@ func TestJITCellsBack(t *testing.T) {
 	r := jitAgreesForTestWith(t, jitStressConfig{}, cellsBackSetup, rounds[:7]...)
 	for _, name := range []string{"scale", "deep"} {
 		if _, _, unmade, ok := jitCalledForTest(r, name); !ok || unmade == 0 {
-			t.Errorf("%s does not inline its callback unmade: %+v", name, jitEntryNamedForTest(r, name))
+			t.Errorf("%s does not inline its callback unmade: %+v", name, jitCodeEntryNamedForTest(r, name))
 		}
 	}
 	// Each a loop of 2,000 native calls -- deep's of itself five deep --

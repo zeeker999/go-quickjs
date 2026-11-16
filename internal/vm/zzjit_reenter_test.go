@@ -431,7 +431,7 @@ func TestJITNativeCalleeGoesOnAtLoops(t *testing.T) {
 			t.Fatal(err)
 		}
 		var in, wentOn, unwound, interpreted uint64
-		if _, link := jitLinkOfForTest(r, cl); link != nil {
+		if _, link := jitEntryLinkOfForTest(r, cl); link != nil {
 			in = link.in
 		}
 		if r.jit != nil {
@@ -441,7 +441,7 @@ func TestJITNativeCalleeGoesOnAtLoops(t *testing.T) {
 		if err != nil || gv.Number() != wv.Number() {
 			t.Fatalf("round %d: got %v, %v; interpreter %v", round, gv, err, wv)
 		}
-		if e, link := jitLinkOfForTest(r, cl); e == nil || link == nil || link.in-in != 50 || r.jit.unwound-unwound != 10 {
+		if e, link := jitEntryLinkOfForTest(r, cl); e == nil || link == nil || link.in-in != 50 || r.jit.unwound-unwound != 10 {
 			// Not yet called natively at each call, each leaving.
 			continue
 		}

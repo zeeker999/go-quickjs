@@ -51,7 +51,7 @@ func TestJITTailCallsInlined(t *testing.T) {
 	r := jitAgreesForTest(t, tailInlineSetup, shallow...)
 	for _, name := range []string{"sum", "down"} {
 		if inlinedAt, _, ok := jitInlinedAtForTest(r, built, name); !ok || inlinedAt == 0 {
-			t.Errorf("%s inlines no call ending in a call in tail position: %+v", name, jitEntryNamedForTest(r, name))
+			t.Errorf("%s inlines no call ending in a call in tail position: %+v", name, jitCodeEntryNamedForTest(r, name))
 		}
 	}
 	// Then deeper, past tailCallDepth, where the inlined calls in tail

@@ -28,7 +28,7 @@ func TestJITPolymorphicCallNotInlined(t *testing.T) {
 		rounds = append(rounds, `poly(100)`)
 	}
 	r := jitAgreesForTest(t, polySetup, rounds...)
-	e := jitEntryNamedForTest(r, "poly")
+	e := jitCodeEntryNamedForTest(r, "poly")
 	inlinedAt, _, ok := jitInlinedAtForTest(r, built, "poly")
 	if e == nil || !ok {
 		t.Fatalf("poly is not compiled: %+v", e)

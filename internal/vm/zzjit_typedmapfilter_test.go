@@ -125,7 +125,7 @@ func testJITTypedArrayMapFilter(t *testing.T, built *jitBuiltForTest) {
 			t.Errorf("%s = %s, want %s", c.src, got, c.want)
 		}
 	}
-	entry := func(name string) jitNamedForTest { return jitNamedOfForTest(r, built, name) }
+	entry := func(name string) jitNamedStateForTest { return jitNamedOfForTest(r, built, name) }
 	if r.jit.loopsFinished == 0 {
 		t.Error("Go went on with no loop")
 	}

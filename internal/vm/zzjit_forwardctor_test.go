@@ -90,7 +90,7 @@ func TestJITForwardingConstructors(t *testing.T) {
 	if regJITForTest() {
 		// Its register code's state that outlives its compiles, which
 		// holds what it inlines and what its runs did.
-		e = jitEntryNamedForTest(r, "build")
+		e = jitCodeEntryNamedForTest(r, "build")
 	} else {
 		for k, x := range r.jit.cache {
 			if fn := k.Value(); fn != nil && fn.Name == "build" {

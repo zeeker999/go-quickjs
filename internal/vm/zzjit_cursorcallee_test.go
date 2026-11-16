@@ -56,11 +56,11 @@ func TestJITCursorCallees(t *testing.T) {
 	r := both.jit
 	// pair has no loop: its code is for native callers alone, from the
 	// lowering for them, which had refused its cursor.
-	if e, _, callee := jitLinkedForTest(t, r, "pair"); !callee {
+	if e, _, callee := jitNamedLinkForTest(t, r, "pair"); !callee {
 		t.Errorf("pair's code is not for native callers: %+v", e)
 	}
 	for _, name := range []string{"sum"} {
-		_, link, _ := jitLinkedForTest(t, r, name)
+		_, link, _ := jitNamedLinkForTest(t, r, name)
 		in := link.in
 		both.agree(t, `run(100)`)
 		if link.in-in < 50 {

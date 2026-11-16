@@ -82,7 +82,7 @@ func TestJITSearches(t *testing.T) {
 		`(delete Array.prototype[1], drive_arrHoles(30, undefined))`)
 	r := jitAgreesForTest(t, indexOfSetup+drivers, rounds...)
 	for _, name := range []string{"decode", "decodeArr"} {
-		e := jitEntryNamedForTest(r, name)
+		e := jitCodeEntryNamedForTest(r, name)
 		if e == nil {
 			t.Errorf("%s has no native code: %+v", name, e)
 			continue

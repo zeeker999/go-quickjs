@@ -80,7 +80,7 @@ func TestJITParseIntOfNumbers(t *testing.T) {
 		e := entry(name)
 		if regJITForTest() {
 			// Its register code's state that outlives its compiles.
-			e = jitEntryNamedForTest(r, name)
+			e = jitCodeEntryNamedForTest(r, name)
 		}
 		if e == nil || !regJITForTest() && e.ssa == nil {
 			t.Errorf("%s has no native code: %+v", name, e)

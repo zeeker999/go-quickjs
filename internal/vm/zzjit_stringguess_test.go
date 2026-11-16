@@ -42,7 +42,7 @@ func TestJITObjectMethodNamedLikeAString(t *testing.T) {
 	rounds = append(rounds, "charAts(lit, 4000)", "slices(short, 4000)")
 	r := jitAgreesForTest(t, stringGuessSetup, rounds...)
 	for _, name := range names {
-		e := jitEntryNamedForTest(r, name)
+		e := jitCodeEntryNamedForTest(r, name)
 		if e == nil {
 			t.Errorf("%s has no code", name)
 			continue

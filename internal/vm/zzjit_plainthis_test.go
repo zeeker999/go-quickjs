@@ -41,7 +41,7 @@ func TestJITPlainCallsOfThisReaders(t *testing.T) {
 	}
 	r := jitAgreesForTest(t, plainThisSetup, rounds...)
 	for _, name := range callers {
-		e := jitEntryNamedForTest(r, name)
+		e := jitCodeEntryNamedForTest(r, name)
 		if e == nil {
 			t.Errorf("%s has no code", name)
 			continue
