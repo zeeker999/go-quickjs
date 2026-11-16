@@ -313,11 +313,72 @@ func (f *jitRegFeedback) regCallTargets(t *jitRegTargets, pc int, w bytecode.RIn
 	l := f.fb.e
 	rpc := int32(f.p.Origin[pc])
 	newW := w.Op() == bytecode.RNewW
-	if calls := f.fb.r.regCallsRestored(f.fb.cl, int(w.C())); !newW && w.Op() != bytecode.RApplyArgs && uint(w.C()) < uint(len(calls)) {
+	calls := f.fb.r.regCallsRestored(f.fb.cl, int(w.C()))
+	// A site whose cache the interpreter has not filled, or not made yet.
+	unfilled := !newW && w.Op() != bytecode.RApplyArgs && uint(w.C()) >= uint(len(calls))
+	if !newW && w.Op() != bytecode.RApplyArgs && uint(w.C()) < uint(len(calls)) {
 		if e := &calls[w.C()]; jitRegCallKind(e) {
 			f.regAddTarget(t, pc, argc, method, e.callee, e.cl, e.rc, nil, nil, false, false)
 			if t.n != 0 && l != nil && !jitRegCallKnown(l, rpc, e.callee) {
 				l.nativeCalls = append(l.nativeCalls, jitInline{pc: rpc, cl: e.cl, obj: e.callee})
+			}
+		} else if e.kind&regCallThrough != 0 && method && argc >= 1 && e.cl != nil && e.rc != nil && l != nil {
+			// G.call(x, ...), which the interpreter makes entering G, its
+			// cache G's (regCallThrough): G called natively through call
+			// (regCallSite's via), as the call's exits would teach it
+			// (jitRegViaSeen) -- what a site the interpreter had made the
+			// call's own (callThrough) taught.
+			n := t.n
+			f.regAddTarget(t, pc, argc, method, e.callee, e.cl, e.rc, nil, nil, false, true)
+			if t.n > n && !slices.ContainsFunc(l.nativeCalls, func(x jitInline) bool { return x.pc == rpc && x.obj == e.callee && x.via }) {
+				l.nativeCalls = append(l.nativeCalls, jitInline{pc: rpc, cl: e.cl, obj: e.callee, via: true})
+			}
+		} else {
+			unfilled = e.callee == nil
+		}
+	}
+	if unfilled && method && l != nil && argc >= 1 && !slices.ContainsFunc(l.nativeCalls, func(x jitInline) bool { return x.pc == rpc }) {
+		// G.call(x, ...) the interpreter has not made yet, G the binding the
+		// method's read read -- _super.call(this, ...) of a class compiled
+		// to ES5 -- called natively through Function.prototype.call from
+		// the first compile, as the stack form's compiles seed it
+		// (jitSeedBuiltin's via, jitViaRead).
+		if g, cl := f.regViaNow(int(rpc), int(w.A())); cl != nil {
+			rc := cl.reg
+			if rc == nil {
+				rc = f.fb.r.regOf(cl)
+			}
+			if n := t.n; rc != nil {
+				f.regAddTarget(t, pc, argc, method, g, cl, rc, nil, nil, false, true)
+				if t.n > n {
+					l.nativeCalls = append(l.nativeCalls, jitInline{pc: rpc, cl: cl, obj: g, via: true})
+				}
+			}
+		}
+	}
+	if unfilled && !method && l != nil && !slices.ContainsFunc(l.nativeCalls, func(x jitInline) bool { return x.pc == rpc }) &&
+		!slices.ContainsFunc(l.inlines, func(x jitInline) bool { return x.pc == rpc }) {
+		// A plain call the interpreter has not made yet, of the function
+		// the binding read before it holds now -- a global's, a captured
+		// one's -- called natively, or inlined, from the first compile, as
+		// the stack form's compiles seed a call (jitSeedCalls,
+		// jitCalleeObjectAt): the call checks its function. Learned only
+		// at calls of Go, a function compiled while its first loop ran
+		// made each call of its later loops by Go, and was compiled again
+		// for each -- RegExp's runBlock0, whose loops each call Exec.
+		if o := f.regConstructorNow(int(rpc), int(w.A())); o != nil {
+			if fd := o.fn(); fd != nil && fd.closure != nil && !fd.bound && fd.native == nil {
+				cl := fd.closure
+				rc := cl.reg
+				if rc == nil {
+					rc = f.fb.r.regOf(cl)
+				}
+				if n := t.n; rc != nil {
+					f.regAddTarget(t, pc, argc, method, o, cl, rc, nil, nil, false, false)
+					if t.n > n {
+						l.nativeCalls = append(l.nativeCalls, jitInline{pc: rpc, cl: cl, obj: o})
+					}
+				}
 			}
 		}
 	}
@@ -805,6 +866,54 @@ func (f *jitRegFeedback) regConstructorNow(rpc, reg int) *Object {
 	return nil
 }
 
+// regViaNow is G and its closure where the method call at register pc rpc,
+// its window from register win, is G.call(...): the get_method_w before it
+// that fills the window read the method of G, the value its register held
+// then as the binding read before it holds it now (regDefined), and the
+// method G has now is the realm's Function.prototype.call -- or nil.
+func (f *jitRegFeedback) regViaNow(rpc, win int) (*Object, *closure) {
+	r := f.fb.r
+	cl := f.fb.cl
+	if r.callFn == nil || cl == nil {
+		return nil, nil
+	}
+	for q := rpc - 1; q >= 0 && q < len(f.rc.Code); q-- {
+		w := f.rc.Code[q]
+		if int(w.A()) != win {
+			continue
+		}
+		if w.Op() != bytecode.RGetMethodW {
+			return nil, nil
+		}
+		site := int(w.C())
+		if site >= len(f.rc.SiteName) || int(f.rc.SiteName[site]) >= len(cl.names) {
+			return nil, nil
+		}
+		v, ok := f.regDefined(q, int(w.B()))
+		if !ok || !v.IsObject() {
+			return nil, nil
+		}
+		g := v.Object()
+		key := cl.names[f.rc.SiteName[site]]
+		for o, depth := g, 0; o != nil && depth < 8; o, depth = o.proto(), depth+1 {
+			prop := o.getOwnVisible(key)
+			if !prop.ok() {
+				continue
+			}
+			if prop.flags()&propAccessor != 0 || !prop.value().IsObject() || prop.value().Object() != r.callFn {
+				return nil, nil
+			}
+			fd := g.fn()
+			if fd == nil || fd.closure == nil || fd.bound || fd.native != nil {
+				return nil, nil
+			}
+			return g, fd.closure
+		}
+		return nil, nil
+	}
+	return nil, nil
+}
+
 // jitRegSeedConstruct has l, what a function's register code learned,
 // know that its construction at register pc rpc, of argc arguments,
 // constructs with o, its objects from a pool, as a call of Go there would
@@ -993,7 +1102,7 @@ func (r *Runtime) jitRegViaSeen(f *frame, e *jitRegEntry, rpc int, callee, recv 
 		return false
 	}
 	cl := fd.closure
-	if cl.reg == nil || cl.reg.args || !r.jitRegCallable(o, cl, cl.reg, argc-1) {
+	if cl.reg == nil || !r.jitRegCallable(o, cl, cl.reg, argc-1) {
 		return false
 	}
 	l := r.jitRegLearnedFor(f, e)
@@ -1154,7 +1263,12 @@ func (r *Runtime) jitRegTarget(o *Object, cl *closure, rc *regCode, argc int) bo
 	if r.nodeQuirks && argc > int(rc.keep) {
 		return false
 	}
-	if x := fd.extra; x != nil && (!fd.arrow || x.lexThisRef != nil || x.rare != nil) {
+	if x := fd.extra; x != nil && (!fd.arrow || x.rare != nil || x.lexThisRef != nil && cl.fn.UsesThis && !x.lexThisRef.init) {
+		// An arrow's this is the one it captured, or the one the derived
+		// constructor's binding it shares holds once bound, which each
+		// call checks (mir's arrowThis), as the stack form's
+		// closureCallSite has it: one sharing a binding not bound yet Go
+		// calls. An arrow that reads no this is any function's call.
 		return false
 	}
 	return true
@@ -1176,9 +1290,11 @@ func (f *jitRegFeedback) regCallSite(pc int, o *Object, cl *closure, rc *regCode
 		// G.call(x, ...) through the realm's Function.prototype.call, a
 		// method call's (ssa.CallSite's Via): G called natively with x its
 		// receiver and the rest its arguments, as the stack form's
-		// (jitCalledVia) -- not one that keeps its arguments, nor an arrow
-		// reading its this, nor a construction.
-		if !method || argc < 1 || pool != nil || byCode || r.callFn == nil || rc.args || o.fn().arrow && cl.fn.UsesThis ||
+		// (jitCalledVia) -- one that keeps its arguments given them past
+		// the receiver in its context (FrameArgs, mir's windowArgs), as the
+		// stack form's call gives them -- not an arrow reading its this,
+		// nor a construction.
+		if !method || argc < 1 || pool != nil || byCode || r.callFn == nil || o.fn().arrow && cl.fn.UsesThis ||
 			!r.jitRegCallable(o, cl, rc, argc-1) {
 			return ssa.CallSite{}, false
 		}
@@ -1193,7 +1309,8 @@ func (f *jitRegFeedback) regCallSite(pc int, o *Object, cl *closure, rc *regCode
 			Window: f.p.Code[pc].Left.Slot + 1, Via: uintptr(unsafe.Pointer(r.callFn)),
 			// x may be a primitive, which a sloppy G's this is coerced
 			// from by Go.
-			Coerce: rc.coerceThis,
+			Coerce:    rc.coerceThis,
+			FrameArgs: rc.args,
 		}
 		if cl.fn.HasTailCall {
 			site.Tail, site.TailFrame = true, true
@@ -1261,7 +1378,8 @@ func (f *jitRegFeedback) regCallSite(pc int, o *Object, cl *closure, rc *regCode
 		// call's frame, not a construction's, as the interpreter gives up
 		// one (regTailTo) -- an arrow's sharing a derived constructor's
 		// this is no callee of a native call (jitRegTarget).
-		site.Tail, site.TailFrame = true, pool == nil
+		fd := o.fn()
+		site.Tail, site.TailFrame = true, pool == nil && (!fd.arrow || fd.extra == nil || fd.extra.lexThisRef == nil)
 	}
 	if pool != nil {
 		// A construction: its receiver from the pool, made as regConstruct

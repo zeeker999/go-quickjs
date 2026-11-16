@@ -1280,8 +1280,9 @@ func (r *Runtime) jitRegLoop(st *regState, target int) int {
 	if e != nil && e.life.loopSlow && !forced {
 		// Code whose runs begun at a loop do not pay (loopSlow): the
 		// interpreter runs the loop, and Go enters it again once retried,
-		// as the stack form's tryJITAt has it (jitRetrySlow).
-		e.life.slowCalls++
+		// as the stack form's tryJITAt has it (jitRetrySlow), which
+		// counts the call (slowCalls): counted here too, each had been
+		// two, and the code retried at half the calls.
 		r.jitRegRetrySlow(e)
 	}
 	if e == nil || !e.goesOn || jitRunSlow(e.life, osr) {

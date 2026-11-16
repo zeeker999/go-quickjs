@@ -1119,7 +1119,17 @@ refills. So too a replace's leaf of the RegExp a `call_method_w` marked
 window's register on the way to the call alone (the VM's
 `regConstOperand`). A call in tail position is made as any call while the
 stack is shallow (`ssa.OpTailRoom` guarding it), and leaves for the
-interpreter deeper, which makes it in constant space.
+interpreter deeper, which makes it in constant space. A call of more
+operands than the context's operands hold (`abi.MaxGoArgs`) is a native
+call all the same, and where it does not make its call natively -- a
+callee with no code, one past those it calls, a context past the deepest
+-- a call of Go whose operands it writes to the callee's window past the
+VM's stack's top rather than to the context, the room checked first, the
+window's layout the frame Go makes the call of (`mir`'s `windowGoCall`,
+the VM's `jitRegWideCall`): the stack form's left native code at its
+checks, and had Go run a callee with no code from its start
+(`abi.ExitEnter`), which register code has no need of. Such a call with no
+native callee is left to an exit.
 
 **Steps.** A loop's step (`iter_next`) writes its register only where the
 loop goes on: the builder assigns the step's value in the block after it
@@ -2301,7 +2311,9 @@ method call of the realm's `Function.prototype.call`, `G.call(x, ...)` --
 TypeScript's `_super.call(this, ...)` -- calls G natively, as the stack
 form's (`jitCalledVia`): learned at its calls of Go (`jitRegViaSeen`), the
 call checks the method is `call` and its receiver G (`ssa.CallSite`'s
-`Via`) and writes G's window from G, x and the rest; never inlined. A
+`Via`) and writes G's window from G, x and the rest, a G that keeps its
+arguments given them past x in its context (`FrameArgs`, `windowArgs`), as
+the stack form's call gives them; never inlined. A
 receiver to coerce at a register call -- a sloppy G given null -- has Go
 make the call from native code rather than leave. A call that meets any other function leaves
 native code for Go, which learns there what to call next -- a call in tail
@@ -2535,12 +2547,14 @@ is V8's call frequency where the feedback knows it (`Frequency`): a call
 made less often than `ssa.MinInliningFrequency` (0.05, V8's
 `min_inlining_frequency` as V8 runs: the flag's 0.15 is lowered to 0.05
 wherever Maglev is on, as it is by default) for each invocation of the
-function compiled is not inlined, and is made a native call, unless its
-callee is small: 10 instructions or fewer as the bounds count them
-(`maxInlineSmall`, V8's `max_inlined_bytecode_size_small` of 27 bytes; 8
-register instructions), which V8's Turbolev inlines however seldom the
-call is made, its code about the call's, and which then inlines no more
-than a small callee's worth with its own callees (`smallCallee`); the
+function compiled is not inlined, whatever its callee's size, and is made
+a native call -- by the builder (`inlineSiteAt`, `planCallback` for a
+loop's callback) and by the feedback before it offers the callee (the
+stack form's `jitCallCold`, register code's `regCallCold`), a call inside
+a callee inlined excepted -- as Turbofan's JSInliningHeuristic asks the
+frequency before it forces a small function in, Turbofan being the
+optimizing compiler Node runs (the exemption of a small callee at a cold
+call is Turbolev's, which Node does not run); the
 frequencies are known once the function has run 59 times
 (`jitCountsEnough`); the most frequent come
 first, a call whose frequency is not known taken as made once outside the

@@ -7286,9 +7286,10 @@ func TestJITCallsThroughParentsWithoutCode(t *testing.T) {
 	s := r.jitState()
 	span := jitGlobalClosureForTest(r, "Span")
 	var se *jitEntry
-	if jitPortReg(r, span) {
+	if regJITForTest() {
 		// The register form keeps its function's deferral in the state
-		// that outlives its compiles (jitRegForAs).
+		// that outlives its compiles (jitRegForAs), keyed by its register
+		// code, which Span has none of yet.
 		se = s.regLearnedOf(r.jitRegKeyOf(span))
 	} else {
 		se = r.jitFor(span)
@@ -7928,6 +7929,15 @@ func TestJITSSAProfitReturns(t *testing.T) {
 		t.Fatalf("step kept running natively: %+v", e)
 	}
 	heavy := r.global.getOwn(r.atoms.intern("heavy")).value().Object().fn().closure
+	if regJITForTest() && slices.Contains(jitInlinedNamesForTest(r, "drive"), "heavy") {
+		// Register code seeds drive's call of heavy from the binding
+		// (regCallTargets) and inlines it, loop and all: heavy runs in
+		// drive's code, which must not be the one given up.
+		if e := jitPortCode(r, jitGlobalClosureForTest(r, "drive")); e == nil || e.entrySlow {
+			t.Fatalf("drive, which inlines heavy, left native code: %+v", e)
+		}
+		return
+	}
 	if e := jitPortCode(r, heavy); e == nil || e.entrySlow {
 		t.Fatalf("heavy left native code: %+v", e)
 	}
@@ -8875,10 +8885,15 @@ func TestJITSSAEntersCalleesWithoutCode(t *testing.T) {
 			if got, want := gv.String().Go(), wv.String().Go(); got != want {
 				t.Fatalf("got %s, interpreter %s", got, want)
 			}
+			// Register code's call of more operands than a call of Go
+			// takes in the context is Go's all the same, its operands in
+			// the callee's window (mir's windowGoCall): made as the others
+			// are, no callee run from its start.
+			entersFromStart := tc.entered && !regJITForTest()
 			switch {
-			case tc.entered && r.jit.entered == entered:
+			case entersFromStart && r.jit.entered == entered:
 				t.Fatalf("no native call ran its callee from its start: %+v", r.JITStats())
-			case !tc.entered && (r.jit.goCalls == goCalls || r.jit.entered != entered):
+			case !entersFromStart && (r.jit.goCalls == goCalls || r.jit.entered != entered):
 				t.Fatalf("Go made %d of the calls, %d ran from their callees' start: %+v", r.jit.goCalls-goCalls, r.jit.entered-entered, r.JITStats())
 			}
 		})
