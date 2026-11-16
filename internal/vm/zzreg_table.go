@@ -2118,7 +2118,7 @@ func rsArguments(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) 
 }
 
 // rsNewArrayK is new_array_k: the tree's shared literal
-// (ztree_a0shared.go), the site keeping the array of the constants, and
+// (zvreg_a0shared.go), the site keeping the array of the constants, and
 // each array sharing its elements until one is written.
 func rsNewArrayK(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
 	r, c, cl := st.r, st.c, st.cl

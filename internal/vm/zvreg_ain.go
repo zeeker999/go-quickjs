@@ -2,22 +2,21 @@ package vm
 
 import "unsafe"
 
-// The in operator answered from what plain objects and arrays hold, by
-// every tier: the tree tier's node (inNode) and native code's call of Go
-// (jitHas) ask hasQuick first, and inOperator, as executeAt's case does,
-// only for what it does not answer -- a proxy's trap, a key to convert, a
-// typed array's index, a module namespace, an exotic object's own keys.
+// The in operator answered from what plain objects and arrays hold: the
+// register interpreter's handler (rhIn) asks hasIndexQuick and hasCached,
+// and native code's call of Go (jitHas) hasQuick, before the slow path,
+// which answers the rest -- a proxy's trap, a key to convert, a typed
+// array's index, a module namespace, an exotic object's own keys.
 //
 // The answers hasQuick finds for a key string that names no index are
 // remembered in the realm's hasCache, by the string, the object's layout
 // and its prototype, as V8's megamorphic stub cache remembers a load's: the
-// tree tier's node looks there first, and so does native code, before it
-// calls Go (mir's keyedHas).
+// interpreter's handler looks there first, and so does native code, before
+// it calls Go (mir's keyedHas).
 //
-// The code is closures assigned in this file's init, the first of the
-// package's inits with closures, whose closures are laid out after every
-// other closure (see ztree_zkself.go): code added here moves nothing the
-// tree tier or the interpreter runs.
+// Its functions are variables, each assigned a closure in init, laid
+// out after every other closure of the package, so that no hot code
+// moves for them (see AGENTS.md).
 
 // hasCache is a realm's cache of the in operator's answers for key
 // strings that name no index, made when one is first remembered. An entry

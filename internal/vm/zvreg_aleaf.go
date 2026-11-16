@@ -5,20 +5,19 @@ import "math"
 // Leaves: built-ins every tier calls without a frame, where they call
 // nothing and cannot throw (elemOp past elemRandom), as V8's optimized code
 // calls fast API functions with no frame of JavaScript's. A built-in
-// declares its own where it is made (setElemOp); the interpreter, the tree
-// tier and pure bodies apply it before they would make a frame (callDirect,
+// declares its own where it is made (setElemOp); the interpreter's calls
+// and pure bodies apply it before they would make a frame (callDirect,
 // callRest, pureInvoke, by pureElemOp and collectionOp, or a native leaf by
 // its check), and native code's calls of Go do too (jitGoCallPlain), none
-// of them keeping a list of
-// functions. Each is applied as the built-in applies it, and reports false
+// of them keeping a list of functions. Each is applied as the built-in applies it, and reports false
 // wherever the built-in would throw or do anything else -- a receiver of
 // another kind, a key a weak collection takes none of, an object String
 // would convert by its methods -- which the built-in, called the ordinary
 // way, is left to do.
 //
-// The code is closures assigned in this file's init, whose closures are
-// laid out after every other closure of the package's (see
-// ztree_zkself.go): this file's init comes first.
+// Its functions are variables, each assigned a closure in init, laid
+// out after every other closure of the package, so that no hot code
+// moves for them (see AGENTS.md).
 
 // leafFunc applies a leaf to this and args, and reports whether it did; a
 // store -- an addition or a deletion -- only where mayStore, from a pure

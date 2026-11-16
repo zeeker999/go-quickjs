@@ -2,33 +2,16 @@ package vm
 
 import "github.com/go-quickjs/go-quickjs/internal/bytecode"
 
-// Using declarations in the tree tier.
+// Using declarations: the steps of an await using scope's disposal
+// (usingStep).
 //
-// The compiler makes a scope with using declarations a try statement whose
-// finally clause disposes of what the scope bound (internal/compiler's
-// using.go), which the tree tier already builds; what is left is the three
-// instructions of the resources themselves. Each node does what executeAt's
-// case does: a new capability, a value added to it, and the disposal, with
-// the exception in flight that a finally clause's record says is leaving
-// folded into what it throws. An await using scope's disposal is a loop of
-// steps with the compiler's awaits between them, a step that may end the
-// loop ending its block.
-//
-// Its functions are variables, each assigned a closure in init, rather
-// than functions or methods: Go lays out all of a package's functions
-// before any of its closures, so code added here as functions would sit
-// between the interpreter's hot functions and the tree nodes' hot
-// closures, and move one against the other, where a closure is laid out
-// after every closure already there (see AGENTS.md). The zz sorts it after
-// the tier's other files, so that its closures follow theirs.
+// Its functions are variables, each assigned a closure in init, laid
+// out after every other closure of the package, so that no hot code
+// moves for them (see AGENTS.md).
 
 var (
-	// treeBuildsUsing reports whether the tier builds op, one of a using
-	// declaration's, or one treeBuildsImport names.
-	treeBuildsUsing func(op bytecode.Op) bool
-
-	// usingStep is a step of an await using scope's disposal, for both
-	// tiers, as the specification's DisposeResources walks it, the awaits
+	// usingStep is a step of an await using scope's disposal, as the
+	// specification's DisposeResources walks it, the awaits
 	// it makes being the compiler's between the steps. cp is the scope's
 	// capability. The first step, with DisposeStart in mode, takes the
 	// resources, and, with DisposeRecord, the completion the finally

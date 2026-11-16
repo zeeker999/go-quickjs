@@ -4,32 +4,15 @@ import (
 	"math"
 )
 
-// Constructions on the tree tier's path. A construction ran its
-// constructor on the tree planTreeCall gave it, callTreeWith's, only where
-// a call could run it too, so that a class's constructor, which a call
-// refuses (DirectCall), was run by runFD at every new -- its frame set up
-// for anything, a with's scopes and an eval's bindings asked after -- and
-// a pure body's, whose plan waits for pureCall to give up on calls that a
-// construction never makes, was never planned at all. A derived class's
-// was worse off: runFD gave its frame a this binding of the heap, its
-// super() reached the parent through callObject and runFD again, and
-// copied its arguments for it, three allocations and two frames set up for
-// anything for each new of a subclass -- each of Are We Fast Yet's
-// DeltaBlue constraints and Json values, and a class hierarchy's every
-// object in real code.
+// Constructions: constructWithTarget's of a compiled constructor
+// (constructRun) and of a built-in whose construction is a native leaf,
+// applied without a frame (constructNativeAt); super()'s of its parent
+// (superConstruct), after the parent's instance initializer (superInit);
+// and the realm's Array constructor's leaf (setArrayCtor).
 //
-// planTreeNew decides once what a construction may run on, as planTreeCall
-// decides for calls, and constructTree makes the constructions it allows:
-// a base class's on callTreeWith; a derived class's on a frame of its own
-// making, whose this binding is the runtime's cell for the frame's depth
-// (thisCells) where the body makes no closure and no direct eval, the two
-// things that can keep a binding past its frame. super() calls the parent
-// the same way. What each construction then does is what runFD would have
-// done for it, in the same order.
-//
-// The code is closures assigned in this file's init, the package's first
-// init with closures, which are laid out after every other closure (see
-// ztree_aaeq.go): the tree tier's own closures do not move.
+// Its functions are variables, each assigned a closure in init, laid
+// out after every other closure of the package, so that no hot code
+// moves for them (see AGENTS.md).
 
 var (
 	// constructRun is constructWithTarget's construction of a compiled

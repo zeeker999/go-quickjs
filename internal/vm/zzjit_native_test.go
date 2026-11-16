@@ -9373,7 +9373,7 @@ func TestJITSSAConcatCallsGo(t *testing.T) {
 // codePointAt has it, and framedRepeat(s, n), s repeated n times, host
 // functions: calls of Go that native code makes with their frames, as no
 // built-in is sure to stay -- a built-in that runs no script is a leaf,
-// called without one (ztree_aleaf.go).
+// called without one (zvreg_aleaf.go).
 func jitFramedCallForTest(rt *Runtime) {
 	rt.global.setOwnRaw(rt.atoms.intern("framedRepeat"), rt.NewFunction("framedRepeat", 2,
 		func(rt *Runtime, _ Value, args []Value) (Value, error) {

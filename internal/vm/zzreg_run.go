@@ -105,9 +105,9 @@ type regCode struct {
 	// or nil where the code has none.
 	aux unsafe.Pointer
 	// bigSeen is the operators that met BigInts, by register pc, as the
-	// tree's (treeBigSeen), which the slow paths mark where the runtime
+	// code's (bigSeenMarks), which the slow paths mark where the runtime
 	// runs the JIT (regBigOf); nil until one has.
-	bigSeen atomic.Pointer[treeBigSeen]
+	bigSeen atomic.Pointer[bigSeenMarks]
 }
 
 // runReg runs frame f as register code c, from instruction start, and

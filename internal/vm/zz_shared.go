@@ -10,9 +10,6 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/jsnum"
 )
 
-// treeThrow carries an exception out of a tree, to runTree.
-type treeThrow struct{ err error }
-
 func truthy(v Value) bool {
 	return math.Float64bits(v.num) == trueBits || math.Float64bits(v.num) != falseBits && v.Truthy()
 }

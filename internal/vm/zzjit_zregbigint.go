@@ -39,12 +39,12 @@ func init() {
 			neg, mag := v.shortBigParts()
 			return !neg || mag == 0
 		}
-		kind := func(s *treeBigSeen) []atomic.Uint32 { return s.heap }
+		kind := func(s *bigSeenMarks) []atomic.Uint32 { return s.heap }
 		switch {
 		case a.isInt64Big() && b.isInt64Big() && v.isInt64Big():
-			kind = func(s *treeBigSeen) []atomic.Uint32 { return s.bigs }
+			kind = func(s *bigSeenMarks) []atomic.Uint32 { return s.bigs }
 		case unsigned(a) && unsigned(b) && unsigned(v):
-			kind = func(s *treeBigSeen) []atomic.Uint32 { return s.wide }
+			kind = func(s *bigSeenMarks) []atomic.Uint32 { return s.wide }
 		}
 		regBigMark(c, pc, kind)
 	}
@@ -53,14 +53,14 @@ func init() {
 // regBigMark marks register pc of c in the marks kind picks of its
 // bigSeen, made if it has none: register code may be shared by runtimes,
 // as a tree is, which mark it alike.
-func regBigMark(c *regCode, pc int, kind func(*treeBigSeen) []atomic.Uint32) {
+func regBigMark(c *regCode, pc int, kind func(*bigSeenMarks) []atomic.Uint32) {
 	if pc < 0 || pc >= len(c.rc.Code) {
 		return
 	}
 	s := c.bigSeen.Load()
 	if s == nil {
 		n := (len(c.rc.Code) + 31) / 32
-		s = &treeBigSeen{bigs: make([]atomic.Uint32, n), wide: make([]atomic.Uint32, n), heap: make([]atomic.Uint32, n), recvs: make([]atomic.Uint32, n)}
+		s = &bigSeenMarks{bigs: make([]atomic.Uint32, n), wide: make([]atomic.Uint32, n), heap: make([]atomic.Uint32, n), recvs: make([]atomic.Uint32, n)}
 		if !c.bigSeen.CompareAndSwap(nil, s) {
 			s = c.bigSeen.Load()
 		}

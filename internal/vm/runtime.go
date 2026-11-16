@@ -627,7 +627,7 @@ type Realm struct {
 	// deep is the cache of the additions made at the sites that have given
 	// up their own (deepStore), made when one first is.
 	deep *deepAdds
-	// has is the cache of the in operator's answers (see ztree_ain.go),
+	// has is the cache of the in operator's answers (see zvreg_ain.go),
 	// made when one is first remembered.
 	has *hasCache
 	// finalizing are the FinalizationRegistry objects with this realm's

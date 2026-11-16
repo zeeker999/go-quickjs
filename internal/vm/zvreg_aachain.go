@@ -24,9 +24,9 @@ package vm
 // (pureCallAt, leafStores), which ask only adds, leave such an addition to
 // the ordinary write.
 //
-// The code is closures assigned in this file's init, the package's first
-// init with closures, which are laid out after every other closure (see
-// ztree_aaeq.go).
+// Its functions are variables, each assigned a closure in init, laid
+// out after every other closure of the package, so that no hot code
+// moves for them (see AGENTS.md).
 
 var (
 	// fillStoreAt is fillStoreCache, which setPropCached calls it in place

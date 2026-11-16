@@ -31,7 +31,7 @@ func NativeLayout() (offsets, sizes map[string]uintptr, consts map[string]uint64
 		reflect.TypeFor[Runtime](),
 		reflect.TypeFor[regState](),
 		reflect.TypeFor[regCode](),
-		reflect.TypeFor[treeBigSeen](),
+		reflect.TypeFor[bigSeenMarks](),
 		reflect.TypeFor[regCallCache](),
 		reflect.TypeFor[frame](),
 		reflect.TypeFor[closure](),

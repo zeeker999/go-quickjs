@@ -10,7 +10,7 @@ import (
 //
 // An array literal whose elements are all constants -- numbers, strings,
 // true, false, null, undefined -- is compiled with a cache site (bytecode's
-// OpNewArray, B). The tree tier makes each array of such a literal as an
+// OpNewArray, B). The interpreter makes each array of such a literal as an
 // array of no storage of its own, over the constants that every array of
 // the site shares, marked objSharedElems: V8's copy-on-write elements of a
 // literal's boilerplate. An array a program builds and only reads -- a
@@ -35,16 +35,14 @@ import (
 // elements as they were made, never a slice of them, so the word is always
 // there.
 //
-// The interpreter makes these literals as it did, every array its own: its
-// case of OpNewArray is unchanged. Native code takes such a literal's
-// arrays from a pool Go fills with them (sharedLiteralArray, ssa's
-// LiteralSite.Shared), where the tree tier has made the site's storage
-// before the code was compiled; it writes none of their elements. Every
-// tier tests the flag where it writes.
+// Native code takes such a literal's arrays from a pool Go fills with them
+// (sharedLiteralArray, ssa's LiteralSite.Shared), where the interpreter has
+// made the site's storage before the code was compiled; it writes none of
+// their elements.
 //
-// The code is closures assigned in this file's init, whose closures are laid
-// out after every other closure in the package (see ztree_zkself.go), so
-// that no hot code moves for it.
+// Its functions are variables, each assigned a closure in init, laid
+// out after every other closure of the package, so that no hot code
+// moves for them (see AGENTS.md).
 
 // sharedGiveUp is how many copies of a site's arrays the site makes before
 // it stops sharing their elements.
