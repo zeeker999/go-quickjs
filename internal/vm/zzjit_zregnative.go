@@ -1624,6 +1624,13 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 				mcallee, mrecv, mcb = r.stack[wb+int(w.A())], r.stack[wb+int(w.A())+1], r.stack[wb+int(w.A())+2]
 			}
 			next, ran, err = r.regWhole(f, c, wb, exitPC)
+			if err != nil && mcallee.IsObject() && !e.invalid {
+				// A loop's built-in's call whose callback threw: learned
+				// all the same, as the stack form's learns it before the
+				// call (jitCallSeen's jitForEaches) -- a loop whose
+				// callback throws at every call was never made.
+				r.jitRegForEachSeen(f, e, exitPC, mcallee, mrecv, mcb, int(w.X()))
+			}
 			if seen.write && err == nil && ran {
 				r.jitRegWriteSeen(f, c, e, exitPC, seen)
 			}
@@ -2601,6 +2608,12 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 			// (jitRegGenCallSeen).
 			r.jitRegGenCallSeen(f, run.e, rpc, this, callee, argc)
 		}
+	}
+	if err != nil && r.stopped == nil && op == bytecode.RCallMW && !run.e.invalid && jitRegCallUnsettled(run.e, rpc, op) {
+		// A loop's built-in's call whose callback threw, learned all the
+		// same, as the stack form's learns it before the call
+		// (jitCallSeen's jitForEaches).
+		r.jitRegForEachSeen(f, run.e, rpc, callee, this, first, argc)
 	}
 	if err != nil || r.stopped != nil || run.e.invalid || run.leave || r.jitRegCompileDueNow(&run, idx) {
 		s.regPending = jitGoPending{set: true, pc: rpc, ctx: idx, v: v, err: err}

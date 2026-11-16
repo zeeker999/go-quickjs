@@ -202,26 +202,47 @@ func (r *Runtime) jitRegCodeIn(ctx *abi.Context, idx int) bool {
 // frame (jitPlainWrite): the code's closure -- the run's, or a native
 // callee's -- and the write as the stack form's instruction names it, its
 // site's name and its cache, of the register instruction at its register
-// pc; a nil closure where it is none, or is an inlined callee's.
+// pc, an inlined callee's its own; a nil closure where it is none.
 func (r *Runtime) jitRegPlainSet(ctx *abi.Context, idx int) (*closure, bytecode.Instr, bool) {
 	if !r.jitRegCodeIn(ctx, idx) {
 		return nil, bytecode.Instr{}, false
 	}
-	if st := jitGoCallState(ctx); st != nil && st.Inline != 0 {
-		return nil, bytecode.Instr{}, true
-	}
 	var cl *closure
 	var c *regCode
+	var owner *jitRegEntry
 	if ctx.Live == 0 {
 		run := r.jit.regRuns[idx]
-		cl, c = run.f.cl, run.c
+		cl, c, owner = run.f.cl, run.c, run.e
 	} else {
 		cl = (*closure)(ctx.Closure)
 		if cl != nil {
 			c = cl.reg
+			if cc := cl.closureCode; cc != nil {
+				owner = cc.jitReg
+			}
 		}
 	}
 	rpc := int(ctx.ExitPC)
+	if st := jitGoCallState(ctx); st != nil && st.Inline != 0 {
+		// An inlined callee's write: its own closure's site and name, at
+		// its register pc (InlinePC), the closure among those the code
+		// inlines, as the stack form's (jitGoInlined) -- refused, the
+		// write left native code, and a callee inlined in a loop whose
+		// site went megamorphic finished in the interpreter at every
+		// call until it was inlined no more.
+		var in *closure
+		if owner != nil && owner.keep != nil {
+			for _, x := range owner.keep.inlined {
+				if uintptr(unsafe.Pointer(x)) == st.Inline {
+					in = x
+				}
+			}
+		}
+		if in == nil || in.reg == nil {
+			return nil, bytecode.Instr{}, true
+		}
+		cl, c, rpc = in, in.reg, int(st.InlinePC)
+	}
 	if cl == nil || c == nil || rpc >= len(c.rc.Code) {
 		return nil, bytecode.Instr{}, true
 	}
