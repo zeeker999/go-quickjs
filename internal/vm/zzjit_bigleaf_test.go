@@ -269,6 +269,10 @@ func TestJITBigLeaf(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
+	// The JIT's clocks held for the run (JITHoldClocks): in a slow run -- a
+	// checkptr build on a loaded Windows runner -- the time-based flush had
+	// let squares' code go before the test looked at it.
+	t.Cleanup(JITHoldClocks())
 	var stop atomic.Bool
 	done := make(chan struct{})
 	go func() {

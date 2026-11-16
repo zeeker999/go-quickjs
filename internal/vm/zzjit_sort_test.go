@@ -123,11 +123,15 @@ const sortSetup = `
 // and writes back after (jitSortCopy). Each answer is the interpreter's
 // and, but for a comparator that is not consistent, whose order is the
 // engine's, Node's; and the sorts of numbers neither leave their code nor
-// have Go finish or restart them.
+// have Go finish or restart them. The JIT's clocks are held for the run
+// (JITHoldClocks): in a slow run -- a checkptr build on a loaded Windows
+// runner -- the time-based flush had let the sorts' code go before the test
+// looked at it.
 func TestJITSortNative(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
+	t.Cleanup(JITHoldClocks())
 	var built *jitBuiltForTest
 	// Whether register code makes loops of built-ins' calls, which its
 	// compiles' SSA says (ssa.Func's Loops).
