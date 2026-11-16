@@ -122,12 +122,15 @@ func callbackDrivers() string {
 // answer is the interpreter's, whatever leaves native code inside it --
 // at every point, the loop's turns before it done natively and those
 // after it by Go, the callback's frame made by Go, and the closure the
-// caller's code did not make made in its place.
+// caller's code did not make made in its place. The JIT's clocks are held
+// for the run (JITHoldClocks): under qemu the time-based flush had let the
+// callers' code go before the test looked at it. Held clocks are the
+// process's, so the test is not parallel.
 func TestJITCallbackInlined(t *testing.T) {
-	t.Parallel()
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
+	t.Cleanup(JITHoldClocks())
 	rounds := []string{}
 	for i := range 8 {
 		late := []string{"99", "3"}[i/6]
