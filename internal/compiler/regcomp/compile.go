@@ -3485,12 +3485,17 @@ func (g *gen) addIndex(m *ast.Member, value ast.Expr, imm int32, pos int) bool {
 	return true
 }
 
-// readStore emits w, which reads m and stores to it: placed at m's key,
-// where the stack form reads it, with the store's position, the
-// statement's, kept for its stack instruction (Aux), where an error of the
-// store is placed.
+// readStore emits w, which reads m and stores to it: placed where V8
+// places the read -- at m's key, or at m itself where the key is a
+// literal (add_index_k), which V8 gives no position of its own -- with the
+// store's position, the statement's, kept past the code (Aux), where an
+// error of the store is placed.
 func (g *gen) readStore(m *ast.Member, pos int, w bytecode.RInstr) {
-	g.at(m.Property.Pos())
+	if w.Op() == bytecode.RAddIndexK {
+		g.at(m.Pos())
+	} else {
+		g.at(m.Property.Pos())
+	}
 	at := g.emit(w)
 	if g.stores == nil {
 		g.stores = emptyMap(&g.s.stores)

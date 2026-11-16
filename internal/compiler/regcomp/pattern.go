@@ -216,7 +216,12 @@ func (g *gen) arrayPattern(pat *ast.ArrayPattern, v int, declaring bool) {
 // converted, before its leaf's reference, and a rest object made of the
 // properties the pattern did not name.
 func (g *gen) objectPattern(pat *ast.ObjectPattern, v int, declaring bool) {
+	// The check is placed where V8 places it: at the first property's key,
+	// or at the pattern where it has none.
 	g.at(pat.Start)
+	if len(pat.Props) > 0 && pat.Props[0].Key != nil {
+		g.at(pat.Props[0].Key.Pos())
+	}
 	g.emit(bytecode.MakeR(bytecode.RCheckCoercible, 0, r16(v), 0, 0))
 	keys := -1
 	if pat.Rest != nil {
