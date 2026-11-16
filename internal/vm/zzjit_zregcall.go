@@ -1732,7 +1732,7 @@ func (r *Runtime) jitRegGoCallNested(ctx *abi.Context, idx, root int) bool {
 	r.jitRegLoopCalleeOf(idx-1, caller, at, nil, 0)
 	f := r.jitRegPushLevel(&l, 0)
 	if lazy != 0 {
-		s.lazy = append(s.lazy, jitLazyLevels{root: root, idx: idx, depth: depthBefore, runF: run.f, reg: true, realm: r.Realm})
+		s.lazy = append(s.lazy, jitLazyLevels{root: root, idx: idx, depth: depthBefore, realm: r.Realm})
 		s.lazyTop = depthBefore + lazy
 		s.lazyCalls++
 		s.regLazyLevelsPut += uint64(lazy)
@@ -1930,7 +1930,7 @@ func (s *jitState) regLevelsOf(e *jitRegEntry) int {
 		return n
 	}
 	for j := range s.lazy {
-		if lz := &s.lazy[j]; lz.reg && !lz.made {
+		if lz := &s.lazy[j]; !lz.made {
 			n += s.regLevelsIn(e, lz.root, lz.idx)
 		}
 	}

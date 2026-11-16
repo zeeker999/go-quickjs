@@ -293,39 +293,6 @@ func (fb *jitFeedback) dataSeen(pc int, c *propCache) bool {
 	return false
 }
 
-// jitLevelCallee is the function object a level native code made a frame
-// for at the call at pc of caller's code is running, where it is known: an
-// accessor's, a read's or a write's, whose getter or setter the receiver,
-// this, has, as a stack trace names it (methodName). Or nil.
-func (r *Runtime) jitLevelCallee(caller *bytecode.Function, pc int, this Value) *Object {
-	if caller == nil || pc < 0 || pc >= len(caller.Code) || !this.IsObject() {
-		return nil
-	}
-	in := caller.Code[pc]
-	if in.Op != bytecode.OpGetProp && in.Op != bytecode.OpSetProp || int(in.A) >= len(caller.Names) {
-		return nil
-	}
-	key := r.atoms.intern(caller.Names[in.A])
-	for o := this.Object(); o != nil; o = o.proto() {
-		i := o.findOwn(key)
-		if i < 0 {
-			continue
-		}
-		if int(i) >= int(o.valn) {
-			return nil
-		}
-		pair := o.vals()[i].accessorPair()
-		switch {
-		case pair == nil:
-			return nil
-		case in.Op == bytecode.OpSetProp:
-			return pair.setter
-		}
-		return pair.getter
-	}
-	return nil
-}
-
 // jitB2i is 1 for true, 0 for false.
 func jitB2i(b bool) int {
 	if b {
