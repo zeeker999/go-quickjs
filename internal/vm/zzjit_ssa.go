@@ -22,7 +22,6 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	jitcompile "github.com/go-quickjs/go-quickjs/internal/jit/compile"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
-	"github.com/go-quickjs/go-quickjs/internal/jit/mir"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 	"golang.org/x/sys/cpu"
 )
@@ -1376,35 +1375,6 @@ func jitFeedbackMark(cl *closure) uint64 {
 		}
 	}
 	return m
-}
-
-// jitJob is a compile in its three steps, as V8's concurrent compiles
-// are: prepared on the runtime's goroutine (jitPrepare), which builds the
-// function from what the runtime knows; worked (work), the optimization
-// and the backend, which read and write the job and nothing of the
-// runtime's; installed on the runtime's goroutine again (jitRegInstall),
-// which takes what the work found into the feedback and places the code.
-type jitJob struct {
-	cl *closure
-	// realm is the realm the compile is for, the current one where it was
-	// handed over, which its install runs in (jitDrain).
-	realm *Realm
-	// w is the compile's workspace, the process's, given back once its
-	// code is placed (nil then), and f the function built in it.
-	w    *jit.Workspace
-	f    *ssa.Func
-	opts mir.Options
-	err  error
-	// What a compile in the background (jitRegSubmit) needs besides: its
-	// state, which the worker and the runtime's goroutine hand it over by,
-	// and done, closed once the worker is finished with it; how many
-	// checks it has waited (jitDrain); what installs it on the runtime's
-	// goroutine, reporting false to be asked again at a later check
-	// (jitCompiled, jitReoptimized); and, for a compile again, the
-	// entry's deoptimizations when it was built and whether it has
-	// decided calls (jitRegReoptimize's learned).
-	state atomic.Int32
-	done  chan struct{}
 }
 
 // JITCompileRepeat, if not 0, has every compile of the SSA backend that
@@ -5184,32 +5154,6 @@ func jitShrinkTo[T any](s []T, n int, move bool) []T {
 		return s
 	}
 	return append(make([]T, 0, n), s...)
-}
-
-// jitNativeLevel is a frame a native call made whose callee left native
-// code, or an inlined callee's an exit inside it wrote (abi.Context.Live):
-// what Go makes the VM's frame from, and finishes it with. An inlined
-// callee's has its program's locals and its receiver's slot plus one
-// (abi.Context's Inline fields), and top, the stack's top before it.
-type jitNativeLevel struct {
-	cl              *closure
-	base            int
-	this            Value
-	kind, pc, depth uint64
-	locals, top     int
-	// args, for an inlined callee's that keeps its call's arguments
-	// (abi.Context's InlineArgs), says where they are; 0 for none.
-	args      uint64
-	newTarget Value
-	// callee, for an inlined callee's, is its function object
-	// (abi.Context's InlineCallee), the frame's, as a stack trace names it
-	// by; nil for a native call's.
-	callee *Object
-	code   *jit.SSACode
-	// gen, for a generator a loop's step resumed natively (jitGenLevel),
-	// is the generator, and cursor the step's cursor; fill marks a
-	// destructuring's step, whose done is undefined (jitRegGenDone).
-	gen *generator
 }
 
 // jitDerivedResult is a derived construction's result, from what its

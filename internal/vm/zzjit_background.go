@@ -34,7 +34,7 @@ import (
 // invocation.
 const jitJobsMax = 4
 
-// A jitJob's state, which hands it between its worker and the runtime's
+// A background compile's state (jitRegJob), which hands it between its worker and the runtime's
 // goroutine: queued for a worker, being worked, done, or abandoned by its
 // runtime, whose worker then gives its workspace back (jitRegJob.run).
 const (

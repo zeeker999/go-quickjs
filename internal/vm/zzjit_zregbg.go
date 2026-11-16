@@ -173,8 +173,8 @@ func (r *Runtime) jitRegSubmit(j *jitRegJob) {
 	}
 }
 
-// run is j's work on a worker, as jitJob's: the build from the snapshot,
-// the optimization and the backend, a panic of any a refusal.
+// run is j's work on a worker: the build from the snapshot, the
+// optimization and the backend, a panic of any a refusal.
 func (j *jitRegJob) run() {
 	defer close(j.done)
 	if !j.state.CompareAndSwap(jitJobQueued, jitJobWorking) {
