@@ -158,3 +158,18 @@ func TestJITRegForwardReceiverInStack(t *testing.T) {
 		{"st", []float64{10}, 8, "0123456s7String.tS,fs89"},
 	})
 }
+
+// A native callee that left inside a callee its code inlined has its
+// frame, which Go makes at the exit, past the call, as the run's own frame
+// is then: it had been at the instruction before the call, and a stack
+// trace through it named the line before the call's ("Object.walk
+// (test:20:5)" for "(test:21:12)", TestJITInlinesCapturedBindings).
+func TestJITRegInlinedExitCallerPosition(t *testing.T) {
+	regWrongCheck(t, inlineUpvaluesSetup+`
+	function wl(k, v) { mod.reset(); n2.v = v; let s = ''; for (let j = 0; j < 2; j++) { try { s += mod.walk(n1, k) + '|' + mod.walk(n2, k) } catch (e) { s += e.stack } } return s }`,
+		[]regWrongCase{
+			{"wl", []float64{50, 7}, 3, "4225:150:5|11775:300:719225:450:5|26775:600:7"},
+			{"wl", []float64{10, 500}, 0, "RangeError: past 3 at 33\n    at Node.check (test:10:46)\n    at Object.walk (test:21:12)\n    at wl (test:49:126)" +
+				"RangeError: past 3 at 66\n    at Node.check (test:10:46)\n    at Object.walk (test:21:12)\n    at wl (test:49:126)"},
+		})
+}

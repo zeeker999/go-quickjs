@@ -2141,9 +2141,13 @@ func (r *Runtime) jitRegUnwind(idx int) (_ Value, _ error, gen bool) {
 	for k := range levels {
 		l := &levels[k]
 		pc := regSrc(l.c, l.pc)
-		if k < n-1 {
+		if k < n-1 || l.ctx+1 < len(s.ssaCtxs) && s.ssaCtxs[l.ctx+1].Live == abi.LiveInline {
 			// Past the call it makes, as the interpreter's frame is during
-			// one, which a stack trace shows.
+			// one, which a stack trace shows: a native callee's, or the
+			// innermost's where it left inside a callee its code inlined
+			// at the call (jitRegInlined), as the run's own frame is
+			// then -- the innermost's frame had been at the instruction
+			// before the call, a trace through it naming the line before.
 			pc++
 		}
 		frames[k] = r.jitRegPushLevel(l, pc)
