@@ -7,16 +7,12 @@ import "testing"
 // TestJITArraySearches makes arraySearchSetup's searches, each a few
 // times, in a runtime that compiles at the first call: native code's calls
 // of the searches (ssa.GoIndexOf) and of Go with frames answer as the
-// interpreter does, and as Node does. The JIT's clocks are held for the
-// run (JITHoldClocks): a slow run -- Go 1.24's checkptr build on a loaded
-// Windows runner -- had the time-based flush drop searchAll's state before
-// the test looked. Held clocks are the process's, so the test is not
-// parallel.
+// interpreter does, and as Node does.
 func TestJITArraySearches(t *testing.T) {
+	t.Parallel()
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
-	t.Cleanup(JITHoldClocks())
 	var rounds []string
 	for range 4 {
 		for _, c := range arraySearchCases {

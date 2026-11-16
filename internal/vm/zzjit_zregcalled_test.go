@@ -134,16 +134,11 @@ func TestJITRegCalledClosuresPolled(t *testing.T) {
 // code only calls, or only gives to a callee or a built-in's loop calling
 // them, are inlined and not made (jitRegFeedback's CalledClosure, ForEach's
 // Made), an arrow's this its maker's; Go makes them where an exit inside
-// one leaves. The JIT's clocks are held for the run (JITHoldClocks): in a
-// slow run -- Go 1.24's checkptr build on a Windows runner -- the
-// time-based flush had let the callers' code and what they learned go
-// before the test compiled them again for arm64, which then inlined
-// nothing. The test is not parallel.
+// one leaves.
 func TestJITRegCalledClosures(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
-	t.Cleanup(JITHoldClocks())
 	for _, setup := range []struct {
 		name, src string
 		unmade    []string

@@ -1473,6 +1473,11 @@ func (s *jitState) flushNow() uint64 {
 	if jitFlushNow != nil {
 		return jitFlushNow()
 	}
+	if jitClocksForTest != nil {
+		if t, ok := jitClocksForTest(s); ok {
+			return t
+		}
+	}
 	return uint64(s.running() / jitEpochTime)
 }
 
@@ -1617,13 +1622,24 @@ func (s *jitState) epoch() uint64 {
 	if jitEpochNow != nil {
 		return jitEpochNow()
 	}
+	if jitClocksForTest != nil {
+		if t, ok := jitClocksForTest(s); ok {
+			return t
+		}
+	}
 	g, k := jitGCEpoch.Load(), jitRepeatCycles.Load()
 	return g - min(k, g) + uint64(s.running()/jitEpochTime)
 }
 
 // jitEpochNow and jitFlushNow, where a test sets them, stand in for the
-// cache's clocks (epoch, flushNow).
-var jitEpochNow, jitFlushNow func() uint64
+// cache's clocks (epoch, flushNow) of every runtime; jitClocksForTest,
+// set by the package's tests, for one runtime's where it says so -- every
+// test runtime's held but those a test lets run (zzjit_clocks_test.go).
+// Nil outside tests.
+var (
+	jitEpochNow, jitFlushNow func() uint64
+	jitClocksForTest         func(s *jitState) (uint64, bool)
+)
 
 // running is the program's time, which the cache's clocks run on: the
 // time since the runtime's JIT state was made, less what its compiles

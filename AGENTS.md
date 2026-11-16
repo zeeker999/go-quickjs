@@ -345,8 +345,12 @@ kinds:
   beside other heavy tests.
 - Tests that look at the JIT's cache after a run. The time-based flush lets
   code go after about a second of program time without use, which a slow
-  build (checkptr, qemu) reaches. Such a test holds the clocks
-  (`t.Cleanup(JITHoldClocks())`) and is not parallel.
+  build (checkptr, qemu) reaches. The vm tests therefore hold every
+  runtime's JIT clocks by default, per runtime, so that parallel tests keep
+  theirs (`zzjit_clocks_test.go`). A test about aging or flushing sets the
+  clocks itself (`jitEpochNow`, `jitFlushNow`) or lets its runtime's run
+  (`jitRunClocksForTest`), and says why. `QUICKJS_TEST_FAST_CLOCKS=1` runs
+  the clocks it lets run fast.
 - Tests that set a process-wide switch (`jitSSAOptimized`, `mir.Timing`,
   `JITCompileRepeat`, `regNativeOn`, the clocks). They change what every
   other runtime in the process does, so a parallel one makes other tests

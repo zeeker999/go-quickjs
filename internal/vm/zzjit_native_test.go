@@ -2388,9 +2388,11 @@ func TestJITNoHeapWalks(t *testing.T) {
 
 // The cache's epochs follow the collector's cycles (jitGCEpoch), as V8 ages
 // code by them, once a runtime has run the JIT, and pass every
-// jitEpochTime besides, for a program that allocates little.
+// jitEpochTime besides, for a program that allocates little. The clocks
+// are what it is about: its runtime's run (jitRunClocksForTest).
 func TestJITEpochFollowsCollector(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
+	jitRunClocksForTest(t, r)
 	if _, err := r.Run(compileForTest(t, `function f(n){let s=0;for(let i=0;i<n;i++)s+=i;return s}f(100)`)); err != nil {
 		t.Fatal(err)
 	}
