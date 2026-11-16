@@ -87,12 +87,8 @@ func siteIs(fn *bytecode.Function, rc *bytecode.RegCode, s uint16, name string) 
 	return int(s) < len(rc.SiteName) && int(rc.SiteName[s]) < len(names) && names[rc.SiteName[s]] == name
 }
 
-// The most registers and instructions a pure body has: its registers are
-// the evaluator's, a window of the runtime's stack.
-const (
-	PureRegs = 32
-	pureCode = 64
-)
+// pureCode is the most instructions a pure body has.
+const pureCode = 64
 
 // pureBody marks rc's code LeafPure where it is a body the VM's frameless
 // evaluator takes (pureCallAt): no binding but its parameters, which it
@@ -105,7 +101,7 @@ func pureBody(fn *bytecode.Function, rc *bytecode.RegCode) {
 	code := rc.Code
 	// Nor one that reads its function object (register 0), which the
 	// evaluation has not got.
-	if fn.LocalCount != fn.ParamCount || rc.Inits != 0 || rc.NumRegs > PureRegs || len(code) > pureCode || rc.Marks != nil || fn.FrameCallee {
+	if fn.LocalCount != fn.ParamCount || rc.Inits != 0 || rc.NumRegs > bytecode.PureRegs || len(code) > pureCode || rc.Marks != nil || fn.FrameCallee {
 		return
 	}
 	writes := func(r uint16) bool { return int(r) >= regParams+fn.ParamCount }

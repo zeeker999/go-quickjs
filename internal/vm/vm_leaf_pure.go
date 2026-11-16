@@ -1,9 +1,6 @@
 package vm
 
-import (
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
-	"github.com/go-quickjs/go-quickjs/internal/compiler/regcomp"
-)
+import "github.com/go-quickjs/go-quickjs/internal/bytecode"
 
 // pureMissLimit is how many calls of a closure may find its body's fast
 // paths closed before pureCall stops trying them: a body whose property is
@@ -60,7 +57,7 @@ const pureCallDepth = 32
 
 // pureCallAt is pureCall of a body depth calls in, which may store only
 // where mayStore says that nothing that called it can give up afterwards.
-// It evaluates the body's register code (regcomp's pureBody), its
+// It evaluates the body's register code (the register compiler's pureBody), its
 // registers a window of the runtime's stack above every frame's, each
 // depth of pure calls above the one that called it: register 1 the this,
 // the parameters' from 2, the arguments read where the caller has them.
@@ -82,14 +79,14 @@ func (r *Runtime) pureCallAt(fd *funcData, this Value, args []Value, depth int, 
 		return Undefined, false
 	}
 	rc := c.rc
-	base := r.stackTop + depth*regcomp.PureRegs
-	if base+regcomp.PureRegs > len(r.stack) {
+	base := r.stackTop + depth*bytecode.PureRegs
+	if base+bytecode.PureRegs > len(r.stack) {
 		return Undefined, false
 	}
-	if base+regcomp.PureRegs > r.stackHigh {
-		r.stackHigh = base + regcomp.PureRegs
+	if base+bytecode.PureRegs > r.stackHigh {
+		r.stackHigh = base + bytecode.PureRegs
 	}
-	regs := r.stack[base : base+regcomp.PureRegs : base+regcomp.PureRegs]
+	regs := r.stack[base : base+bytecode.PureRegs : base+bytecode.PureRegs]
 	regs[1] = this
 	for i := range cl.fn.ParamCount {
 		regs[2+i] = arg(args, i)

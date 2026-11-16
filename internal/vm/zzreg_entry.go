@@ -142,7 +142,7 @@ func regBuild(fn *bytecode.Function, rc *bytecode.RegCode) *regCode {
 		}
 	}
 	if rc.LocalReg != nil {
-		c.reuse = regReuseSites(fn, rc)
+		c.reuse = regReuseSites(rc)
 	}
 	if c.suspends && rc.LocalReg == nil && !regCapsFrame(rc) && !regGenNative(fn, c) {
 		c.genFrom = 2

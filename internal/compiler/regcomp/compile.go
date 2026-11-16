@@ -338,7 +338,10 @@ type gen struct {
 	// reuses says the code has a call_reuse, whose frame's locals the
 	// runtime finds by LocalReg.
 	reuses bool
-	inits  int
+	// reuseCands are the calls of exec whose arrays reuseSites asks may
+	// be made again.
+	reuseCands []reuseCand
+	inits      int
 	// lexical marks the slots of let and const bindings; tdz those whose
 	// dead zone some read checks or a closure may see.
 	tdz []bool
@@ -3913,10 +3916,9 @@ func (g *gen) call(n *ast.Call, dst int) int {
 		// truth: a mark the call of the built-in reads.
 		g.mark(at, bytecode.RMarkDead)
 	} else if mname == "exec" && dst >= 0 {
-		if spc, ok := g.reuseCall(n, dst); ok {
-			g.aux(at, spc)
-			g.mark(at, bytecode.RMarkReuse)
-			g.reuses = true
+		// A binding's, whose arrays may be made again (reuseSites).
+		if l := g.bindingOf(dst); l >= 0 {
+			g.reuseCands = append(g.reuseCands, reuseCand{pc: at, local: l})
 		}
 	}
 	return d
@@ -3937,48 +3939,6 @@ func (g *gen) mark(pc int, m uint8) {
 		g.marks = emptyMap(&g.s.marks)
 	}
 	g.marks[pc] |= m
-}
-
-// reuseCall finds the stack form's call of exec n compiles to, whose value
-// the next instruction stores in the local whose register is dst, and
-// returns its pc, which the runtime asks whether its arrays may be made
-// again (execReuseOf). It is the one call_method at n's position.
-func (g *gen) reuseCall(n *ast.Call, dst int) (uint32, bool) {
-	local := -1
-	for i, r := range g.slotReg {
-		if int(r) == dst && !g.fn.Locals[i].Captured {
-			local = i
-		}
-	}
-	if local < 0 {
-		return 0, false
-	}
-	code, pos, found := g.fn.Code, int32(n.TracePos()), -1
-	for i, l := range g.fn.Lines {
-		if l.Pos != pos {
-			continue
-		}
-		end := uint32(len(code))
-		if i+1 < len(g.fn.Lines) {
-			end = g.fn.Lines[i+1].PC
-		}
-		for pc := l.PC; pc < end && int(pc) < len(code); pc++ {
-			if code[pc].Op == bytecode.OpCallMethod {
-				if found >= 0 {
-					return 0, false
-				}
-				found = int(pc)
-			}
-		}
-	}
-	if found < 0 || found+1 >= len(code) || code[found+1].A != uint32(local) {
-		return 0, false
-	}
-	switch code[found+1].Op {
-	case bytecode.OpSetLocal, bytecode.OpPutLocal, bytecode.OpSetLocalGet, bytecode.OpInitLocal:
-		return uint32(found), true
-	}
-	return 0, false
 }
 
 // regexpConst is the constant of the RegExp literal n.
@@ -4597,6 +4557,7 @@ func (g *gen) closureConst(k, d int) {
 // --- the result -----------------------------------------------------------
 
 func (g *gen) finish() *bytecode.RegCode {
+	g.reuseSites()
 	// Each instruction's position, an entry where it changes; and past the
 	// code, the position of each error an instruction places apart from
 	// its own (storeAt), whose pc its Aux holds.

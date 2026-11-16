@@ -1003,6 +1003,27 @@ func (rc *RegCode) PosAt(pc int) (int32, bool) {
 	return lines[lo-1].Pos, true
 }
 
+// PureRegs is the most registers a LeafPure body has: they are its
+// frameless evaluation's, a window of the runtime's stack.
+const PureRegs = 32
+
+// MakeReuseAux is the Aux of a call marked RMarkReuse (ReuseAux), of
+// binding l, s and strs; s+1 must fit 15 bits and l 16.
+func MakeReuseAux(l, s int, strs bool) uint32 {
+	aux := uint32(l)<<16 | uint32(s+1)
+	if strs {
+		aux |= 0x8000
+	}
+	return aux
+}
+
+// ReuseAux is the Aux of a call marked RMarkReuse: the binding l its result
+// is stored in, whether its elements' Strings may be made again, and the
+// binding s they are stored in, or -1.
+func ReuseAux(aux uint32) (l, s int, strs bool) {
+	return int(aux >> 16), int(aux&0x7fff) - 1, aux&0x8000 != 0
+}
+
 // RegLater is a function's register code, compiled when it is first asked
 // for: functions never called are never compiled, as V8 compiles lazily.
 // Top-level code's is compiled with the code, and given as one already

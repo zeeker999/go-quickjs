@@ -32,22 +32,21 @@ func (r *Runtime) regDeadCall(o *Object, recv Value, args []Value) (Value, error
 }
 
 // regReuseSites is the sites of rc's calls of exec marked RMarkReuse, by
-// call site, whose arrays execReuseOf says may be made again: its answer,
-// of the stack form's call and locals, put in the frame's registers.
-func regReuseSites(fn *bytecode.Function, rc *bytecode.RegCode) []*execReuseSite {
+// call site, whose arrays may be made again (the register compiler's reuseOf): the
+// bindings it names, put in the frame's registers.
+func regReuseSites(rc *bytecode.RegCode) []*execReuseSite {
 	var out []*execReuseSite
 	for pc, w := range rc.Code {
 		if !w.Op().MethodCall() || pc >= len(rc.Marks) || rc.Marks[pc]&bytecode.RMarkReuse == 0 {
 			continue
 		}
-		spc := int(rc.Aux[pc])
-		site := execReuseOf[struct{}](fn, spc+1, int(fn.Code[spc+1].A))
-		if site == nil || rc.LocalReg[site.l] < 0 || site.s >= 0 && rc.LocalReg[site.s] < 0 {
+		l, s, strs := bytecode.ReuseAux(rc.Aux[pc])
+		if rc.LocalReg[l] < 0 || s >= 0 && rc.LocalReg[s] < 0 {
 			continue
 		}
-		rs := &execReuseSite{l: int(rc.LocalReg[site.l]), s: -1, strs: site.strs}
-		if site.s >= 0 {
-			rs.s = int(rc.LocalReg[site.s])
+		rs := &execReuseSite{l: int(rc.LocalReg[l]), s: -1, strs: strs}
+		if s >= 0 {
+			rs.s = int(rc.LocalReg[s])
 		}
 		if out == nil {
 			out = make([]*execReuseSite, rc.CallSites)

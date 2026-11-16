@@ -144,7 +144,8 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 				case !w.Op().MethodCall():
 					ok = false
 				case m&bytecode.RMarkReuse != 0:
-					ok = int64(aux)+1 < int64(len(fn.Code)) && len(rc.LocalReg) == len(fn.Locals)
+					l, s, _ := bytecode.ReuseAux(aux)
+					ok = l < len(fn.Locals) && s < len(fn.Locals) && len(rc.LocalReg) == len(fn.Locals)
 				case m&(bytecode.RMarkLitRecv|bytecode.RMarkLitArg) != 0:
 					ok = int64(aux) < int64(len(fn.Constants)) && fn.Constants[aux].Kind == bytecode.ConstRegExp &&
 						(m&bytecode.RMarkLitArg == 0 || w.X() > 0)
