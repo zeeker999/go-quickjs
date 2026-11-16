@@ -1088,8 +1088,18 @@ func (r *Runtime) regConstruct(calls []regCallCache, site uint16, callee Value, 
 	}
 	o := callee.Object()
 	fd := o.fn()
-	if fd == nil || fd.closure == nil || !r.regCtorBase(o, fd) {
-		if fd != nil && fd.ctorKind == ctorDerived && uint(site) < uint(len(calls)) {
+	// Whether the site's cache holds this constructor already, from an
+	// earlier construction: then none of the work below that fills it
+	// is done again, as none was before the native handler had a cache.
+	noted := false
+	if uint(site) < uint(len(calls)) {
+		e := &calls[site]
+		noted = e.callee == o && e.kind == regCallConstruct && fd != nil && fd.closure != nil && e.rc == fd.closure.reg
+	}
+	// regCtorBase, in line: asked at every construction of the Go table's.
+	if fd == nil || fd.closure == nil || fd.bound || fd.ctorKind != ctorBase || fd.closure.realm != r.Realm ||
+		proxyOf(o) != nil || fd.extra != nil && !regCtorScopesOK(fd) {
+		if !noted && fd != nil && fd.ctorKind == ctorDerived && uint(site) < uint(len(calls)) {
 			if cl, rc, ok := r.regCtorEntered(o, fd); ok {
 				// A derived class's, which the native handler enters with
 				// its this binding (nativeNew); its construction here is
@@ -1105,7 +1115,7 @@ func (r *Runtime) regConstruct(calls []regCallCache, site uint16, callee Value, 
 		// frame (leafForward); the native handler enters it with one,
 		// whose apply_args it makes too, once its objects' room is
 		// settled.
-		if uint(site) < uint(len(calls)) && fd.fieldInit() == nil {
+		if !noted && uint(site) < uint(len(calls)) && fd.fieldInit() == nil {
 			if p := o.getOwnVisible(atomPrototype); p.ok() && p.flags()&propAccessor == 0 && p.value().IsObject() {
 				if root := r.shapes.ctorRoot(fd, p.value().Object()); root == nil || root.tracked() {
 					if ecl, rc, ok := r.regCtorEntered(o, fd); ok {
@@ -1137,7 +1147,7 @@ func (r *Runtime) regConstruct(calls []regCallCache, site uint16, callee Value, 
 		return Undefined, err
 	}
 	root := r.shapes.ctorRoot(fd, proto)
-	if uint(site) < uint(len(calls)) && (root == nil || root.tracked()) && fd.fieldInit() == nil {
+	if !noted && uint(site) < uint(len(calls)) && (root == nil || root.tracked()) && fd.fieldInit() == nil {
 		// Its objects' room settled and nothing to give them but what its
 		// body stores: the site's to construct with from now on.
 		regCtorNote(&calls[site], o, cl, rc)
@@ -1182,15 +1192,19 @@ func regCtorNote(e *regCallCache, o *Object, cl *closure, rc *regCode) {
 // constructor regConstruct runs as a register frame: a function's or a
 // base class's of this realm, neither bound nor a proxy's target, with no
 // with or eval scope of its surroundings to establish, which runFD's frames
-// would have.
+// would have. regConstruct, which the Go table's loop calls for every
+// construction, spells the same test out in line.
 func (r *Runtime) regCtorBase(o *Object, fd *funcData) bool {
-	if fd.bound || fd.ctorKind != ctorBase || fd.closure.realm != r.Realm || proxyOf(o) != nil {
-		return false
-	}
-	if x := fd.extra; x != nil && (fd.arrow || x.lexThisRef != nil || len(x.with()) != 0 || x.evalVars() != nil) {
-		return false
-	}
-	return true
+	return !fd.bound && fd.ctorKind == ctorBase && fd.closure.realm == r.Realm && proxyOf(o) == nil &&
+		(fd.extra == nil || regCtorScopesOK(fd))
+}
+
+// regCtorScopesOK reports whether fd's side fields leave a constructor of
+// it nothing to establish but its this (regCtorBase): no arrow's this, no
+// with or eval scope of its surroundings.
+func regCtorScopesOK(fd *funcData) bool {
+	x := fd.extra
+	return !fd.arrow && x.lexThisRef == nil && len(x.with()) == 0 && x.evalVars() == nil
 }
 
 // regCtorEntered is the closure and register code of o, of funcData fd,
