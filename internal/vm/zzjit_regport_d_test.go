@@ -394,3 +394,30 @@ func regEntriesFoundForTest(s *jitState) error {
 	}
 	return nil
 }
+
+// jitCalleeCodeForTest is the entry of the global function name, the link
+// native callers call its code through and its code, in either form: the
+// stack form's entry (jitNativeOrCalleeForTest), or its register code's
+// life, link and code. It fails the test where the function has no code,
+// or no link.
+func jitCalleeCodeForTest(t *testing.T, r *Runtime, name string) (*jitEntry, *jitLink, *jit.SSACode) {
+	t.Helper()
+	if regJITForTest() {
+		cl := jitGlobalClosure(r, name)
+		key := r.jitRegKeyOf(cl)
+		e := r.jit.regCache[key]
+		if e == nil || e.code == nil || e.life == nil {
+			t.Fatalf("%s has no code: %+v", name, e)
+		}
+		l := r.jit.regLinks[key]
+		if l == nil {
+			t.Fatalf("%s has no link: %+v", name, e)
+		}
+		return e.life, l, e.code
+	}
+	e := jitNativeOrCalleeForTest(t, r, name)
+	if e.link == nil {
+		t.Fatalf("%s has no link: %+v", name, e)
+	}
+	return e, e.link, e.ssa
+}
