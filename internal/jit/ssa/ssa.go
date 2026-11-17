@@ -644,6 +644,13 @@ const (
 	// a number throughout. Neither exits; the store writes no pointer.
 	OpCellNumLoad  // source -> f64
 	OpCellNumStore // source, tagged -> none
+	// OpForInDone marks its operand, a for...in's cursor, done, as the
+	// iter_close does that a break, a continue or a return runs leaving
+	// the loop (ir.IterClose's ForIn, the VM's rhIterClose): the runtime's
+	// next loop takes the cursor (the VM's newForInObject) rather than
+	// making one. Anything but a cursor it leaves as it is. It writes no
+	// cell and never exits.
+	OpForInDone // tagged -> none
 )
 
 // OpTailSelf's Key bits for register code's call (OpTailSelf): its Args
@@ -687,7 +694,7 @@ var opNames = [...]string{
 	OpStringCodePointOr: "codepointor", OpStringAtOr: "stringator", OpNumberIs: "numberis", OpTypeofCell: "typeofcell",
 	OpCursorCell: "cursorcell", OpHeapLoad: "heapload", OpHeapStore: "heapstore",
 	OpDivI32: "divi", OpDivU32: "divu", OpRemI32: "remi", OpRemU32: "remu",
-	OpCellNumLoad: "cellnum", OpCellNumStore: "cellnumstore",
+	OpCellNumLoad: "cellnum", OpCellNumStore: "cellnumstore", OpForInDone: "forindone",
 }
 
 func (o Op) String() string {
