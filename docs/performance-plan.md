@@ -230,8 +230,8 @@ the program's own objects, which only allocating less removes.
 
 ### Start-up, compiling and programs run again
 
-- **The compiler's speed** (Octane's CodeLoad, +25.2% with the JIT at
-  `388324de`; see the register JIT's remaining gaps). `Token.IsPunct`'s chains
+- **The compiler's speed** (Octane's CodeLoad, 129.8 -> 102.8 ms once
+  the stack bytecode went, 2026-11-17). `Token.IsPunct`'s chains
   and the name maps are each about 3% of a compile, the final tables are
   allocated one by one, and a string `Op` in a binary node is 16 bytes
   where a kind would be one, at most of the compiler's sites
