@@ -127,7 +127,7 @@ type scratch struct {
 	// they had been most of what a function's register form allocated
 	// besides the code.
 	names      map[string]uint32
-	consts     map[any]uint32
+	consts     map[constKey]uint32
 	marks      map[int]uint8
 	auxes      map[int]uint32
 	farNames   map[int]uint32
@@ -244,6 +244,9 @@ type gen struct {
 	// (site16).
 	shareSites bool
 	shared     map[siteKey]uint16
+	// sharedCalls is each call operation's site where the sites are
+	// shared (sharedCallSite).
+	sharedCalls map[bytecode.ROp]uint16
 	// farJumps says a jump of a 16-bit offset did not reach: the function
 	// is compiled again with each such jump far (jump).
 	farJumps bool
@@ -300,7 +303,7 @@ type gen struct {
 	withs    map[*ast.Ident]*withName
 	withRefs map[*ast.Ident]withRef
 
-	consts   map[any]uint32
+	consts   map[constKey]uint32
 	names    map[string]uint32
 	caps     [][]uint16
 	siteName []uint32
@@ -872,15 +875,24 @@ func (g *gen) far(pc int, name string) int {
 	return pc
 }
 
+// constKey is what constIdx shares a constant by: a number by its bits, a
+// string by its text, and any other by its index, which no other has.
+type constKey struct {
+	kind bytecode.ConstKind
+	bits uint64
+	str  string
+}
+
 func (g *gen) constIdx(c bytecode.Constant) uint32 {
-	var key any
+	key := constKey{kind: c.Kind}
 	switch c.Kind {
 	case bytecode.ConstNumber:
-		key = math.Float64bits(c.Num)
+		key.bits = math.Float64bits(c.Num)
 	case bytecode.ConstString:
-		key = c.Str
+		key.str = c.Str
 	default:
-		key = len(g.fn.Constants)
+		// Each its own.
+		key.bits = uint64(len(g.fn.Constants))
 	}
 	if i, ok := g.consts[key]; ok {
 		return i
@@ -4214,11 +4226,8 @@ func (g *gen) aux(pc int, v uint32) {
 // (errSites): the calls of one operation share one, whose entry is
 // checked against the callee it is made for.
 func (g *gen) callSite(op bytecode.ROp) uint16 {
-	k := siteKey{kind: "call " + op.String()}
 	if g.shareSites {
-		if s, ok := g.shared[k]; ok {
-			return s
-		}
+		return g.sharedCallSite(op)
 	}
 	s := g.calls
 	g.calls++
@@ -4226,12 +4235,25 @@ func (g *gen) callSite(op bytecode.ROp) uint16 {
 		g.fail(errSites)
 		return 0
 	}
-	if g.shareSites {
-		if g.shared == nil {
-			g.shared = map[siteKey]uint16{}
-		}
-		g.shared[k] = uint16(s)
+	return uint16(s)
+}
+
+// sharedCallSite is callSite where the sites are shared: one for each
+// operation.
+func (g *gen) sharedCallSite(op bytecode.ROp) uint16 {
+	if s, ok := g.sharedCalls[op]; ok {
+		return s
 	}
+	s := g.calls
+	g.calls++
+	if s >= limit16 {
+		g.fail(errSites)
+		return 0
+	}
+	if g.sharedCalls == nil {
+		g.sharedCalls = map[bytecode.ROp]uint16{}
+	}
+	g.sharedCalls[op] = uint16(s)
 	return uint16(s)
 }
 
