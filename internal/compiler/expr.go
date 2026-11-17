@@ -309,10 +309,6 @@ func foldsVoid(e ast.Expr) bool {
 	return ok
 }
 
-// isNegZero reports whether v is negative zero, which must not take the integer
-// path because it would be re-materialized as +0.
-func isNegZero(v float64) bool { return v == 0 && 1/v < 0 }
-
 // compileIdentRead walks a read of a variable, recording its resolution.
 func (c *compiler) compileIdentRead(n *ast.Ident) {
 	// Inside a `with` body the object may answer instead of the binding.
