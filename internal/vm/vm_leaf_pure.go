@@ -21,9 +21,15 @@ func (r *Runtime) pureCall(fd *funcData, this Value, args []Value) (Value, bool)
 	return r.pureCallAt(fd, this, args, 0, true)
 }
 
-// pureTreeCode is the shortest pure body, in instructions, that is called
-// as its register code rather than evaluated here when it calls nothing.
-const pureTreeCode = 6
+// pureTreeCode is the shortest pure body, in register instructions, that
+// is called as its register code rather than evaluated here when it calls
+// nothing. A comparison's value is three instructions of register code
+// (its branch, the two loads) where the stack bytecode's had been one, so
+// that x => x <= last is six: at 6 the JIT ran BigInt64Array's every of it
+// at the interpreter's speed (typed_i64_every, 2.4 -> 46 ns), its calls
+// made with frames, where 9 keeps the bodies of seven stack instructions
+// or fewer evaluated here as they had been.
+const pureTreeCode = 9
 
 // pureByTree reports whether calls of a pure body go to its register code,
 // as planCall gives them (regPlan), rather than to pureCall: its first call
@@ -31,8 +37,8 @@ const pureTreeCode = 6
 // pureFirst). pureCallAt pays an indirect jump of its one switch for every
 // instruction, which is often mispredicted, as the bodies it evaluates are
 // all different; its register code pays a frame once. A body that calls
-// nothing gains nothing else from being frameless, and from about six
-// instructions on a frame is the cheaper; one that calls keeps its calls
+// nothing gains nothing else from being frameless, and from about seven
+// evaluated instructions on a frame is the cheaper; one that calls keeps its calls
 // frameless here, which its register code would make with frames. A call
 // from inside another pure body (pureInvoke) is still evaluated here.
 func pureByTree(rc *bytecode.RegCode) bool {

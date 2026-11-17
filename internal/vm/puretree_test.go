@@ -51,3 +51,36 @@ func TestPureByTree(t *testing.T) {
 	}
 	r.Close()
 }
+
+// TestPureByTreeComparison pins that a pure body returning a comparison --
+// six register instructions, the branch and the two loads its value takes
+// besides the return -- is evaluated frameless (pureByTree false), as it
+// was when the stack bytecode's four instructions were counted: called with
+// a frame, BigInt64Array's every of x => x <= last ran natively at the
+// interpreter's speed. A body of a dozen instructions goes to its code.
+func TestPureByTreeComparison(t *testing.T) {
+	t.Parallel()
+	top := compileForTest(t, `function f(last) { return [(x) => x <= last, (x, y) => (x * 3 + y * 5 + last) * (x - y) - (y + 7) * (x + 9) * last] }`)
+	var fs []*bytecode.Function
+	for _, k := range top.Constants {
+		if k.Fn != nil && k.Fn.Name == "f" {
+			for _, c := range k.Fn.Constants {
+				if c.Fn != nil {
+					fs = append(fs, c.Fn)
+				}
+			}
+		}
+	}
+	if len(fs) != 2 {
+		t.Fatalf("%d arrows", len(fs))
+	}
+	for i, want := range []bool{false, true} {
+		rc := fs[i].RegCode()
+		if rc == nil || rc.Leaf != bytecode.LeafPure || rc.PureCalls {
+			t.Fatalf("arrow %d is not a pure body that calls nothing: %v", i, rc)
+		}
+		if got := pureByTree(rc); got != want {
+			t.Errorf("arrow %d, %d instructions: pureByTree %v, want %v", i, len(rc.Code), got, want)
+		}
+	}
+}
