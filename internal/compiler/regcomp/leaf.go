@@ -128,7 +128,8 @@ func pureBody(fn *bytecode.Function, rc *bytecode.RegCode) {
 			bytecode.RGetGlobal, bytecode.RAdd, bytecode.RSub, bytecode.RMul, bytecode.RBitAnd, bytecode.RBitOr,
 			bytecode.RBitXor, bytecode.RShl, bytecode.RShr, bytecode.RUShr, bytecode.RAddI, bytecode.RSubI,
 			bytecode.RAndI, bytecode.ROrI, bytecode.RXorI, bytecode.RShlI, bytecode.RShrI, bytecode.RUShrI,
-			bytecode.RMulI, bytecode.RInc, bytecode.RDec, bytecode.RTypeof, bytecode.RGetUpval, bytecode.RStrFreeze:
+			bytecode.RMulI, bytecode.RInc, bytecode.RDec, bytecode.RTypeof, bytecode.RGetUpval, bytecode.RStrFreeze,
+			bytecode.RAddI32, bytecode.RSubI32, bytecode.RAddII32:
 			ok = writes(w.A())
 		case bytecode.RGetMethodW:
 			ok = writes(w.A()) && writes(w.A()+1)

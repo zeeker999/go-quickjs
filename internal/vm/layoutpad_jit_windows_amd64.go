@@ -8,7 +8,7 @@ package vm
 // stores (the assembly pad's 32-byte slots), -1 for a pad left out, or a
 // data lever's variables.
 const (
-	layoutPadNA  = 173
+	layoutPadNA  = 104
 	layoutPadNGA = -1
 	layoutPadNMA = -1
 	layoutPadND  = 280
@@ -17,7 +17,7 @@ const (
 	layoutPadNB  = 537
 	layoutPadNGB = -1
 	layoutPadNMB = -1
-	layoutPadNJ  = 102
+	layoutPadNJ  = 11
 	layoutPadNGJ = -1
 	layoutPadNMJ = -1
 	layoutPadNQ  = 569

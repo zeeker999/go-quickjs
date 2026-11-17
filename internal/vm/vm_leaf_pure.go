@@ -283,6 +283,28 @@ func (r *Runtime) pureCallAt(fd *funcData, this Value, args []Value, depth int, 
 				return miss()
 			}
 			regs[w.A()] = v
+		case bytecode.RAddI32, bytecode.RSubI32, bytecode.RAddII32:
+			// (x + y) | 0, (x - y) | 0, (x + k) | 0: the operator, then
+			// the | 0, as the int32 forms' slow path makes them.
+			var v Value
+			var ok bool
+			switch {
+			case op == bytecode.RAddI32:
+				v, ok = pureArith(bytecode.OpAdd, regs[w.B()], regs[w.C()])
+			case op == bytecode.RSubI32:
+				v, ok = pureArith(bytecode.OpSub, regs[w.B()], regs[w.C()])
+			case w.X() == bytecode.RAddII32Sub:
+				v, ok = pureArith(bytecode.OpSub, regs[w.B()], Int32(-w.SC()))
+			default:
+				v, ok = pureArith(bytecode.OpAdd, regs[w.B()], Int32(w.SC()))
+			}
+			if ok {
+				v, ok = pureArith(bytecode.OpBitOr, v, Int32(0))
+			}
+			if !ok {
+				return miss()
+			}
+			regs[w.A()] = v
 		case bytecode.RInc, bytecode.RDec:
 			v := regs[w.B()]
 			if !v.IsNumber() {

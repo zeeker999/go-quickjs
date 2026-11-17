@@ -389,8 +389,8 @@ const (
 	// ObjKeys[Aux[pc]], their values R[B] on, site C: the literal made at
 	// once, its values evaluated before it, which nothing can tell apart.
 	RNewObjectLit
-	// RAppend: R[A] = R[A] + R[B], an addition to a local the stack
-	// compiler made an append (bytecode.AddOwned): the string the local
+	// RAppend: R[A] = R[A] + R[B], an addition to a local the walk found
+	// an append (regcomp's Record.Appends): the string the local
 	// alone holds grown in place where it can be (the VM's strAppend),
 	// anything else added as RAdd adds it. Its value is the local's.
 	RAppend

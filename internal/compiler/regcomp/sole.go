@@ -1,6 +1,10 @@
 package regcomp
 
-import "github.com/go-quickjs/go-quickjs/internal/bytecode"
+import (
+	"slices"
+
+	"github.com/go-quickjs/go-quickjs/internal/bytecode"
+)
 
 // The locals that hold their values alone: the interpreter and the JIT
 // give back a BigInt such a local held when it is assigned the next result
@@ -48,7 +52,8 @@ func (g *gen) soleLocals() uint64 {
 			cand &^= 1 << uint(k)
 		}
 	}
-	for _, w := range g.code {
+	var labels []bool
+	for pc, w := range g.code {
 		reads, _, known := regRoles(w)
 		if !known {
 			for r := range of {
@@ -67,9 +72,24 @@ func (g *gen) soleLocals() uint64 {
 			bytecode.RJLt, bytecode.RJNLt, bytecode.RJLe, bytecode.RJNLe, bytecode.RJGt, bytecode.RJNGt,
 			bytecode.RJGe, bytecode.RJNGe, bytecode.RJEq, bytecode.RJNe, bytecode.RJSEq, bytecode.RJSNe,
 			bytecode.RJLtI, bytecode.RJNLtI, bytecode.RJLeI, bytecode.RJNLeI, bytecode.RJGtI, bytecode.RJNGtI,
-			bytecode.RJGeI, bytecode.RJNGeI, bytecode.RJEqI, bytecode.RJNeI, bytecode.RJSEqI, bytecode.RJSNeI:
-			// An operand, read to make a value of the operator's own.
+			bytecode.RJGeI, bytecode.RJNGeI, bytecode.RJEqI, bytecode.RJNeI, bytecode.RJSEqI, bytecode.RJSNeI,
+			bytecode.RAppend, bytecode.RStrFreeze, bytecode.RAddI32, bytecode.RSubI32, bytecode.RAddII32:
+			// An operand, read to make a value of the operator's own; an
+			// append's, whose string is its binding's; str_freeze's,
+			// which leaves the value where it is.
 			continue
+		case bytecode.RRet:
+			// The value the instruction before made, returned, as the
+			// stack form's return of it took it from the stack: the frame
+			// ends, and nothing is assigned the binding again.
+			if labels == nil {
+				labels = g.labels()
+			}
+			if pc > 0 && !labels[pc] {
+				if _, writes, ok := regRoles(g.code[pc-1]); ok && slices.Contains(writes, int(w.A())) {
+					continue
+				}
+			}
 		}
 		for _, r := range reads {
 			escape(r)
@@ -122,7 +142,7 @@ func soleOp(w bytecode.RInstr) bool {
 		bytecode.RAdd, bytecode.RSub, bytecode.RMul, bytecode.RBitAnd, bytecode.RBitOr, bytecode.RBitXor,
 		bytecode.RShl, bytecode.RShr, bytecode.RUShr, bytecode.RAddI, bytecode.RSubI, bytecode.RAndI,
 		bytecode.ROrI, bytecode.RXorI, bytecode.RShlI, bytecode.RShrI, bytecode.RUShrI, bytecode.RMulI,
-		bytecode.RInc, bytecode.RDec,
+		bytecode.RInc, bytecode.RDec, bytecode.RAddI32, bytecode.RSubI32, bytecode.RAddII32,
 		bytecode.RJmp, bytecode.RJmpF, bytecode.RJmpT,
 		bytecode.RJLt, bytecode.RJNLt, bytecode.RJLe, bytecode.RJNLe, bytecode.RJGt, bytecode.RJNGt,
 		bytecode.RJGe, bytecode.RJNGe, bytecode.RJEq, bytecode.RJNe, bytecode.RJSEq, bytecode.RJSNe,
@@ -130,7 +150,7 @@ func soleOp(w bytecode.RInstr) bool {
 		bytecode.RJGeI, bytecode.RJNGeI, bytecode.RJEqI, bytecode.RJNeI, bytecode.RJSEqI, bytecode.RJSNeI,
 		bytecode.RStepJLt, bytecode.RStepJLe, bytecode.RStepJLtI, bytecode.RStepJGtI, bytecode.RStepJGeI,
 		bytecode.RGetGlobal, bytecode.RSetGlobal, bytecode.RGetMethodW, bytecode.RCallW, bytecode.RCallMW,
-		bytecode.RRet, bytecode.RRetUndef, bytecode.RStrFreeze:
+		bytecode.RRet, bytecode.RRetUndef, bytecode.RStrFreeze, bytecode.RAppend:
 		return true
 	}
 	return false
