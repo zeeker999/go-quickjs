@@ -309,8 +309,14 @@ func TestCharCodeMicrobenchmarks(t *testing.T) {
 			t.Fatalf("%s: got %v, %v; want 32:3344", name, v, err)
 		}
 	}
-	v, err := rt.Eval("string_charcode_custom(32) + ':' + global_res")
-	if err != nil || v.String() != "32:272" {
-		t.Fatalf("custom method: got %v, %v; want 32:272", v, err)
+	for _, name := range []string{"string_charcode_custom", "string_charcode_override"} {
+		v, err := rt.Eval(name + "(32) + ':' + global_res")
+		if err != nil || v.String() != "32:272" {
+			t.Fatalf("%s: got %v, %v; want 32:272", name, v, err)
+		}
+	}
+	v, err := rt.Eval(`"a".charCodeAt(0)`)
+	if err != nil || v.String() != "97" {
+		t.Fatalf("charCodeAt was not restored: got %v, %v; want 97", v, err)
 	}
 }

@@ -5293,3 +5293,20 @@ function array_map_tail_args(n)
         global_res = entries.map(row);
     return n * 100;
 }
+
+function string_charcode_override(n)
+{
+    var saved = String.prototype.charCodeAt;
+    var s = "abcdefghijklmnop", h = 0, i, j;
+    String.prototype.charCodeAt = extra_charcode_custom;
+    try {
+        for (j = 0; j < n; j++) {
+            i = j & 15;
+            h += s.charCodeAt(++i);
+        }
+    } finally {
+        String.prototype.charCodeAt = saved;
+    }
+    global_res = h;
+    return n;
+}
