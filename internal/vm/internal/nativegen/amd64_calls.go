@@ -203,8 +203,8 @@ func (g *nativeGen) ptrTo() {
 // built-in, a generator, a frame that keeps its arguments or reads
 // new.target, a first call), a full stack or frame stack, an interrupt
 // due, a frame record its last user left set: Go's, by an exit before
-// anything is written.
-func (g *nativeGen) call() {
+// anything is written. method is call_method_w's copy of the handler.
+func (g *nativeGen) call(method bool) {
 	a := g.a
 	ok := a.NewLabel()
 	start, tmpl, builtin, miss := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
@@ -392,14 +392,22 @@ func (g *nativeGen) call() {
 	a.Bind(builtin)
 	a.OpImm(Cmp, R9, regCallNative, false)
 	a.Jcc(CondNE, g.ex(4))
+	// call_method_w's String.prototype methods answered by the
+	// kernels (strIntrinsic), past the exits; call_w's push, which only
+	// a method call passes, goes on as it did.
 	notPush, intrinsic := a.NewLabel(), a.NewLabel()
+	if !method {
+		intrinsic = notPush
+	}
 	g.push(notPush, intrinsic)
 	a.Bind(light)
 	g.light(ncBuiltinFn)
-	g.end = append(g.end, func() {
-		a.Bind(intrinsic)
-		g.strIntrinsic(notPush, light)
-	})
+	if method {
+		g.end = append(g.end, func() {
+			a.Bind(intrinsic)
+			g.strIntrinsic(notPush, light)
+		})
+	}
 	// Another callee than the cache's, of another template: the exit, its
 	// Go function nativeCallMiss (ncMiss), which makes the cache the
 	// callee's where the code enters it with a frame and has the call made

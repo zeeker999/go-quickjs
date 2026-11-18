@@ -138,3 +138,29 @@ func TestRegNativeStrIntrinsicOverride(t *testing.T) {
 		})
 	}
 }
+
+// A bound charCodeAt, as a method with an argument and with its argument
+// bound, natively and by the Go table, idle and marking: the bound this
+// and arguments, never the call's receiver, and every call the
+// built-in's, never the kernel's.
+func TestRegNativeStrIntrinsicBound(t *testing.T) {
+	nativeCounting(t)
+	const src = `
+        var o = new String("abcdefghijklmnop");
+        o.free = String.prototype.charCodeAt.bind("ABCDEFGHIJKLMNOP");
+        o.fixed = String.prototype.charCodeAt.bind("ABCDEFGHIJKLMNOP", 3);
+        function bound(n){let h=0,i;for(let j=0;j<n;j++){i=(j&15)-1;h+=o.free(++i);h+=o.fixed(i+1);h+=o.fixed()}return ''+h}
+        bound(1000)`
+	for _, marking := range []bool{false, true} {
+		t.Run(map[bool]string{false: "idle", true: "marking"}[marking], func(t *testing.T) {
+			nativeMarking(t, marking)
+			for _, native := range []bool{false, true} {
+				got, calls := strIntrinsicRun(t, src, native)
+				// 72,468 for the free index, and 68 for D twice a turn.
+				if got != "208468" || calls != 3000 {
+					t.Fatalf("native %v: got %s, %d calls of the built-in; want 208468, 3000", native, got, calls)
+				}
+			}
+		})
+	}
+}

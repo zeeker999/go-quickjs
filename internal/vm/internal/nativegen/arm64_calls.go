@@ -186,7 +186,7 @@ func (g *armGen) ptrTo() {
 // knows, entered as regCallW enters it and run here, its caller's state
 // pushed on the native frame stack; anything else Go's, by an exit before
 // anything is written.
-func (g *armGen) call() {
+func (g *armGen) call(method bool) {
 	a := g.a
 	ok := a.NewLabel()
 	start, tmpl, builtin, miss := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
@@ -350,11 +350,16 @@ func (g *armGen) call() {
 	a.CmpImm(r9, int64(regCallNative), false)
 	a.BCond(NE, g.ex(4))
 	notPush, intrinsic := a.NewLabel(), a.NewLabel()
+	if !method {
+		intrinsic = notPush
+	}
 	g.push(notPush, intrinsic)
-	g.end = append(g.end, func() {
-		a.Bind(intrinsic)
-		g.strIntrinsic(notPush, light)
-	})
+	if method {
+		g.end = append(g.end, func() {
+			a.Bind(intrinsic)
+			g.strIntrinsic(notPush, light)
+		})
+	}
 	reflect := a.NewLabel()
 	a.Bind(notPush)
 	g.genNext(reflect)

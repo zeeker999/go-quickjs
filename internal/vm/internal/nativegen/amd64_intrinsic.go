@@ -12,37 +12,36 @@ import . "github.com/go-quickjs/go-quickjs/internal/jit/asm/amd64"
 // same feedback. Each method is known by its elemOp, the built-in's own
 // mark of a frameless application (setElemOp), and answered by the
 // kernel its fused form has: charCodeAt by char_code_at's
-// (charCodeUnit). Another built-in, or a bound one, goes on to other,
-// push's own way on; a receiver that is not a string, an argument that
-// is not a number or anything the kernel does not answer, to light,
-// nativeBuiltin's call of the built-in. R9 is the funcData and RDX its
+// (charCodeUnit). Another built-in goes on to other, push's own way on;
+// a receiver that is not a string, an argument that is not a number or
+// anything the kernel does not answer, to light, nativeBuiltin's call of
+// the built-in. No bound function has an elemOp -- bind makes it a
+// funcData of its own, which has none -- so the elemOp is the built-in
+// itself (TestStrIntrinsicNotBound). R9 is the funcData and RDX its
 // elemOp (push), RSI the window, RAX the instruction.
 func (g *nativeGen) strIntrinsic(other, light Label) {
 	a := g.a
 	a.OpImm(Cmp, RDX, int32(elemStrCharCodeAt), false)
 	a.Jcc(CondNE, other)
-	a.LoadU8(RDX, R9, offFDBound)
-	a.Op(Test, RDX, RDX, false)
-	a.Jcc(CondNE, other)
-	// The receiver a string, the argument a number.
-	a.Load(RDX, RSI, 16)
-	a.CmpMem(RDX, RDI, ncStrBits, true)
-	a.Jcc(CondNE, light)
-	a.Load(RDX, RSI, 24)
-	a.Store(RDI, scr(sV0), RDX)
+	// The argument a number, the receiver a string, which the kernel
+	// takes in RSI, not through the scratch.
 	a.Load(R9, RSI, 32)
 	a.Op(Cmp, R9, R10, true)
 	a.Jcc(CondAE, light)
 	a.MovQToX(0, R9)
-	g.charCodeUnit(light, g.storeB)
+	a.Load(RDX, RSI, 16)
+	a.CmpMem(RDX, RDI, ncStrBits, true)
+	a.Jcc(CondNE, light)
+	a.Load(RSI, RSI, 24)
+	g.charCodeUnit(light, g.storeB, true)
 }
 
 // charCodeUnit is charCodeAt's kernel: the code unit of the flat string
-// in the scratch's sV0 at the position the number in X0 gives, NaN as 0,
-// truncated, stored by store as a number, or NaN past the string's
-// length; a rope, or the code units of a string not ASCII not made yet,
-// go to miss, before anything is written.
-func (g *nativeGen) charCodeUnit(miss Label, store func(XReg)) {
+// in RSI where inRSI, else in the scratch's sV0, at the position the
+// number in X0 gives, NaN as 0, truncated, stored by store as a number,
+// or NaN past the string's length; a rope, or the code units of a string
+// not ASCII not made yet, go to miss, before anything is written.
+func (g *nativeGen) charCodeUnit(miss Label, store func(XReg), inRSI bool) {
 	a := g.a
 	nan, wide, have, idx := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
 	a.SSEOp(UcomiSD, 0, 0)
@@ -50,7 +49,9 @@ func (g *nativeGen) charCodeUnit(miss Label, store func(XReg)) {
 	a.SSEOp(XorPD, 0, 0)
 	a.Bind(idx)
 	a.Cvttsd2si(RCX, 0)
-	a.Load(RSI, RDI, scr(sV0))
+	if !inRSI {
+		a.Load(RSI, RDI, scr(sV0))
+	}
 	a.CmpMem(RCX, RSI, offStrLen, true)
 	a.Jcc(CondAE, nan)
 	a.CmpMemImm8(RSI, offStrLeft, 0)

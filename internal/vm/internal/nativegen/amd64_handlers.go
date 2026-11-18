@@ -946,8 +946,8 @@ func nativeEmit(v *variant) (*block, error) {
 		g.storeA(0)
 	})
 	{
-		h(bytecode.RCallW, g.call)
-		h(bytecode.RCallMW, g.call)
+		h(bytecode.RCallW, func() { g.call(false) })
+		h(bytecode.RCallMW, func() { g.call(true) })
 		h(bytecode.RRet, func() { g.ret(false) })
 		h(bytecode.RRetUndef, func() { g.ret(true) })
 	}
@@ -1061,7 +1061,7 @@ func nativeEmit(v *variant) (*block, error) {
 		a.MovZX8(RDX, RDX)
 		a.ShiftImm(Shl, RDX, 4, true)
 		g.num(0, RDX)
-		g.charCodeUnit(g.exit, g.storeA)
+		g.charCodeUnit(g.exit, g.storeA, false)
 	})
 	// o[k] += v, a statement's update of a dense array's element that
 	// holds a number, by a number: its word alone written, as

@@ -93,3 +93,26 @@ func TestSavedStringCalls(t *testing.T) {
 		})
 	}
 }
+
+// The native kernels know a String.prototype method by its elemOp and
+// do not ask whether the callee is bound: bind makes a function a
+// funcData of its own, which has no elemOp. A change to bind that kept
+// the target's would have the kernels answer a bound call with the
+// receiver of the call, not the bound this; this fails first.
+func TestStrIntrinsicNotBound(t *testing.T) {
+	r := New(Config{})
+	defer r.Close()
+	for _, src := range []string{
+		`String.prototype.charCodeAt.bind("xyz")`,
+		`String.prototype.charCodeAt.bind("xyz", 2)`,
+		`String.prototype.charCodeAt.bind("xyz").bind("abc")`,
+	} {
+		v, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fd := v.Object().fn(); !fd.bound || fd.elemOp != 0 {
+			t.Fatalf("%s: bound %v, elemOp %d; want bound, elemOp 0", src, fd.bound, fd.elemOp)
+		}
+	}
+}

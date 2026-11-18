@@ -818,8 +818,8 @@ func armEmit(v *variant) (*block, error) {
 		g.storeA(0)
 	})
 	{
-		h(bytecode.RCallW, g.call)
-		h(bytecode.RCallMW, g.call)
+		h(bytecode.RCallW, func() { g.call(false) })
+		h(bytecode.RCallMW, func() { g.call(true) })
 		h(bytecode.RRet, func() { g.ret(false) })
 		h(bytecode.RRetUndef, func() { g.ret(true) })
 	}
@@ -917,7 +917,7 @@ func armEmit(v *variant) (*block, error) {
 		// The position, NaN as 0, truncated: one below the length, or NaN.
 		g.regX(rD)
 		g.num(0, rD)
-		g.charCodeUnit(g.exit, g.storeA)
+		g.charCodeUnit(g.exit, g.storeA, false)
 	})
 	// o[k] += v of a dense array's number element, as amd64's: the object
 	// in rS, the value in D1, the key in D0 or rC.

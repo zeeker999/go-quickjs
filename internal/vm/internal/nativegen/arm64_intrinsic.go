@@ -4,29 +4,28 @@ import . "github.com/go-quickjs/go-quickjs/internal/jit/asm/arm64"
 
 // strIntrinsic is amd64's (amd64_intrinsic.go): call_method_w's call of
 // a String.prototype method its site cached, known by its elemOp and
-// answered by its fused form's kernel. r9 is the funcData and rD its
-// elemOp (push), rS the window, rW the instruction.
+// answered by its fused form's kernel; no bound function has an elemOp.
+// r9 is the funcData and rD its elemOp (push), rS the window, rW the
+// instruction.
 func (g *armGen) strIntrinsic(other, light Label) {
 	a := g.a
 	a.CmpImm(rD, int64(elemStrCharCodeAt), false)
 	a.BCond(NE, other)
-	a.LoadU8(rD, r9, offFDBound)
-	a.Cbnz(rD, other, false)
-	// The receiver a string, the argument a number.
+	// The argument a number, the receiver a string, which the kernel
+	// takes in rS, not through the scratch.
+	a.AddImm(rD, rS, 32, true)
+	g.numOr(0, rD, light)
 	a.Load(rD, rS, 16)
 	g.cmpMem(rD, rCtx, ncStrBits)
 	a.BCond(NE, light)
-	a.Load(rD, rS, 24)
-	a.Store(rCtx, scr(sV0), rD)
-	a.AddImm(rD, rS, 32, true)
-	g.numOr(0, rD, light)
-	g.charCodeUnit(light, g.storeB)
+	a.Load(rS, rS, 24)
+	g.charCodeUnit(light, g.storeB, true)
 }
 
-// charCodeUnit is amd64's: the code unit of the flat string in the
-// scratch's sV0 at the position the number in D0 gives, stored by store,
-// or NaN; anything else goes to miss.
-func (g *armGen) charCodeUnit(miss Label, store func(FReg)) {
+// charCodeUnit is amd64's: the code unit of the flat string in rS where
+// inRS, else in the scratch's sV0, at the position the number in D0
+// gives, stored by store, or NaN; anything else goes to miss.
+func (g *armGen) charCodeUnit(miss Label, store func(FReg), inRS bool) {
 	a := g.a
 	nan, wide, have, idx := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
 	a.FCmp(0, 0)
@@ -34,7 +33,9 @@ func (g *armGen) charCodeUnit(miss Label, store func(FReg)) {
 	a.FMovToF(0, ZR)
 	a.Bind(idx)
 	a.Fcvtzs(rC, 0)
-	a.Load(rS, rCtx, scr(sV0))
+	if !inRS {
+		a.Load(rS, rCtx, scr(sV0))
+	}
 	g.cmpMem(rC, rS, offStrLen)
 	a.BCond(HS, nan)
 	g.cmpMemImm(rS, offStrLeft, 0)
