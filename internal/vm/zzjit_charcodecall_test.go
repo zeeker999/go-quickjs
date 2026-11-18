@@ -4,6 +4,44 @@ package vm
 
 import "testing"
 
+func TestJITCharCodeCallScriptInlining(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(map[bool]string{false: "idle", true: "marking"}[marking], func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			r := jitRuntimeForTest(t, Config{JIT: true})
+			if _, err := r.Run(compileForTest(t, `
+                function replacement(i){return i}
+                function custom(n){var s={charCodeAt:replacement},h=0,i;for(let j=0;j<n;j++){i=j&15;h+=s.charCodeAt(++i)}return h}
+                function override(n){var s="abcdefghijklmnop",h=0,i;for(let j=0;j<n;j++){i=j&15;h+=s.charCodeAt(++i)}return h}
+                String.prototype.charCodeAt=replacement`)); err != nil {
+				t.Fatal(err)
+			}
+			p := compileForTest(t, `custom(1000)+":"+override(1000)`)
+			for range 12 {
+				v, err := r.Run(p)
+				if err != nil || v.String().Go() != "8468:8468" {
+					t.Fatalf("got %v, %v; want 8468:8468", v, err)
+				}
+			}
+			for _, name := range []string{"custom", "override"} {
+				e := jitNativeForTest(t, r, name)
+				inlined := false
+				for _, call := range e.inlines {
+					inlined = inlined || call.cl != nil && call.cl.fn.Name == "replacement"
+				}
+				if !inlined {
+					t.Fatalf("%s did not inline its saved script method: %+v", name, e.inlines)
+				}
+			}
+		})
+	}
+}
+
 func TestJITCharCodeCallLegacyArguments(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
@@ -27,7 +65,7 @@ func TestJITCharCodeCallLegacyArguments(t *testing.T) {
 			for range 10 {
 				v, err := r.Run(p)
 				if err != nil || v.String().Go() != "1:42" {
-					t.Fatalf("got %v, %v; want 1:42", v, err)
+					t.Fatalf("got %q, %v; want 1:42", v.String().Go(), err)
 				}
 			}
 			jitNativeForTest(t, r, "legacy")

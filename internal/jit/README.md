@@ -203,10 +203,18 @@ origin (`ir.Program.Origin`):
 | `get_index_pre`, `get_index_post` | the step and the read into scratch slots, then both registers written |
 | `get_method_w` | the method's read, then the receiver and the method copied into the call's window |
 | `char_code_at` | the method's permission and the code unit |
-| `char_code_call` | the saved method's code unit, guarded by its intrinsic identity |
+| `char_code_call` | an ordinary method call on the saved call window |
 | `new_object_lit` | the object and its fields |
 | a compare with a captured bound | the bound's read and the compare |
 | `jtypeof`, a switch's cases | the tests and their branches |
+
+`char_code_call` uses ordinary call feedback: a cached script target may
+be inlined or called natively. With no cached target, the builder may
+speculate on `String.prototype.charCodeAt`; its `StringCode` guard checks
+the saved callee's intrinsic identity, string receiver and numeric argument.
+The interpreter's intrinsic path does not populate the ordinary call cache,
+so an empty cache retains that guarded specialization. Every failed guard
+resumes at the saved call, after method lookup and argument evaluation.
 
 Where a register instruction's operands are a run of registers that is not
 where its result goes -- `new_array`'s elements, `concat`'s parts -- they

@@ -245,7 +245,7 @@ func TestLowerRegCharCodeCall(t *testing.T) {
 		}
 		found = true
 		in := p.Code[p.At(uint32(pc))]
-		if in.Op != ir.StringCode || in.Left != ir.Slot(int(w.A())) || in.Right != ir.Slot(int(w.A()+1)) || in.Third != ir.Slot(int(w.A()+2)) || in.Dest != int(w.B()) {
+		if in.Op != ir.Host || !in.Window || !in.When || in.Left != ir.Slot(int(w.A())) || in.Extra != 1 || in.Dest != int(w.B()) {
 			t.Fatalf("saved method call lowered to %+v", in)
 		}
 	}

@@ -65,7 +65,7 @@ func (f *jitRegFeedback) at(pc int) (bytecode.RInstr, ir.Op, bool) {
 	if pc < 0 || pc >= len(f.p.Code) || int(f.p.Origin[pc]) >= len(f.rc.Code) {
 		return 0, 0, false
 	}
-	return f.rc.Code[f.p.Origin[pc]], f.p.Code[pc].Op, true
+	return jitRegCallInstr(f.rc.Code[f.p.Origin[pc]]), f.p.Code[pc].Op, true
 }
 
 // name is the atom of the register instruction w's name operand n, at
@@ -955,16 +955,26 @@ func (f *jitRegFeedback) regCallCold(pc int, rpc int32, cl *closure) bool {
 	return ok && fr < ssa.MinInliningFrequency
 }
 
-// jitRegCallOp is op with a call in tail position's opcode as the
-// ordinary call's, as native code makes it where the stack is shallow.
+// jitRegCallOp is op with tail calls and saved-method intrinsic calls
+// treated as ordinary calls, as native code makes them.
 func jitRegCallOp(op bytecode.ROp) bytecode.ROp {
 	switch op {
 	case bytecode.RCallWT:
 		return bytecode.RCallW
-	case bytecode.RCallMWT:
+	case bytecode.RCallMWT, bytecode.RCharCodeCall:
 		return bytecode.RCallMW
 	}
 	return op
+}
+
+// jitRegCallInstr gives the saved-method intrinsic candidate ordinary
+// method-call feedback and call handling. Its operands already match;
+// its original register pc still names the saved call at every exit.
+func jitRegCallInstr(w bytecode.RInstr) bytecode.RInstr {
+	if w.Op() == bytecode.RCharCodeCall {
+		return bytecode.MakeR(bytecode.RCallMW, w.X(), w.A(), w.B(), w.C())
+	}
+	return w
 }
 
 // GoCalls is ssa.GoFeedback's: native code made from register code calls
@@ -1348,6 +1358,14 @@ func (f *jitRegFeedback) methodCall(pc int, method bool) (*Object, int, bool) {
 // the program's instruction pc calls String.prototype.charCodeAt, the
 // realm's own (methodCall).
 func (f *jitRegFeedback) CharCode(pc int) bool {
+	if _, op, ok := f.at(pc); ok && op == ir.Host && f.p.Code[pc].Window && f.rc.Code[f.p.Origin[pc]].Op() == bytecode.RCharCodeCall {
+		if _, _, known := f.callTarget(pc); !known {
+			// The interpreter's intrinsic path does not fill an ordinary
+			// call cache. With no other target known, speculate on the
+			// builtin: StringCode still guards the saved callee and inputs.
+			return f.fb.r.jitCharCodeAt.IsObject()
+		}
+	}
 	o, n, ok := f.methodCall(pc, true)
 	return ok && n == 1 && f.fb.r.jitCharCodeAt.IsObject() && o == f.fb.r.jitCharCodeAt.Object()
 }

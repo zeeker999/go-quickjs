@@ -38,7 +38,7 @@ var feedbackOps = append([]bytecode.ROp{
 	bytecode.RCallW, bytecode.RCallMW, bytecode.RRet, bytecode.RRetUndef,
 	bytecode.RJLe, bytecode.RJNLe, bytecode.RJGt,
 	bytecode.RCallWT, bytecode.RCallMWT,
-}, feedbackOtherJumps...)
+}, append(feedbackOtherJumps, bytecode.RCharCodeCall)...)
 
 // The back edges. Each of feedbackBCJumps and feedbackSCJumps -- every
 // operation that jumps, by int32(BC) or by SC -- counts a backward jump's

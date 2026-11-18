@@ -1101,7 +1101,7 @@ func regHostOnly(p *ir.Program, rc *bytecode.RegCode, fn *bytecode.Function, m l
 		case bytecode.RGetIndex, bytecode.RGetIndexI, bytecode.RSetIndex, bytecode.RSetIndexI, bytecode.RGetIndexPre, bytecode.RGetIndexPost,
 			bytecode.RAddIndex, bytecode.RAddIndexK, bytecode.RAddIndexI:
 			indexed = true
-		case bytecode.RCallW, bytecode.RCallMW, bytecode.RNewW, bytecode.RApplyArgs:
+		case bytecode.RCallW, bytecode.RCallMW, bytecode.RCharCodeCall, bytecode.RNewW, bytecode.RApplyArgs:
 			calls = true
 		case bytecode.RCallWT, bytecode.RCallMWT:
 			// A call in tail position may be the function's own, which
@@ -1389,7 +1389,7 @@ func (l *regLowering) lower(pc int) {
 		l.emit(ir.Instruction{Op: ir.Return, Left: reg(a)}, false)
 	case bytecode.RRetUndef:
 		l.emit(ir.Instruction{Op: ir.Return, Left: ir.Literal(ir.Value{Kind: ir.Undefined})}, false)
-	case bytecode.RCallW, bytecode.RCallMW, bytecode.RNewW:
+	case bytecode.RCallW, bytecode.RCallMW, bytecode.RCharCodeCall, bytecode.RNewW:
 		// A call, made natively where the VM knows its callee (the VM's
 		// feedback, by the call's register pc), by Go otherwise.
 		// Not marked Tail: a call in tail position is RCallWT's or
@@ -1398,7 +1398,7 @@ func (l *regLowering) lower(pc int) {
 			l.litArgCall(w)
 			break
 		}
-		l.emit(ir.Instruction{Op: ir.Host, Extra: int(w.X()), When: op == bytecode.RCallMW, Window: true, Left: reg(a), Dest: int(b)}, false)
+		l.emit(ir.Instruction{Op: ir.Host, Extra: int(w.X()), When: op.MethodCall(), Window: true, Left: reg(a), Dest: int(b)}, false)
 	case bytecode.RClosureW:
 		l.emit(ir.Instruction{Op: ir.Closure, Dest: int(a), Key: w.BC()}, false)
 	case bytecode.RThrow:
@@ -1506,10 +1506,6 @@ func (l *regLowering) lower(pc int) {
 		t := l.temp()
 		l.emit(ir.Instruction{Op: ir.StringMethod, Left: reg(b), Dest: t}, false)
 		l.emit(ir.Instruction{Op: ir.StringCode, Left: ir.Slot(t), Right: reg(b), Third: ir.Slot(int(w.X())), Dest: int(a)}, false)
-	case bytecode.RCharCodeCall:
-		// The method read and argument evaluation precede this instruction.
-		// A failed guard resumes at the saved call, not at the lookup.
-		l.emit(ir.Instruction{Op: ir.StringCode, Left: reg(a), Right: reg(a + 1), Third: reg(a + 2), Dest: int(b)}, false)
 	case bytecode.RYield:
 		// Go's: the interpreter suspends the frame (the VM's regWhole runs
 		// no yield), and its resumption enters the code past it. A
@@ -2180,7 +2176,7 @@ func RegAccess(rc *bytecode.RegCode, pc int) (reads, writes []int, all bool) {
 		// object with the slot the function's entry loads, which escape
 		// analysis cannot leave unmade (liveRegs kills it).
 		return append([]int{a}, span(a+2, int(w.X()))...), []int{b}, false
-	case bytecode.RCallMW, bytecode.RCallMWT:
+	case bytecode.RCallMW, bytecode.RCallMWT, bytecode.RCharCodeCall:
 		return span(a, 2+int(w.X())), []int{b}, false
 	case bytecode.RGetPrivate:
 		return []int{b, c}, []int{a}, false

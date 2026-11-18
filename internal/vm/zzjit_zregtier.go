@@ -387,7 +387,7 @@ func (r *Runtime) jitRegCallsNatively(cl *closure, c *regCode) bool {
 	}
 	calls := r.regCallsRestored(cl, -1)
 	for _, w := range c.rc.Code {
-		if op := w.Op(); op != bytecode.RCallW && op != bytecode.RCallMW || uint(w.C()) >= uint(len(calls)) {
+		if op := jitRegCallInstr(w).Op(); op != bytecode.RCallW && op != bytecode.RCallMW || uint(w.C()) >= uint(len(calls)) {
 			continue
 		}
 		if e := &calls[w.C()]; jitRegCallKind(e) && r.jitRegCallable(e.callee, e.cl, e.rc, int(w.X())) && native(e.cl) {

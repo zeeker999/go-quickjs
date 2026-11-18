@@ -589,7 +589,7 @@ func (r *Runtime) jitRegCallSeenOf(f *frame, c *regCode, e *jitRegEntry, rpc int
 	if e.invalid {
 		return false
 	}
-	w := regAt(c.code, rpc)
+	w := jitRegCallInstr(regAt(c.code, rpc))
 	var o, parent *Object
 	var cl *closure
 	switch w.Op() {
@@ -752,7 +752,7 @@ func (r *Runtime) jitRegCallRepeats(f *frame, c *regCode, e *jitRegEntry, rpc in
 	}
 	var o *Object
 	var cl *closure
-	switch w := regAt(c.code, rpc); w.Op() {
+	switch w := jitRegCallInstr(regAt(c.code, rpc)); w.Op() {
 	case bytecode.RCallW, bytecode.RCallMW:
 		calls := r.regCallsRestored(f.cl, int(w.C()))
 		if uint(w.C()) >= uint(len(calls)) {

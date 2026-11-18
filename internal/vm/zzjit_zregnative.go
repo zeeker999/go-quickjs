@@ -2706,7 +2706,7 @@ func (r *Runtime) jitRegGoSettled(ctx *abi.Context, c *regCode, rpc int) bool {
 	if rpc >= len(c.rc.Code) {
 		return false
 	}
-	w := regAt(c.code, rpc)
+	w := jitRegCallInstr(regAt(c.code, rpc))
 	switch op := w.Op(); op {
 	case bytecode.RCallW, bytecode.RCallMW, bytecode.RNewW, bytecode.RCallWT, bytecode.RCallMWT:
 		if ctx.GoOp>>abi.GoOpKindShift&0xff == abi.GoCallWhole {
@@ -2761,7 +2761,7 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 	if run.e != nil && run.e.life != nil {
 		run.e.life.ssaStats.goCalls++
 	}
-	w := regAt(c.code, rpc)
+	w := jitRegCallInstr(regAt(c.code, rpc))
 	op := w.Op()
 	argc := int(w.X())
 	kind := ctx.GoOp >> abi.GoOpKindShift & 0xff
@@ -3062,6 +3062,7 @@ func (r *Runtime) jitRegLitArgMade(f *frame, e *jitRegEntry, rpc int, m uint8, c
 // cache learns it as regCallSlow has it learn one (regCallNative), for the
 // interpreter's calls. Otherwise nil.
 func (r *Runtime) jitRegBuiltin(f *frame, c *regCode, w bytecode.RInstr, rpc int, callee Value) (*Object, *funcData) {
+	w = jitRegCallInstr(w)
 	switch w.Op() {
 	case bytecode.RCallW, bytecode.RCallMW, bytecode.RCallWT, bytecode.RCallMWT:
 	default:
