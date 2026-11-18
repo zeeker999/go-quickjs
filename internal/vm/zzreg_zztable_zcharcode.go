@@ -34,6 +34,19 @@ func rhCharCodeCall(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regStat
 func rsCharCodeCall(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
 	// Reuse ordinary call caching and entry for an overridden method,
 	// instead of turning every call of script into a generic call.
+	callee := regs[w.A()]
 	w = bytecode.MakeR(bytecode.RCallMW, 1, w.A(), w.B(), w.C())
-	return rhCallW(regs, w, pc, st)
+	next := rhCallW(regs, w, pc, st)
+	if calls := st.cl.regCalls; callee.IsObject() && int(w.C()) < len(calls) {
+		e := &calls[w.C()]
+		if e.callee == callee.Object() && e.kind == regCallNative {
+			if fd := e.callee.fn(); fd != nil && fd.elemOp == elemStrCharCodeAt && !fd.bound {
+				// A coercing argument or non-flat string needed Go once.
+				// Keep trying the native kernel when its operands change;
+				// cached script, bound and proxy targets remain ordinary hits.
+				*e = regCallCache{}
+			}
+		}
+	}
+	return next
 }

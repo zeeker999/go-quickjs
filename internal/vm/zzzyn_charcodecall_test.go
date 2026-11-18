@@ -53,6 +53,50 @@ func TestRegNativeCharCodeCall(t *testing.T) {
 			if n := nativeExitOps()[bytecode.RCharCodeCall] - before[bytecode.RCharCodeCall]; n > 2 {
 				t.Fatalf("script method frame left native code %d times", n)
 			}
+			before = nativeExitOps()
+			got = nativeRunSrc(t, `
+                function make(n){return function(x){let h=0;for(let j=0;j<3;j++)h+=j;return n+x+h}}
+                function templates(){let h=0,s={};for(let k=0;k<1000;k++){s.charCodeAt=make(k);h+=s.charCodeAt(k+0)}return ''+h}
+                templates()`, true)
+			if got != "1002000" {
+				t.Fatalf("script method templates: got %s", got)
+			}
+			if n := nativeExitOps()[bytecode.RCharCodeCall] - before[bytecode.RCharCodeCall]; n > 2 {
+				t.Fatalf("script method templates left native code %d times", n)
+			}
+		})
+	}
+}
+
+func TestRegNativeCharCodeCallRecoversIntrinsic(t *testing.T) {
+	nativeCounting(t)
+	was := regNativeOn
+	regNativeOn = true
+	t.Cleanup(func() { regNativeOn = was })
+	for _, marking := range []bool{false, true} {
+		t.Run(map[bool]string{false: "idle", true: "marking"}[marking], func(t *testing.T) {
+			nativeMarking(t, marking)
+			r := New(Config{})
+			defer r.Close()
+			r.global.setOwnRaw(r.atoms.intern("charExitCount"), Obj(r.newNativeFunc("charExitCount", 0,
+				func(_ *Runtime, _ Value, _ []Value) (Value, error) {
+					return Int(int(nativeExitOps()[bytecode.RCharCodeCall])), nil
+				})), propWritable|propConfigurable)
+			v, err := r.Run(compileForTest(t, `
+                var arg={valueOf(){return 0}},saved=String.prototype.charCodeAt;
+                function nextarg(){return arg}
+                function read(){let v="abc".charCodeAt(nextarg());return v}
+                function many(){let h=0;for(let i=0;i<1000;i++)h+=read();return h}
+                var out=[],before,h;
+                read();arg=0;before=charExitCount();h=many();out.push(h+":"+(charExitCount()-before));
+                String.prototype.charCodeAt=function(i){return i+7};read();read();
+                before=charExitCount();h=many();out.push(h+":"+(charExitCount()-before));
+                String.prototype.charCodeAt=saved;
+                before=charExitCount();h=many();out.push(h+":"+(charExitCount()-before));
+                out.join("|")`))
+			if err != nil || v.String().Go() != "97000:0|7000:0|97000:0" {
+				t.Fatalf("got %v, %v; want 97000:0|7000:0|97000:0", v, err)
+			}
 		})
 	}
 }

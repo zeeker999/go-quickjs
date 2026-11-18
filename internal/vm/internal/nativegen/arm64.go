@@ -89,6 +89,8 @@ type armGen struct {
 	genRet    Label
 	// genObj is amd64's.
 	genObj Label
+	// callHit and callTemplate are amd64's call-cache continuations.
+	callHit, callTemplate Label
 	// after is appended after every handler, keeping their layout intact.
 	after []func()
 	// last follows the existing out-of-line helpers as well as the handlers.

@@ -190,24 +190,12 @@ func (g *armGen) call() {
 	a := g.a
 	ok := a.NewLabel()
 	start, tmpl, builtin, miss := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
+	g.callTemplate = tmpl
 	a.Bind(start)
 
-	// e := &calls[C].
-	a.ShiftImm(Lsr, rC, rW, 48, true)
-	a.Load(r9, rCtx, ncCC)
-	g.cmpMem(rC, r9, offCCRegCalls+8)
-	a.BCond(HS, g.ex(1))
-	a.MovImm(r8, uint64(sizeE))
-	a.Mul(rC, rC, r8)
-	g.addMem(rC, r9, offCCRegCalls)
-	// The window, its callee the cache's.
-	g.regA(rS)
-	a.Load(r9, rS, 0)
-	g.cmpMem(r9, rCtx, ncObjBits)
-	a.BCond(NE, g.ex(2))
-	a.Load(r9, rS, 8)
-	g.cmpMem(r9, rC, offECallee)
-	a.BCond(NE, tmpl)
+	g.callPrefix(tmpl, g.ex(1))
+	g.callHit = a.NewLabel()
+	a.Bind(g.callHit)
 	// A leaf that returns a parameter, a constant or an upvalue first
 	// thing: its answer read from the window, the code or the closure,
 	// with no frame.

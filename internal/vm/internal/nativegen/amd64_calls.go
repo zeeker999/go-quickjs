@@ -208,26 +208,12 @@ func (g *nativeGen) call() {
 	a := g.a
 	ok := a.NewLabel()
 	start, tmpl, builtin, miss := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
+	g.callTemplate = tmpl
 	a.Bind(start)
 
-	// e := &calls[C].
-	a.MovRR(RCX, RAX)
-	a.ShiftImm(Shr, RCX, 48, true)
-	a.Load(R9, RDI, ncCC)
-	a.CmpMem(RCX, R9, offCCRegCalls+8, true)
-	a.Jcc(CondAE, g.ex(1))
-	a.MovImm(R8, uint64(sizeE))
-	a.Imul(RCX, R8)
-	a.AddMem(RCX, R9, offCCRegCalls)
-	// The window, its callee the cache's.
-	g.decA(RDX)
-	a.LeaIdx(RSI, R12, RDX, 1, 0)
-	a.Load(R9, RSI, 0)
-	a.CmpMem(R9, RDI, ncObjBits, true)
-	a.Jcc(CondNE, g.ex(2))
-	a.Load(R9, RSI, 8)
-	a.CmpMem(R9, RCX, offECallee, true)
-	a.Jcc(CondNE, tmpl)
+	g.callPrefix(tmpl, g.ex(1))
+	g.callHit = a.NewLabel()
+	a.Bind(g.callHit)
 	// A leaf that returns a parameter, a constant or an upvalue first
 	// thing: its answer read from the window, the code or the callee's
 	// closure, as regCallW and regLeafRun read it, with no frame.

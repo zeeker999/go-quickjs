@@ -5,18 +5,9 @@
 #include "textflag.h"
 
 // layoutPadH is the layout lock's assembly pad H for windows/amd64 plain:
-// 99 slots of 32 bytes before the native handlers' block
+// 90 slots of 32 bytes before the native handlers' block
 // (layoutlock.txt). It is never called: see internal/cmd/layoutpad.
 TEXT ·layoutPadH(SB), NOSPLIT|NOFRAME, $0-0
-	QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc
-	QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc
-	QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc
-	QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc
-	QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc
-	QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc
-	QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc
-	QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc
-	QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc
 	QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc
 	QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc
 	QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc

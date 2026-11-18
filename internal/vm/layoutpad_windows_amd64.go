@@ -30,7 +30,7 @@ const (
 	layoutPadNGZ = -1
 	layoutPadNMZ = -1
 	layoutPadNCZ = -1
-	layoutPadNH  = 99
+	layoutPadNH  = 90
 	layoutPadNDH = 4
 	layoutPadNDW = 4
 	layoutPadNDG = 2
