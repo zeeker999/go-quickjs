@@ -881,6 +881,7 @@ func armEmit(v *variant) (*block, error) {
 			}
 		})
 	}
+	charIndex := a.NewLabel()
 	h(bytecode.RCharCodeAt, func() {
 		// s.charCodeAt(i) of a flat string, the method the built-in read
 		// from the realm's cache of String.prototype's properties and i a
@@ -916,6 +917,7 @@ func armEmit(v *variant) (*block, error) {
 		a.LoadU8(rD, r9, offFDBound)
 		a.Cbnz(rD, g.exit, false)
 		// The position, NaN as 0, truncated: one below the length, or NaN.
+		a.Bind(charIndex)
 		g.regX(rD)
 		g.num(0, rD)
 		a.FCmp(0, 0)
@@ -1146,6 +1148,39 @@ func armEmit(v *variant) (*block, error) {
 	// A cursor's close and a destructuring's step (arm64_cursor.go).
 	h(bytecode.RIterClose, g.iterClose)
 	h(bytecode.RIterStep, g.iterStep)
+	h(bytecode.RCharCodeCall, func() {
+		// Script overrides keep the ordinary native call-cache path.
+		script := a.NewLabel()
+		g.regA(rC)
+		a.Load(r9, rC, 0)
+		g.cmpMem(r9, rCtx, ncObjBits)
+		a.BCond(NE, g.exit)
+		a.Load(r9, rC, 8)
+		a.LoadU16(rD, r9, offObjFlags)
+		a.TstImm(rD, uint64(objHasData), false)
+		a.BCond(EQ, g.exit)
+		a.Load(rD, r9, sizeObj+offExtData)
+		g.cmpMem(rD, rCtx, ncFuncT)
+		a.BCond(NE, g.exit)
+		a.Load(r9, r9, sizeObj+offExtData+8)
+		a.Load(rD, r9, offFdClosure)
+		a.Cbnz(rD, script, true)
+		a.LoadU8(rD, r9, offFDElemOp)
+		a.CmpImm(rD, int64(elemStrCharCodeAt), false)
+		a.BCond(NE, g.exit)
+		a.LoadU8(rD, r9, offFDBound)
+		a.Cbnz(rD, g.exit, false)
+		g.regA(rS)
+		a.AddImm(rS, rS, 16, true)
+		a.Load(r9, rS, 0)
+		g.kindIs(r9, KindString)
+		a.Load(rS, rS, 8)
+		a.Store(rCtx, scr(sV0), rS)
+		g.charCodeIndexW()
+		a.B(charIndex)
+		a.Bind(script)
+		a.B(label(bytecode.RCallW))
+	})
 
 	for i := 0; i < len(g.after); i++ {
 		g.after[i]()

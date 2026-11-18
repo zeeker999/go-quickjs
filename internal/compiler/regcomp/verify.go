@@ -119,6 +119,8 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 			ok = reg(a)
 		case bytecode.RCharCodeAt:
 			ok = reg(a) && reg(b) && reg(uint16(w.X())) && site(c) && pc < len(rc.Aux) && virtual(rc.Aux[pc])
+		case bytecode.RCharCodeCall:
+			ok = reg(b) && int(a)+3 <= n && a+2 < 256 && w.X() == 1 && int(c) < rc.CallSites
 		case bytecode.RJTypeof:
 			ok = reg(a) && w.X()&^bytecode.RCmpTrue < 8 && in(pc, int64(w.SC()))
 		case bytecode.RSwitch, bytecode.RSwitchTypeof:

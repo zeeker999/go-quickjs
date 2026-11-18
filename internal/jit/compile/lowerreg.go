@@ -1506,6 +1506,10 @@ func (l *regLowering) lower(pc int) {
 		t := l.temp()
 		l.emit(ir.Instruction{Op: ir.StringMethod, Left: reg(b), Dest: t}, false)
 		l.emit(ir.Instruction{Op: ir.StringCode, Left: ir.Slot(t), Right: reg(b), Third: ir.Slot(int(w.X())), Dest: int(a)}, false)
+	case bytecode.RCharCodeCall:
+		// The method read and argument evaluation precede this instruction.
+		// A failed guard resumes at the saved call, not at the lookup.
+		l.emit(ir.Instruction{Op: ir.StringCode, Left: reg(a), Right: reg(a + 1), Third: reg(a + 2), Dest: int(b)}, false)
 	case bytecode.RYield:
 		// Go's: the interpreter suspends the frame (the VM's regWhole runs
 		// no yield), and its resumption enters the code past it. A

@@ -449,6 +449,15 @@ fused instruction keeps, in `RegCode.Aux` where it needs one, the pc past
 the code's whose position its second part's errors take
 ([Positions](#from-the-ast)).
 
+For a `charCodeAt` argument such as `++i` or `i+1`, the method is read by
+`get_method_w` before evaluating the argument, then `char_code_call`
+checks the saved method and reads the code unit. It shares the fused
+form's native code-unit kernel. Its ordinary method-call encoding lets
+script overrides continue through the native call cache. A fallback calls the
+saved method with the saved receiver and evaluated argument, even if
+argument evaluation changed the property or the receiver's binding.
+Calls in tail position retain their ordinary tail-call instruction.
+
 A negative literal is an immediate wherever a literal is, and a literal
 left operand of `*` is moved to the right (`3 * x` is `mul_imm`), which
 `+` cannot do, since it may join strings.
@@ -889,6 +898,12 @@ returns a parameter or a constant is answered from the arguments
 (`callDirect`). A runtime that runs the JIT keeps its leaves on
 `callDirect`, which counts them for tier-up, and so does the Go table,
 whose loop entered for each call is slower than the frameless evaluators.
+A function with calls in tail position uses these entries too. Once its
+entry closes the frame, `regTailEntryEnd` reopens a frame given to another
+callee in place and runs it through `regRerun`, or consumes a pending call
+through `regTailLoop`. A chain already owned by that loop is left to it.
+The retained callback restores its original window reservation before its
+next invocation, even when a tail replacement used more registers.
 A reviver that cannot see a third argument -- fewer than three parameters,
 none a rest parameter, no arguments object or direct eval, no debugger and
 not Node's quirks -- is given no context object, and the parse keeps no

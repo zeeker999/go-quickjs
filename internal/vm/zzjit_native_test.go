@@ -9370,6 +9370,9 @@ func TestJITSSACharCodeAtInNativeCallees(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
+	// Saved-method StringCode makes this helper small enough to inline;
+	// this test needs its intrinsic to run in a separate native context.
+	jitNoInlineForTest(t, "codes")
 	runtime.GC()
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	setup := `var T=[];for(var k=48;k<58;k++)T[k]=k-48;

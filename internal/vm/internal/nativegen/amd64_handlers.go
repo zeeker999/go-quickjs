@@ -1014,6 +1014,7 @@ func nativeEmit(v *variant) (*block, error) {
 			}
 		})
 	}
+	charIndex := a.NewLabel()
 	h(bytecode.RCharCodeAt, func() {
 		// s.charCodeAt(i) of a flat string, the method the built-in read
 		// from the realm's cache of String.prototype's properties and i a
@@ -1057,6 +1058,7 @@ func nativeEmit(v *variant) (*block, error) {
 		a.Op(Test, RDX, RDX, false)
 		a.Jcc(CondNE, g.exit)
 		// The position, NaN as 0, truncated: one below the length, or NaN.
+		a.Bind(charIndex)
 		a.MovRR(RDX, RAX)
 		a.ShiftImm(Shr, RDX, 8, true)
 		a.MovZX8(RDX, RDX)
@@ -1329,6 +1331,48 @@ func nativeEmit(v *variant) (*block, error) {
 	// after the rarer paths, so that they move none of them.
 	h(bytecode.RIterClose, g.iterClose)
 	h(bytecode.RIterStep, g.iterStep)
+	h(bytecode.RCharCodeCall, func() {
+		// Script overrides keep the ordinary native call-cache path.
+		script := a.NewLabel()
+		g.decA(RCX)
+		a.LeaIdx(RCX, R12, RCX, 1, 0)
+		a.Load(R9, RCX, 0)
+		a.CmpMem(R9, RDI, ncObjBits, true)
+		a.Jcc(CondNE, g.exit)
+		a.Load(R9, RCX, 8)
+		a.LoadU16(RDX, R9, offObjFlags)
+		a.OpImm(And, RDX, int32(objHasData), false)
+		a.Jcc(CondE, g.exit)
+		a.Load(RDX, R9, sizeObj+offExtData)
+		a.CmpMem(RDX, RDI, ncFuncT, true)
+		a.Jcc(CondNE, g.exit)
+		a.Load(R9, R9, sizeObj+offExtData+8)
+		a.Load(RDX, R9, offFdClosure)
+		a.Op(Test, RDX, RDX, true)
+		a.Jcc(CondNE, script)
+		a.LoadU8(RDX, R9, offFDElemOp)
+		a.OpImm(Cmp, RDX, int32(elemStrCharCodeAt), false)
+		a.Jcc(CondNE, g.exit)
+		a.LoadU8(RDX, R9, offFDBound)
+		a.Op(Test, RDX, RDX, false)
+		a.Jcc(CondNE, g.exit)
+		g.decA(RSI)
+		a.OpImm(Add, RSI, 16, true)
+		a.LoadIdx(R9, R12, RSI, 1, 0)
+		a.MovRR(RCX, R9)
+		a.Op(Xor, RCX, R10, true)
+		a.ShiftImm(Shr, RCX, 16, true)
+		a.Jcc(CondNE, g.exit)
+		a.MovZX8(RCX, R9)
+		a.OpImm(Cmp, RCX, int32(KindString), false)
+		a.Jcc(CondNE, g.exit)
+		a.LoadIdx(RSI, R12, RSI, 1, 8)
+		a.Store(RDI, scr(sV0), RSI)
+		g.charCodeIndexW()
+		a.Jmp(charIndex)
+		a.Bind(script)
+		a.Jmp(label(bytecode.RCallW))
+	})
 	for i := 0; i < len(g.after); i++ {
 		g.after[i]()
 	}

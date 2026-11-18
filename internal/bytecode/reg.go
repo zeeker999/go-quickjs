@@ -725,6 +725,14 @@ const (
 	RAddI32
 	RSubI32
 	RAddII32
+	// RCharCodeCall: R[B] = R[A].call(R[A+1], R[A+2]), with one argument.
+	// get_method_w has already read charCodeAt before the argument was
+	// evaluated. A string's code unit where that saved callee is the
+	// built-in and the argument a number; any other callee/receiver/argument makes
+	// the saved method call without reading the property again.
+	// The encoding is RCallMW's: X=1, A the window, B the result and C
+	// the call-cache site, so the ordinary native call path can take over.
+	RCharCodeCall
 
 	// ROpCount is how many operations there are, each below it: the
 	// interpreter's table has an entry for every value an ROp can hold,
@@ -1273,6 +1281,7 @@ var rOpNames = [...]string{
 	RStepJLt: "step_jlt", RStepJLe: "step_jle", RStepJLtI: "step_jlt_imm", RStepJGtI: "step_jgt_imm",
 	RStepJGeI: "step_jge_imm", RStepJLeU: "step_jle_upval",
 	RMulI: "mul_imm", RAddI32: "add_i32", RSubI32: "sub_i32", RAddII32: "add_imm_i32",
+	RCharCodeCall: "char_code_call",
 }
 
 // Cold reports whether op is one of the operations of no hot loop,
@@ -1281,7 +1290,7 @@ func (op ROp) Cold() bool { return op >= RNewRegExp && op <= RFarInit }
 
 // MethodCall reports whether op is call_method_w or its tail form, whose
 // this is R[A+1].
-func (op ROp) MethodCall() bool { return op == RCallMW || op == RCallMWT }
+func (op ROp) MethodCall() bool { return op == RCallMW || op == RCallMWT || op == RCharCodeCall }
 
 func (op ROp) String() string {
 	if int(op) < len(rOpNames) && rOpNames[op] != "" {
@@ -1349,6 +1358,8 @@ func (rc *RegCode) Format(pc int) string {
 		return fmt.Sprintf("%s %s, %s, done -> %d", op, r(w.A()), r(w.B()), pc+1+int(w.SC()))
 	case RCharCodeAt:
 		return fmt.Sprintf("%s %s = %s.charCodeAt(%s) @%d", op, r(w.A()), r(w.B()), r(uint16(w.X())), w.C())
+	case RCharCodeCall:
+		return fmt.Sprintf("%s %s = %s.call(%s, %s) @%d", op, r(w.B()), r(w.A()), r(w.A()+1), r(w.A()+2), w.C())
 	case RGetIndex, RAdd, RSub, RMul, RBitAnd, RBitOr, RBitXor, RShl, RShr, RUShr:
 		return fmt.Sprintf("%s %s, %s, %s", op, r(w.A()), r(w.B()), r(w.C()))
 	case RSetIndex:

@@ -3832,6 +3832,12 @@ func (g *gen) call(n *ast.Call, dst int) int {
 		}
 	}
 	g.at(n.TracePos())
+	if op == bytecode.RCallMW && mname == "charCodeAt" && argc == 1 && w+2 < 256 && !g.rec.Tails[n] {
+		// The method and receiver are already saved in the window, before
+		// evaluating ++i, i+1 or any other argument that may run script.
+		g.emit(bytecode.MakeR(bytecode.RCharCodeCall, 1, r16(w), r16(d), g.callSite(bytecode.RCallMW)))
+		return d
+	}
 	dead = dead && (mname == "exec" || mname == "replace")
 	if g.rec.Tails[n] && !argLit {
 		// A call in tail position, whose frame is given up once the

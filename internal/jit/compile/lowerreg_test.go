@@ -235,6 +235,25 @@ function codes(s) { let h = 0; for (let i = 0; i < s.length; i++) h = h * 31 + s
 	}
 }
 
+func TestLowerRegCharCodeCall(t *testing.T) {
+	fn := regCompiled(t, `function codes(s){let i=0,h=0;for(let j=0;j<4;j++)h+=s.charCodeAt(++i);return h}`)["codes"]
+	p := regLowered(t, fn)
+	found := false
+	for pc, w := range fn.RegCode().Code {
+		if w.Op() != bytecode.RCharCodeCall {
+			continue
+		}
+		found = true
+		in := p.Code[p.At(uint32(pc))]
+		if in.Op != ir.StringCode || in.Left != ir.Slot(int(w.A())) || in.Right != ir.Slot(int(w.A()+1)) || in.Third != ir.Slot(int(w.A()+2)) || in.Dest != int(w.B()) {
+			t.Fatalf("saved method call lowered to %+v", in)
+		}
+	}
+	if !found {
+		t.Fatalf("no saved-method call:\n%s", fn.RegCode())
+	}
+}
+
 // TestLowerRegRefusals checks LowerReg's refusals by kind: a with
 // statement's probes and direct eval, and a function that does nothing
 // native code saves time on.

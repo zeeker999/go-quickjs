@@ -94,6 +94,8 @@ func regRoles(w bytecode.RInstr) (reads, writes []int, known bool) {
 		return span(b, c), []int{a}, true
 	case bytecode.RCharCodeAt:
 		return []int{b, int(w.X())}, []int{a}, true
+	case bytecode.RCharCodeCall:
+		return span(a, 3), []int{b}, true
 	case bytecode.RAppend:
 		return []int{a, b}, []int{a}, true
 	case bytecode.RJmp, bytecode.RRetUndef, bytecode.RNop:

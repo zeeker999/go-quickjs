@@ -124,6 +124,7 @@ var nativeSlowOnMiss = [...]bytecode.ROp{
 	// does not make, before it commits anything: rsStep's.
 	bytecode.RStepJLt, bytecode.RStepJLe, bytecode.RStepJLtI, bytecode.RStepJGtI, bytecode.RStepJGeI, bytecode.RStepJLeU,
 	bytecode.RMulI, bytecode.RAddI32, bytecode.RSubI32, bytecode.RAddII32,
+	bytecode.RCharCodeCall,
 }
 
 // The exit table, made after regTable (zzreg_table.go's and
@@ -926,7 +927,8 @@ func nativeIterRes(regs *[1 << 16]Value, w bytecode.RInstr, pc int, ctx *nativeC
 // made again, which the code then enters itself, rather than Go entering
 // it in a code entry of its own (regCallMiss) -- a site that calls several
 // functions in turn, an array of them or a method of several layouts --
-// where the handler enters the callee with a frame.
+// where the handler enters the callee with a frame or reads its leaf's
+// answer directly.
 // The cache holds the callee the second time, so that a call the handler
 // leaves to Go anyway is its Go handler's then (rhCallW, rhCallWT for the
 // calls in tail position whose handlers are call_w's). Anything else is
@@ -944,12 +946,12 @@ func nativeCallMiss(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regStat
 		return regTable[w.Op()](regs, w, pc, st)
 	}
 	if fd := o.fn(); fd != nil && fd.closure != nil && !fd.bound {
-		// Only a callee the handler enters with a frame: a leaf rhCallW's
-		// miss answers without one (pureCall, leafCall), and a frame that
-		// keeps its arguments is entered by regEnterW, each cheaper than
-		// the exit the call would come back to. One with native code the
-		// handler has Go enter (nativeJITCall), as rhCallW's hit does.
-		if cl, rc, kind, this, enter := r.regCallKind(fd, method, c); enter && kind != 0 && rc.leaf == regLeafNone && !rc.args && !regTypedCross(rc, c) && (kind != regCallObjThis || win[1].IsObject()) {
+		// Retry a framed callee or a leaf whose answer the native handler
+		// reads directly: a parameter, constant or captured binding.
+		// Other leaves stay with rhCallW's evaluator, and a frame that
+		// keeps its arguments with regEnterW, each cheaper than the exit
+		// the call would come back to. A JIT entry remains nativeJITCall's.
+		if cl, rc, kind, this, enter := r.regCallKind(fd, method, c); enter && kind != 0 && (rc.leaf == regLeafNone || rc.leaf >= regLeafArg || rc.leafUp != 0) && !rc.args && !regTypedCross(rc, c) && (kind != regCallObjThis || win[1].IsObject()) {
 			if !f.cl.regCallsHeld {
 				r.regCallsHold(f.cl.closureCode)
 			}

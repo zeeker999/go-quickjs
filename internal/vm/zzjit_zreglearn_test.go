@@ -108,8 +108,8 @@ function calls(s, n) {
 `
 
 // TestJITRegCalls: register code's calls of the built-ins the builder
-// makes itself (jitRegFeedback's Intrinsic, CharCode, Substring,
-// FromCharCode), from the operands in the call's window, each answer as
+// makes itself (StringCode and jitRegFeedback's Intrinsic, CharCode,
+// Substring, FromCharCode), from the operands in the call's window, each answer as
 // the interpreter's -- a receiver or a code they do not take, Go's.
 func TestJITRegCalls(t *testing.T) {
 	rts := regNativeRuntimes(t, regCallsSrc)
@@ -148,7 +148,7 @@ func TestJITRegCalls(t *testing.T) {
 		if _, ok := fb.Intrinsic(pc); ok {
 			intrinsics++
 		}
-		if fb.CharCode(pc) {
+		if e.p.Code[pc].Op == ir.StringCode || fb.CharCode(pc) {
 			charCodes++
 		}
 		if _, _, ok := fb.Substring(pc); ok {
@@ -166,7 +166,7 @@ func TestJITRegCalls(t *testing.T) {
 		t.Errorf("no native code entered")
 	}
 	// Made natively: none of the calls is left to Go whole.
-	if n := st.HostOps["call_method_w"] + st.HostOps["call_w"]; n != 0 {
+	if n := st.HostOps["call_method_w"] + st.HostOps["call_w"] + st.HostOps["char_code_call"]; n != 0 {
 		t.Errorf("%d calls left to Go at host exits: %v", n, st.HostOps)
 	}
 	// A string whose code units are not made yet: native code's first read
@@ -179,7 +179,8 @@ func TestJITRegCalls(t *testing.T) {
 		return regNativeShow(r, v, err)
 	}
 	left := func() uint64 {
-		return r.RegNativeStats().HostOps["call_method_w"] + r.RegNativeStats().HostOps["call_w"]
+		ops := r.RegNativeStats().HostOps
+		return ops["call_method_w"] + ops["call_w"] + ops["char_code_call"]
 	}
 	s0, s1 := fresh(), fresh()
 	before := left()

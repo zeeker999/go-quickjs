@@ -199,6 +199,7 @@ origin (`ir.Program.Origin`):
 | `get_index_pre`, `get_index_post` | the step and the read into scratch slots, then both registers written |
 | `get_method_w` | the method's read, then the receiver and the method copied into the call's window |
 | `char_code_at` | the method's permission and the code unit |
+| `char_code_call` | the saved method's code unit, guarded by its intrinsic identity |
 | `new_object_lit` | the object and its fields |
 | a compare with a captured bound | the bound's read and the compare |
 | `jtypeof`, a switch's cases | the tests and their branches |
