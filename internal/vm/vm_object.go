@@ -648,6 +648,17 @@ func newShapedLiteral(s *shape, class Class, n int) *Object {
 	return &lo.Object
 }
 
+// newLiteralPair makes an ordinary object of shape s with its two values.
+// Keep the header and value pointers together so that their initialization
+// shares one write-barrier check.
+func newLiteralPair(s *shape, first, second Value) *Object {
+	lo := new(literalObject2)
+	lo.flags, lo.valn, lo.valc = objExtensible|objInlineProps, 2, 2
+	lo.inline[0].num, lo.inline[1].num = first.num, second.num
+	lo.shape, lo.valp, lo.inline[0].ref, lo.inline[1].ref = s, &lo.inline[0], first.ref, second.ref
+	return &lo.Object
+}
+
 // errorObject carries the Go wrapper used to propagate this error through the
 // interpreter. An Error and its wrapper have the same lifetime, so keeping
 // them together avoids a second allocation each time the Error is thrown.

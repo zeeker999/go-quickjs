@@ -1741,9 +1741,14 @@ const jsonRoomLeft = 2
 func (p *jsonParser) objectOf(s *shape, mark, more int) *Object {
 	vals := p.scratch[mark:]
 	n := len(vals)
-	o := newShapedLiteral(s, ClassObject, n+more)
-	copy(o.vals()[:n], vals)
-	o.valn = uint32(n)
+	var o *Object
+	if n == 2 && more == 0 {
+		o = newLiteralPair(s, vals[0], vals[1])
+	} else {
+		o = newShapedLiteral(s, ClassObject, n+more)
+		copy(o.vals()[:n], vals)
+		o.valn = uint32(n)
+	}
 	if n > linearScanLimit && s.index == nil {
 		o.buildIndex()
 	}
