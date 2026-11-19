@@ -580,9 +580,11 @@ JIT (`jitRegCountsMake`). A callee that missed the site's cache counts
 once: `nativeCallMiss` makes the cache the callee's and has the handler
 make the call again, whose instruction dispatched again counts again, and
 takes back the first count (`jitRegUncount`,
-`TestJITRegFramedMissCountedOnce`). `Frequency` is a site's calls over the
-runs, once `jitCountsEnough` runs are counted (jit_freq.go); not a leaf's,
-whose calls the call path answers without a frame and so without its
+`TestJITRegFramedMissCountedOnce`), as does `grow` for a call the native
+frame stack had no room for, which the handler makes again once Go has
+grown it (`TestJITRegGrownCallCountedOnce`). `Frequency` is a site's calls
+over the runs, once `jitCountsEnough` runs are counted (jit_freq.go); not a
+leaf's, whose calls the call path answers without a frame and so without its
 returns, nor a generator's or an async function's, whose runs end at
 suspensions too, nor a construction's, which Go makes. Native code counts
 nothing, as V8's optimized code counts nothing; a run that on-stack

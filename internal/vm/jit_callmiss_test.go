@@ -103,3 +103,42 @@ func TestJITRegFramedMissCountedOnce(t *testing.T) {
 		}
 	}
 }
+
+// A recursion deeper than the native frame stack's room grows it at a
+// call the handler leaves to Go, which has the handler make the call
+// again: counted once all the same, where each growth had counted it
+// twice (308 calls for 299).
+func TestJITRegGrownCallCountedOnce(t *testing.T) {
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				nativeMarking(t, true)
+				jitMarkingForTest(t)
+			}
+			prog := compileForTest(t, `function rec(n) { if (n === 0) return 0; var v = rec(n - 1); return v + 1 }`)
+			r := New(Config{JIT: true})
+			t.Cleanup(r.Close)
+			r.jitStress = jitStressConfig{}
+			r.SetJITWarmUp(1<<16, 1<<16)
+			if _, err := r.Run(prog); err != nil {
+				t.Fatal(err)
+			}
+			fv, _ := r.GetProp(Obj(r.Global()), r.Intern("rec"))
+			cl := fv.Object().fn().closure
+			cl.jitRegRefused = true
+			for range 3 {
+				if v, err := r.Call(fv, Undefined, []Value{Float(100)}); err != nil || v.Number() != 100 {
+					t.Fatalf("got %v, %v", v, err)
+				}
+			}
+			if !regNativeOn {
+				return
+			}
+			// 303 runs, and 300 calls less the first, made before the
+			// site had its counts.
+			if c := cl.jitRegCounts; len(c) != 2 || c[0] != 303 || c[1] != 299 {
+				t.Fatalf("counts %v: want [303 299]", c)
+			}
+		})
+	}
+}

@@ -502,8 +502,18 @@ func (r *Runtime) initNativeCtx(ctx *nativeCtx, st *regState) {
 }
 
 // grow gives the native frame stack twice the room, 8 records at first,
-// up to nativeMaxDepth.
+// up to nativeMaxDepth. Past the first, the room is for a call the code
+// left to Go for want of it, the top frame's instruction, which the code
+// makes again (nativeDrive): the feedback dispatcher, which counted the
+// call where it dispatched it, counts it again there, and so takes back
+// its first count (jitRegUncount).
 func (ctx *nativeCtx) grow() {
+	if jitBuilt && len(ctx.recs) != 0 && ctx.disp == nativeFeedback {
+		switch w := bytecode.RInstr(ctx.w); w.Op() {
+		case bytecode.RCallW, bytecode.RCallMW, bytecode.RCallWT, bytecode.RCallMWT:
+			ctx.top.cl.closureCode.jitRegUncount(int(w.C()))
+		}
+	}
 	n := min(max(2*len(ctx.recs), 8), nativeMaxDepth)
 	recs := make([]nativeRec, n)
 	copy(recs, ctx.recs)
