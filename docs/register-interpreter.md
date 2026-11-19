@@ -641,11 +641,15 @@ machine](#what-it-measured-as-the-default)).
 registers, `R13` the dispatch table, `R15` the closure's caches, `R11` the
 back-edge budget, `R10` the least tag, `RDI` the context; `RAX` holds the
 instruction word, and `RCX`, `RDX`, `RSI`, `R8`, `R9` and three SSE
-registers are a handler's scratch. No handler uses `R14` (`R15` on
-arm64), kept for a feedback vector to be pinned in should one be needed,
+registers are a handler's scratch. `R10` also holds the barrier flag in
+its low bit: every valid tag is at least `tagBase+1`, every number below
+`tagBase`, and exact tag checks ignore the low payload bits. No handler
+uses `R14` (`R15` on arm64), kept for a feedback vector to be pinned in
+should one be needed,
 so that a handler's note would be one OR to memory. On arm64
-the pinned registers are `R19` to `R25` in that order, `R0` the
-instruction word, `R1` to `R7`, `R16`, `R17` and `D0` to `D3` the scratch;
+the pinned registers are `R19` to `R25` in that order, with `R7` holding
+the write-barrier flag read on entry or the last return from Go, `R0` the
+instruction word, `R1` to `R6`, `R16`, `R17` and `D0` to `D3` the scratch;
 the code uses `R26` only for an exit's func value and `R27` only as the
 encoder's temporary, and never touches `R18` (the platform's), `R28` (the
 goroutine), `R29` (the frame pointer) or `R30`, which holds `nativeEnter`'s
@@ -823,9 +827,15 @@ debugger's mode is meant to be a variant too.
 register held no pointer; a pointer word it stores plainly while the
 collector does not mark, and by the barrier's routine (`nativeStoreRef`,
 a store with Go's write barrier) while it does, reading the runtime's
-write-barrier flag. That is the only difference: the code does the same
-work whether the collector marks or not, and never leaves native code or
-calls Go for the marking's sake. `TestRegNativeKernels`,
+write-barrier flag. The flag stays pinned between Go calls, in `R10`'s
+low bit on amd64 and `R7` on arm64: the collector changes it with the
+world stopped, and native code has no safe point. The entry reads it and
+both Go trampolines refresh it before resuming native code, including
+after a barrier store. On amd64 the context's tag threshold keeps the
+bit, so reloading the pinned registers restores it too. That is the only
+difference: the code does the same work whether the collector marks or
+not, and never leaves native code or calls Go for the marking's sake.
+`TestRegNativeKernels`,
 `TestRegNativeFastPaths` and `TestRegNativeCalls` run each case with the
 flag read as set and as clear and fail on a different answer or a
 different count of exits; `TestRegNativeCallExits` checks the call handler
