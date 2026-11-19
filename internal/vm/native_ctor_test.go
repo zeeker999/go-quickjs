@@ -23,7 +23,7 @@ Pair`))
 	if obj := r.regCtorThis(e, e.callee.fn()); obj == nil {
 		t.Fatal("settled constructor was not allocated")
 	}
-	if e.this.ref == nil || (*shape)(e.this.ref) != e.callee.shape {
+	if e.this.ref == nil || (*regCtorCache)(e.this.ref).shape != e.callee.shape {
 		t.Fatal("constructor's prototype slot was not cached")
 	}
 	if got := e.callee.shape.keys[int(e.this.num)].key; got != atomPrototype {
@@ -59,7 +59,7 @@ var y = make();
 		t.Fatalf("changed shape and prototype: %v, %v", v, err)
 	}
 	r.regCtorThis(e, e.callee.fn())
-	if (*shape)(e.this.ref) != e.callee.shape || e.callee.shape == oldShape {
+	if (*regCtorCache)(e.this.ref).shape != e.callee.shape || e.callee.shape == oldShape {
 		t.Fatal("changed constructor shape did not refresh the slot")
 	}
 }

@@ -84,6 +84,8 @@ var (
 	nativeExits [256]int64
 	// nativeCalls counts the calls the code made itself.
 	nativeCalls int64
+	// nativeNews counts constructions that ask Go to prepare their objects.
+	nativeNews int64
 	// nativeMarkFlag, set by a test, is the flag the contexts made after
 	// it read for the collector's, so that the code stores as it does
 	// while the collector marks.
@@ -1078,11 +1080,14 @@ var nativeJITCallFn func(*[1 << 16]Value, bytecode.RInstr, int, *regState) int
 //
 //go:nocheckptr
 func nativeNew(regs *[1 << 16]Value, w bytecode.RInstr, pc int, ctx *nativeCtx) int {
+	if nativeCount {
+		atomic.AddInt64(&nativeNews, 1)
+	}
 	f := (*frame)(nativePtr(&ctx.nf))
 	r := ctx.st.r
 	e := &f.cl.regCalls[w.C()]
 	o := e.callee
-	obj := r.regCtorThis(e, o.fn())
+	obj := r.nativeCtorThis(e, o.fn())
 	if obj == nil {
 		return 0
 	}

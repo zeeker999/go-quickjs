@@ -556,7 +556,7 @@ type regCallCache struct {
 	cl     *closure
 	rc     *regCode
 	// this is a call's receiver; for regCallConstruct its unused words
-	// cache the constructor's prototype slot (regCtorThis).
+	// cache the constructor's prototype slot and allocation cache (regCtorThis).
 	this Value
 	kind uint8
 }
@@ -1289,14 +1289,15 @@ func (r *Runtime) regCtorEntered(o *Object, fd *funcData) (cl *closure, rc *regC
 // the construction then regConstruct's, which reads the prototype however
 // it is and notes the room an object came to need. The entry's this, which
 // a construction has no use for, remembers where the callee's shape keeps
-// prototype -- the shape in ref, the slot in num -- so that a construction
+// prototype -- the shape in ref's cache, the slot in num -- so that a construction
 // reads the slot by one compare; the value is read afresh, so that one
 // assigned takes effect, and a shape remembered is changed in place by
 // nothing (remember).
 func (r *Runtime) regCtorThis(e *regCallCache, fd *funcData) *Object {
 	o := e.callee
 	var p Value
-	if s := o.shape; s != nil && s == (*shape)(e.this.ref) {
+	cache := (*regCtorCache)(e.this.ref)
+	if s := o.shape; s != nil && cache != nil && s == cache.shape {
 		p = o.vals()[int(e.this.num)]
 	} else {
 		own := o.getOwnVisible(atomPrototype)
@@ -1306,7 +1307,8 @@ func (r *Runtime) regCtorThis(e *regCallCache, fd *funcData) *Object {
 		p = own.value()
 		if i := o.findOwn(atomPrototype); i >= 0 && s != nil && !s.loose &&
 			s.keys[i].flags&(propAccessor|propPrivate|propDeleted|propUninit) == 0 {
-			e.this = Value{num: float64(i), ref: unsafe.Pointer(remember(s))}
+			cache = &regCtorCache{shape: remember(s)}
+			e.this = Value{num: float64(i), ref: unsafe.Pointer(cache)}
 		}
 	}
 	if !p.IsObject() {

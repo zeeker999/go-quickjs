@@ -505,10 +505,14 @@ function make(C, n) { var s = 0; for (var i = 0; i < n; i++) { var o = new C(i, 
 			t.Fatalf("marking %v: a cache before P has register code: %+v", marking, c)
 		}
 		before := atomic.LoadInt64(&nativeCalls)
+		news := atomic.LoadInt64(&nativeNews)
 		if got := run(`String(make(P, 1000))`); got != "3000" {
 			t.Fatalf("marking %v: got %s", marking, got)
 		}
 		c := initCacheOf(r, "P")
+		if n := atomic.LoadInt64(&nativeNews) - news; n == 0 || n >= 100 {
+			t.Fatalf("marking %v: Go allocated %d times for 1000 constructions", marking, n)
+		}
 		if n := atomic.LoadInt64(&nativeCalls) - before; n > 20 {
 			t.Fatalf("marking %v: %d frames", marking, n)
 		}
