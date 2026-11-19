@@ -645,8 +645,6 @@ func (g *armGen) enter(mode int, jitCall Label) {
 // entered as call_w enters a callee, its frame a construction's.
 func (g *armGen) newW() {
 	a := g.a
-	entry := a.NewLabel()
-	a.Bind(entry)
 	after, done := a.NewLabel(), a.NewLabel()
 	g.newSite()
 	a.LoadU8(r9, rC, offEKind)
@@ -668,12 +666,9 @@ func (g *armGen) newW() {
 	a.ShiftImm(Lsr, rD, rD, 3, true)
 	a.MovRR(rS, rCtx)
 	a.MovRR(rW, rRegs)
-	pool, call := a.NewLabel(), a.NewLabel()
-	a.B(pool)
-	a.Bind(call)
+	a.Load(rFn, rCtx, ncNewFn)
 	a.Load(rJ, rCtx, ncCallH)
 	a.Br(rJ)
-	g.end = append(g.end, func() { g.ctorPool(pool, call, after, entry) })
 	a.Bind(after)
 	g.reload()
 	// 0: Go's; 2: done, a body leafCall answered; 3: the native

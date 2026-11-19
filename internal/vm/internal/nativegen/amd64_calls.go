@@ -791,8 +791,6 @@ func (g *nativeGen) enter(mode int, jitCall Label) {
 // before anything is written but R[A+1], a register of the window.
 func (g *nativeGen) newW() {
 	a := g.a
-	entry := a.NewLabel()
-	a.Bind(entry)
 	after, done := a.NewLabel(), a.NewLabel()
 	g.newSite()
 	a.LoadU8(R9, RCX, offEKind)
@@ -816,12 +814,8 @@ func (g *nativeGen) newW() {
 	a.ShiftImm(Shr, RCX, 3, true)
 	a.MovRR(RSI, RDI)
 	a.MovRR(RAX, R12)
-	pool, call := a.NewLabel(), a.NewLabel()
-	a.Jmp(pool)
-	a.Nop(2)
-	a.Bind(call)
+	a.Load(RDX, RDI, ncNewFn)
 	a.JmpMem(RDI, ncCallH)
-	g.end = append(g.end, func() { g.ctorPool(pool, call, after, entry) })
 	a.Bind(after)
 	g.reload()
 	// 0: Go's; 2: done, a body leafCall answered; 3: the native
