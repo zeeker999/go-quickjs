@@ -53,7 +53,7 @@ const (
 	layoutPadNV  = 5
 	layoutPadNGV = -1
 	layoutPadNMV = -1
-	layoutPadNR  = 281
+	layoutPadNR  = 295
 	layoutPadNGR = -1
 	layoutPadNMR = -1
 	layoutPadNS  = 101
