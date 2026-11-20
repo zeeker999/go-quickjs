@@ -38,7 +38,7 @@ const (
 	layoutPadNJ  = -1
 	layoutPadNGJ = -1
 	layoutPadNMJ = -1
-	layoutPadNN  = 288
+	layoutPadNN  = 285
 	layoutPadNGN = -1
 	layoutPadNMN = -1
 	layoutPadNP  = 157
@@ -75,7 +75,7 @@ const (
 	layoutPadNGZ = -1
 	layoutPadNMZ = -1
 	layoutPadNCZ = 366
-	layoutPadNH  = 45
+	layoutPadNH  = 42
 	layoutPadNDH = 0
 	layoutPadNDW = 0
 	layoutPadNDG = 2
