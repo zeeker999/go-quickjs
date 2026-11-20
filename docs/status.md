@@ -83,9 +83,10 @@ settled on its own goroutine, by the host's event loop when it has one.
 test262's multi-agent tests run that way; a host has no API to share memory
 yet.
 
-A sloppy-mode function's `caller` and `arguments` are not reachable from
-outside it in standards mode: reading either throws, as the standard's
-`Function.prototype` accessors do. `WithNodeQuirks` exposes them as V8 does.
+A sloppy ordinary function exposes its `caller` through an own accessor in
+standards mode; strict callers remain hidden. `Function.prototype` retains
+the standard's throwing `caller` and `arguments` accessors. `WithNodeQuirks`
+provides both legacy properties on `Function.prototype`, as V8 does.
 
 In WebAssembly: importing a `.wasm` file as a module, `postMessage` of a
 `Module` or a shared `Memory` between workers, and type reflection, which
@@ -123,6 +124,8 @@ strict and sloppy variants, the expected-failure phase and type, and the feature
 tags. A test tagged with a feature the engine does not implement is skipped
 rather than counted against it.
 
+Tests tagged `caller` run in standards mode, including legacy caller access.
+
 Tests tagged `source-phase-imports-module-source` receive test262's special
 `"<module source>"` host module. Its source object inherits from
 `%AbstractModuleSource%.prototype`, and every import resolves to the same
@@ -133,7 +136,7 @@ holds proposals too early to claim, and `harness` tests the suite's own helpers.
 
 Measured coverage, as of the most recent run, on test262 commit
 [`e4fbf57745c6aae3d1f12f181ecef78b1665d812`](https://github.com/tc39/test262/commit/e4fbf57745c6aae3d1f12f181ecef78b1665d812)
-of November 6, 2026: 100,250 variants pass and none fail. The other 69 are
+of November 6, 2026: 100,273 variants pass and none fail. The other 46 are
 skipped because they require an unsupported feature or host facility.
 
 Where test262 and current engines disagree, the engine follows the standard

@@ -141,6 +141,9 @@ func (r *Runtime) getExoticNamed(o *Object, key Atom) (Value, bool, error) {
 		// name and length are materialized on first read rather than created
 		// with every function, since most functions are never asked.
 		if fd := o.fn(); fd != nil {
+			if key == atomCaller {
+				r.materializeFunctionProp(o, key)
+			}
 			if !fd.propsMaterialized {
 				switch key {
 				case atomLength:
@@ -164,9 +167,8 @@ func (r *Runtime) getExoticNamed(o *Object, key Atom) (Value, bool, error) {
 	return Undefined, false, nil
 }
 
-// materializeFunctionProp creates a function's name or length as a real own
-// property, so that anything looking at the property table rather than reading
-// through getProp finds it.
+// materializeFunctionProp creates a function's synthesized named properties
+// as real own properties, so that a property table query sees what getProp does.
 //
 // They are synthesized on demand rather than created with every function -- a
 // program makes far more functions than it inspects -- but a descriptor query,
@@ -179,7 +181,7 @@ func (r *Runtime) materializeFunctionProp(o *Object, key Atom) {
 		r.materializeFunctionProto(o)
 		return
 	}
-	if key != atomName && key != atomLength {
+	if key != atomName && key != atomLength && key != atomCaller {
 		return
 	}
 	fd := o.fn()
@@ -209,6 +211,17 @@ func (r *Runtime) materializeFunctionProp(o *Object, key Atom) {
 		n++
 	}
 	o.prependProps(head[:n])
+	if !r.nodeQuirks && isLegacyFunc(fd) && !o.getOwn(atomCaller).ok() {
+		// The extension follows the function's standard own properties,
+		// whichever property was first inspected.
+		r.materializeFunctionProto(o)
+		at := 0
+		for at < int(o.valn) && (o.shape.keys[at].key == atomLength ||
+			o.shape.keys[at].key == atomName || o.shape.keys[at].key == atomPrototype) {
+			at++
+		}
+		o.insertProp(at, r.legacyCallerProperty(o))
+	}
 }
 
 // toNumericForElement coerces a value as writing it to a typed array would,
@@ -414,6 +427,9 @@ func (r *Runtime) setProp(obj *Object, key Atom, val Value, receiver Value, stri
 		// object synthesizes nothing, which is the common case and worth not
 		// asking about.
 		if o.class == ClassFunction {
+			if key == atomCaller {
+				r.materializeFunctionProp(o, key)
+			}
 			if key == atomName || key == atomLength {
 				if fd := o.fn(); fd != nil && !fd.propsMaterialized {
 					return false, r.assignFailed(key, strict,
@@ -816,6 +832,9 @@ func hasOwnGlobal(env *Object, site *propCache, name Atom) bool {
 
 // hasOwnProp reports whether the object itself has the property.
 func (r *Runtime) hasOwnProp(o *Object, key Atom) bool {
+	if key == atomCaller {
+		r.materializeFunctionProp(o, key)
+	}
 	if o.class == ClassTypedArray {
 		// A numeric key is present exactly while it names an element, never in
 		// the property table.

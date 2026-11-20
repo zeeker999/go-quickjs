@@ -8,9 +8,10 @@ import "github.com/go-quickjs/go-quickjs/internal/bytecode"
 // with what, which the web's older libraries depend on: f.caller and
 // f.arguments. V8, SpiderMonkey and JavaScriptCore agree on the answers, and
 // keep them in accessors on Function.prototype. The standard has no such
-// thing: Function.prototype's caller and arguments are its %ThrowTypeError%,
-// which test262 checks, so standards mode keeps that, and only a runtime
-// WithNodeQuirks answers, as V8 does.
+// thing on Function.prototype: its caller and arguments are %ThrowTypeError%.
+// Standards mode supplies the permitted caller extension as an own accessor
+// on sloppy ordinary functions. WithNodeQuirks supplies both properties on
+// Function.prototype.
 
 // errLegacyReflection is V8's message for a function that has neither.
 const errLegacyReflection = "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them"
@@ -76,6 +77,28 @@ func (r *Runtime) initLegacyReflection() {
 		})
 		r.defineAccessor(p, prop.key, get, set, propConfigurable)
 	}
+}
+
+// legacyCallerProperty is the own caller accessor of a sloppy ordinary
+// function. Its getter belongs to the function's realm, even when another
+// realm first inspects the function. The prototype keeps %ThrowTypeError%.
+func (r *Runtime) legacyCallerProperty(o *Object) Property {
+	here := r.Realm
+	r.Realm = o.fn().closure.realm
+	get := r.newNativeFunc("get caller", 0, func(rt *Runtime, this Value, _ []Value) (Value, error) {
+		fn, err := rt.legacyFunc(this)
+		if err != nil {
+			return Undefined, err
+		}
+		return rt.legacyCaller(fn), nil
+	})
+	set := r.newNativeFunc("set caller", 1, func(rt *Runtime, this Value, _ []Value) (Value, error) {
+		_, err := rt.legacyFunc(this)
+		return Undefined, err
+	})
+	r.Realm = here
+	return Property{key: atomCaller, value: accessorValue(&accessor{getter: get, setter: set}),
+		flags: propAccessor | propConfigurable}
 }
 
 // activationOf is the depth of a function's innermost activation on the

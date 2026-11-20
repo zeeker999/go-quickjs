@@ -682,11 +682,9 @@ func (r *Runtime) ownPropDesc(o *Object, key Atom) (*propDesc, error) {
 				return nil, err
 			}
 		}
-		// A function's prototype is made when first asked for, and this is
-		// asking.
-		if key == atomPrototype {
-			r.materializeFunctionProto(o)
-		}
+		// A function's synthesized properties must exist in its table
+		// before a descriptor is read, including through a proxy.
+		r.materializeFunctionProp(o, key)
 		return r.currentDescriptor(o, key)
 	}
 	v, err := r.proxyGetOwnPropertyDescriptor(pp, key)
@@ -1105,6 +1103,9 @@ func (r *Runtime) ownKeysOf(o *Object, includeSymbols bool) ([]Atom, error) {
 			if err := r.touchDeferredKeys(o); err != nil {
 				return nil, err
 			}
+		}
+		if !r.nodeQuirks && isLegacyFunc(o.fn()) {
+			r.materializeFunctionProp(o, atomCaller)
 		}
 		r.materializeFunctionProto(o)
 		return o.ownKeys(includeSymbols, r.atoms), nil
