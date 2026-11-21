@@ -530,12 +530,10 @@ code learned (`jitLearned`), beside its budget, deoptimizations and runs
   pc, `jitRegLower`): the read made by its cell (ir's `Reference`), the
   addition Go's (`StringAdd`), the additions of an element read of strings
   too (`stringConcats`). An addition the compiler marked an append to an
-  upvalue (`add`'s `RAddAppend`), or a local's `append`, is Go's with its
-  result its own (`Owned`, `abi.GoOpOwned`): Go grows the string the
-  binding alone holds in place (`jitStrAppend`), as the interpreter's `add`
-  and `append` do, rather than making a new string at each `s += x` -- in a
-  loop too, where such an addition is no loop builder's (ssa's
-  `stringBuilders`, which take the additions the compiler did not mark).
+  upvalue (`add`'s `RAddAppend`) is Go's with its result its own (`Owned`,
+  `abi.GoOpOwned`): Go grows the string the binding alone holds in place
+  (`jitStrAppend`), as the interpreter's `add` does, rather than making a
+  new string at each `s += x`.
 
 A guard's failure invalidates the code; anything else learned marks it to
 be compiled again, valid meanwhile, without a deoptimization (see

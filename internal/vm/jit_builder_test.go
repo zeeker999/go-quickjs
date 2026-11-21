@@ -229,10 +229,8 @@ func TestJITStringBuilderAnswers(t *testing.T) {
 }
 
 // A string built a character at a time is made once, not once for each
-// character: each character past its first few, which a short string's
-// copies and ropes take (strAppend), is appended in place, to a buffer
-// that grows by more than it needs -- the compiler's marked addition, as
-// the interpreter appends.
+// character: each character after the first is appended in place, to a
+// buffer that doubles as it grows.
 func TestJITStringBuilderAppendsInPlace(t *testing.T) {
 	t.Parallel()
 	if !jitSSABackend {
@@ -262,7 +260,7 @@ func TestJITStringBuilderAppendsInPlace(t *testing.T) {
 	}
 	// The count, not the bytes allocated: under checkptr every call of Go
 	// native code makes allocates, its pointers' conversions escaping.
-	if n := r.jit.appended - appended; n < 20*(10000-ropeThreshold-strAppendRopes) {
+	if n := r.jit.appended - appended; n < 20*(10000-1) {
 		t.Errorf("20 strings of 10,000 characters had %d appends in place", n)
 	}
 }

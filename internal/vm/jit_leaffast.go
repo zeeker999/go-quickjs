@@ -357,10 +357,6 @@ func jitStrAppend[_ any](r *Runtime, ctx *abi.Context, a, b Value) bool {
 	if err != nil {
 		return false
 	}
-	if v == s {
-		// Grown in place.
-		r.jit.appended++
-	}
 	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = Str(v)
 	return true
 }
