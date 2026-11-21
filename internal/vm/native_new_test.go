@@ -115,7 +115,33 @@ func TestRegNativeInstanceOf(t *testing.T) {
 		"if (!(v instanceof c)) return false; return true",
 	} {
 		nativeCheck(t, strings.ReplaceAll(nativeInstanceOfSrc, "return v instanceof c", body), "")
+		global := strings.ReplaceAll(nativeInstanceOfSrc, "function at(v, c) { try", "function at(v, c) { currentCtor = c; try")
+		global = "var currentCtor;\n" + strings.ReplaceAll(global, "return v instanceof c", strings.ReplaceAll(body, "instanceof c", "instanceof currentCtor"))
+		nativeCheck(t, global, "")
 	}
+	nativeCheck(t, `
+		var out = [], reads = 0, values = 0
+		function A() {} function B() {}
+		Object.defineProperty(globalThis, 'Ctor', { value: A, writable: true, configurable: true })
+		var a = new A(), b = new B()
+		function site(v) { try { if (v instanceof Ctor) return true; return false } catch (e) { return e.name } }
+		function run(v) { var r; for (var i = 0; i < 100; i++) r = site(v); out.push(r) }
+		run(a); run(b); Ctor = B; run(b); run(a)
+		B.prototype = 3; run(b); run(1); B.prototype = A.prototype; run(a)
+		Ctor = A.bind(null); run(a)
+		Ctor = new Proxy(A, {}); run(a)
+		Ctor = { [Symbol.hasInstance](v) { return v === 7 } }; run(7); run(a)
+		Ctor = 3; run(a)
+		Object.defineProperty(globalThis, 'Ctor', { configurable: true, get() { reads++; if (reads % 2) return A; throw new RangeError('ctor') } })
+		run(a); out.push(reads)
+		function value() { values++; return a }
+		for (var i = 0; i < 100; i++) { try { if (value() instanceof Ctor) values++ } catch (e) {} }
+		out.push(reads, values)
+		delete globalThis.Ctor
+		run(a)
+		function late() { try { if (a instanceof Later) return true; return false } catch (e) { return e.name } }
+		out.push(late()); let Later = A; out.push(late())
+		out.join()`, "")
 	nativeCheck(t, `
 		function F() {} var o = new F(), n = 0
 		do { if (++n == 20000) o = {} } while (o instanceof F)
@@ -125,7 +151,7 @@ func TestRegNativeInstanceOf(t *testing.T) {
 		function F() {}
 		var o = new L(), f = new F(), s = 0
 		for (var i = 0; i < 1000; i++) if (o instanceof K && !(f instanceof K) && f instanceof F && !(i instanceof F)) s++
-		String(s)`, bytecode.RInstanceOfNext)
+		String(s)`, bytecode.RGetGlobalInstanceOf, bytecode.RInstanceOfNext)
 }
 
 // instanceOfBranchSrc is instanceof consumed by a branch alone
@@ -264,6 +290,14 @@ func TestRegNativeInstanceOfBranch(t *testing.T) {
 		t.Errorf("Go table:\n%s\nwant\n%s", got, instanceOfBranchWant)
 	}
 	nativeCheck(t, instanceOfBranchSrc, "")
+	global := "var globalCtor;\n" + strings.ReplaceAll(instanceOfBranchSrc, "instanceof C", "instanceof globalCtor")
+	for _, signature := range []string{"br(v, C)", "nbr(v, C)", "loop(v, C)", "msg(v, C)"} {
+		global = strings.ReplaceAll(global, "function "+signature+" {", "function "+signature+" { globalCtor = C;")
+	}
+	if got := nativeRunSrc(t, global, false); got != instanceOfBranchWant {
+		t.Errorf("global Go table:\n%s\nwant\n%s", got, instanceOfBranchWant)
+	}
+	nativeCheck(t, global, "")
 }
 
 // TestRegNativeInstanceOfRealms branches on instanceof between two realms'
