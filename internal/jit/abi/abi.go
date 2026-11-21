@@ -8,7 +8,6 @@ package abi
 import (
 	"math"
 	"unsafe"
-	"weak"
 )
 
 // SpillSlots is how many spill slots a context holds in itself
@@ -1196,12 +1195,6 @@ type ObjectPool struct {
 // IterReleased is the offset of a cursor's released byte from its
 // iteration state's done byte: the next (Encoding's IterDone).
 const IterReleased = 1
-
-// Weak is a weak pointer to p, which a list of pools keeps (the VM's
-// arrayRooms) without keeping the pools or their code. It is made here,
-// not where the list is, so that its instantiation is laid out with this
-// package's code rather than among the VM's generic functions.
-func (p *ObjectPool) Weak() weak.Pointer[ObjectPool] { return weak.Make(p) }
 
 // PoolSize is how many objects an ObjectPool is filled with at first, and
 // PoolCapacity how many it may hold. A pool that runs out has native code

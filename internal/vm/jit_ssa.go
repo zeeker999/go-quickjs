@@ -1202,7 +1202,7 @@ func jitLiteralArraySource(r *Runtime, cl *closure, pool *abi.ObjectPool, pc, n 
 		if a != nil && a.pc == int32(pc) && a.confirmed >= arrayRoomLeast && a.confirmed <= arrayRoomLimit {
 			s.room = int(a.confirmed)
 			if r.jit != nil && pool != nil {
-				r.jit.arrayRooms = append(r.jit.arrayRooms, pool.Weak())
+				r.jit.arrayRooms = append(r.jit.arrayRooms, jit.WeakPool(pool))
 			}
 			break
 		}
