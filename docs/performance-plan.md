@@ -245,6 +245,19 @@ the program's own objects, which only allocating less removes.
   rounds of the full V8 suite give -0.2% total time on arm64 and -0.7%
   on Windows; six Windows closure micro-benchmarks have a geometric
   ratio of 1.001, with none 3% slower at both placements.
+  The arm64 micro-benchmark audit leaves `closure_many_locals` unresolved:
+  an isolated repeat is 5.9% slower at both placements. The other plain
+  and JIT findings do not repeat at both. Restoring the native handlers'
+  addresses alone, or the one-capture object's old allocation size, does
+  not fully remove this gap; neither establishes its cause.
+  Fresh closure objects and function data now initialize only the fields
+  that differ from the allocator's zero values, omitting repeated header
+  clears and their marking barriers. Against shared realms alone, Earley
+  is 1.2% faster on arm64 (seven rounds) and 1.9% on Windows amd64
+  (seven rounds on fixed CPU groups), both at two placements. The six
+  closure micro-benchmarks improve 2.0% and 4.9% geometrically, respectively;
+  no case is 3% slower at both placements. Allocation sizes and counts
+  are unchanged. This does not yet clear the earlier arm64 finding.
   Node 26.8.1 jitless materializes this object too: the exact `sc_list`
   body starts with `CreateMappedArguments`, followed by a register move
   for `a = arguments`, `GetNamedProperty` for its length and
