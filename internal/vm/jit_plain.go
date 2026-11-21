@@ -277,15 +277,19 @@ func (r *Runtime) jitForOfPlain(ctx *abi.Context) bool {
 	if o.class != ClassArray || o.flags&objHasSparseElements != 0 || !r.usesIntrinsicArrayIterator(o) {
 		return false
 	}
-	// The interpreter's cursor (startForOf's arrCursor): the last one,
-	// where its loop or pattern closed it, natively too (mir's
-	// iterClosed). Of such an array, startForOf runs nothing and throws
-	// nothing.
-	c, err := r.startForOf(v)
-	if err != nil {
-		return false
+	// The interpreter's cursor (arrCursor's): the last one, where its loop
+	// or pattern closed it, natively too (mir's iterClosed). It is made
+	// here, not by arrCursor, whose instantiation called from here moved
+	// the VM's generic functions, which the layout lock does not hold.
+	keep := (*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep]))
+	if io := r.ofLast; io != nil && io.st.released {
+		io.st = iterState{arr: o}
+		*keep = Obj(&io.Object)
+		return true
 	}
-	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = c
+	io := &iterObject{Object: Object{class: ClassCursor}, st: iterState{arr: o}}
+	r.ofLast = io
+	*keep = Obj(&io.Object)
 	return true
 }
 
