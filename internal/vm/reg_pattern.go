@@ -26,6 +26,12 @@ func (r *Runtime) regIterStep(f *frame, c *regCode, pc int, w bytecode.RInstr, r
 // regIterRest is iter_rest: what is left of an array by the intrinsic
 // iterator, all of it in its dense storage, copied at once (iterRestDense).
 func (r *Runtime) regIterRest(f *frame, c *regCode, pc int, w bytecode.RInstr, regs *[1 << 16]Value) error {
+	if st := cursorOf(regs[w.B()]); st != nil {
+		if v, ok := r.iterRestDense(st); ok {
+			regs[w.A()] = v
+			return nil
+		}
+	}
 	v, err := r.iterRest(regs[w.B()])
 	if err != nil {
 		return err
