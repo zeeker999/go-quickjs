@@ -6,29 +6,6 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 )
 
-// jitLiteralArraySource is a pool's source for the empty array literal at
-// register pc pc of cl's code, with the capacity the interpreter's site
-// confirmed at a turn's end before the literal reached native code
-// (arrayRoom's confirmed). Only that: a hint taken within a turn may be
-// an array a callback is still growing, and left several callbacks 7 to
-// 18% slower (docs/performance-plan.md, F3). The pc, unlike the site's
-// ordinal, also names a literal in an inlined callee. The pool is kept
-// weakly, so that this list keeps neither it nor code that has been thrown
-// away.
-func jitLiteralArraySource(r *Runtime, cl *closure, pool *abi.ObjectPool, pc, n int) *jitPoolSource {
-	s := &jitPoolSource{array: true, n: n}
-	for _, a := range cl.arraySites() {
-		if a != nil && a.pc == int32(pc) && a.confirmed >= arrayRoomLeast && a.confirmed <= arrayRoomLimit {
-			s.room = int(a.confirmed)
-			if r.jit != nil && pool != nil {
-				r.jit.arrayRooms = append(r.jit.arrayRooms, pool.Weak())
-			}
-			break
-		}
-	}
-	return s
-}
-
 // jitLiteralArrayRoom is the capacity pool's next arrays are made with, the
 // literal's n elements at least. A pool with a large hint holds one array: a
 // batch would retain unused buffers and delay observing a changed length.
