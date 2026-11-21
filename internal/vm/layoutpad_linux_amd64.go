@@ -23,13 +23,13 @@ const (
 	layoutPadNJP  = 13
 	layoutPadNGJP = -1
 	layoutPadNMJP = -1
-	layoutPadNC   = 415
+	layoutPadNC   = 356
 	layoutPadNGC  = -1
 	layoutPadNMC  = -1
 	layoutPadND   = 242
 	layoutPadNGD  = -1
 	layoutPadNMD  = -1
-	layoutPadNF   = 525
+	layoutPadNF   = 507
 	layoutPadNGF  = -1
 	layoutPadNMF  = -1
 	layoutPadNL   = 109
@@ -56,7 +56,7 @@ const (
 	layoutPadNU   = 571
 	layoutPadNGU  = -1
 	layoutPadNMU  = -1
-	layoutPadNY   = 530
+	layoutPadNY   = 516
 	layoutPadNGY  = -1
 	layoutPadNMY  = -1
 	layoutPadNV   = 8

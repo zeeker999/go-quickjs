@@ -28,6 +28,7 @@ func (r *Runtime) prepareIn(fn *bytecode.Function, env *Object) *closure {
 		r.debugLoad(fn)
 	}
 	cl := &closure{fn: fn, closureCode: &closureCode{realm: r.Realm, env: env}}
+	cl.captureObject = captureObjectFor(fn)
 
 	cl.names = make([]Atom, len(fn.Names))
 	for i, n := range fn.Names {

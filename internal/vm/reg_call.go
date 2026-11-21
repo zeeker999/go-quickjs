@@ -650,9 +650,20 @@ func (r *Runtime) regClosure(f *frame, c *regCode, w bytecode.RInstr, wb int) *O
 	// Fill the closure's capture list directly from the register mapping.
 	// Only bindings first opened here need cells of their own.
 	ups := t.fn.Upvalues
-	o, fd, child, captured, extra := newScriptFuncObject(
-		r.funcProtoFor(t.fn), ClassFunction, len(ups), t.fn.Kind == bytecode.KindArrow)
+	var o *Object
+	var fd *funcData
+	var child *closure
+	var captured []*upvalue
+	var extra *funcExtra
 	var room []upvalue
+	proto := r.funcProtoFor(t.fn)
+	if t.captureObject != 0 && len(f.openUpvalues) == 0 {
+		var fo *scriptFuncObject
+		fo, captured, room = newCapturedFuncObject(proto, len(ups), t.captureObject)
+		o, fd, child = &fo.Object, &fo.fn, &fo.cl
+	} else {
+		o, fd, child, captured, extra = newScriptFuncObject(proto, ClassFunction, len(ups), t.fn.Kind == bytecode.KindArrow)
+	}
 	for i, u := range ups {
 		if !u.FromParent {
 			captured[i] = f.cl.upvalues[u.Index]

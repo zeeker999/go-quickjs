@@ -21,6 +21,8 @@ func TestCaptureRoom(t *testing.T) {
 		{name: "loop lets", src: `function f() { var fs = []; for (let i = 0; i < 3; i++) { let j = i * 10, k = i * 100; fs.push(function () { return i + j + k }) } return fs.map(function (g) { return g() }).join() } f()`, want: "0,111,222"},
 		{name: "duplicate", src: `function f(a) { var b = a; function g() { return a + b + (function () { return a * b })() } return g() } f(3)`, want: "15"},
 		{name: "many mixed", src: `function outer(z) { return function mk(a,b,c,d,e,f,g,h,i,j,k,l,m,n) { var get = function () { return z+a+b+c+d+e+f+g+h+i+j+k+l+m+n }; var set = function (v) { z = v; a++; n++ }; return [get, set] } } var mk = outer(100), p = mk(1,2,3,4,5,6,7,8,9,10,11,12,13,14), q = mk(10,20,30,40,50,60,70,80,90,100,110,120,130,140); p[1](200); [p[0](), q[0](), p[1] === q[1]].join()`, want: "307,1250,false"},
+		{name: "object cells small", src: `function outer(x,y) { return function mk() { var a=1,b=2,c=3; var get=function () { return x+y+a+b+c }; var set=function (v) { a=v; b++; c++ }; return [get,set] } } var mk=outer(10,20), p=mk(), q=mk(); p[1](100); [p[0](),q[0]()].join()`, want: "137,36"},
+		{name: "object cells large", src: `function outer(x0,x1,x2,x3,x4,x5,x6,x7,x8,x9,x10) { return function mk() { var a=1,b=2,c=3,d=4; var get=function () { return x0+x1+x2+x3+x4+x5+x6+x7+x8+x9+x10+a+b+c+d }; var set=function (v) { a=v; b++; c++; d++ }; return [get,set] } } var mk=outer(1,2,3,4,5,6,7,8,9,10,11), p=mk(), q=mk(); p[1](100); [p[0](),q[0]()].join()`, want: "178,76"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			r := newTestRuntime(t, Config{})
@@ -54,14 +56,16 @@ func TestCaptureRoom(t *testing.T) {
 }
 
 // TestCaptureRoomAllocs pins a closure's function object and capture list
-// sharing an allocation, with one more for the bindings first opened here.
+// sharing an allocation, with its newly opened cells in that allocation
+// where they fit the same size classes, otherwise in one batch of their own.
 func TestCaptureRoomAllocs(t *testing.T) {
 	skipUnlessAllocsOrdinary(t)
 	for _, tt := range []struct {
-		n    int
-		want float64
-	}{{3, 2}, {5, 2}, {6, 2}, {9, 2}, {10, 2}, {13, 2}, {14, 2}, {17, 2}, {18, 2}, {19, 2}, {20, 3}} {
-		t.Run(fmt.Sprint(tt.n), func(t *testing.T) {
+		n, own int
+		want   float64
+	}{{3, 0, 2}, {5, 0, 2}, {6, 0, 2}, {9, 0, 2}, {10, 0, 2}, {13, 0, 2}, {14, 0, 2}, {17, 0, 2}, {18, 0, 2}, {19, 0, 2}, {20, 0, 3},
+		{4, 3, 1}, {5, 3, 1}, {6, 3, 1}, {12, 4, 1}, {13, 4, 1}, {14, 4, 1}, {15, 4, 1}} {
+		t.Run(fmt.Sprintf("%d/%d", tt.n, tt.own), func(t *testing.T) {
 			r := newTestRuntime(t, Config{})
 			defer r.Close()
 			names, args := make([]string, tt.n), make([]Value, tt.n)
@@ -69,6 +73,20 @@ func TestCaptureRoomAllocs(t *testing.T) {
 				names[i], args[i] = fmt.Sprintf("a%d", i), Int(i+1)
 			}
 			src := `function f(` + strings.Join(names, ",") + `) { return function () { return ` + strings.Join(names, "+") + ` } } f`
+			if tt.own != 0 {
+				outer := tt.n - tt.own
+				params, locals := make([]string, tt.own), make([]string, tt.own)
+				for i := range params {
+					params[i] = fmt.Sprintf("p%d", i)
+					locals[i] = names[outer+i] + "=" + params[i]
+				}
+				values := make([]string, outer)
+				for i := range values {
+					values[i] = fmt.Sprint(i + 1)
+				}
+				src = `function outer(` + strings.Join(names[:outer], ",") + `) { return function f(` + strings.Join(params, ",") + `) { var ` + strings.Join(locals, ",") + `; return function () { return ` + strings.Join(names, "+") + ` } } } outer(` + strings.Join(values, ",") + `)`
+				args = args[outer:]
+			}
 			v, err := r.Run(compileForTest(t, src))
 			if err != nil {
 				t.Fatal(err)

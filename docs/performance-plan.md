@@ -274,6 +274,20 @@ the program's own objects, which only allocating less removes.
   against 1.064 ms and Boyer 19.768 ms against 20.903 ms. The remaining
   gap is Earley's; its current allocation profile attributes 74% of
   allocated bytes to closures and their captured cells.
+  Combining the function object and its newly opened capture cells removes
+  another 2,882 allocations per Earley run, 17.0%, with the same allocated
+  bytes (2026-11-21, Go 1.27.3). Two combinations fit the existing size
+  classes: four to six captures with three local cells occupy 320 bytes,
+  twelve to fifteen with four occupy 416. The template chooses once,
+  using existing padding; the path applies only with no cells already open
+  on the maker's frame, and shares the ordinary cell-filling and closing
+  code. Shared cells can keep the function object alive. In the Earley
+  sample, live heap after collection remains 10.5 MB and peak heap does
+  not increase. Seven rounds at two placements give 2.7% faster on arm64
+  and 7.2% on Windows amd64; the Windows same-binary control differs by
+  0.2%. Single-thread arm64 improves 2.1%. An initial version that counted
+  the cells at each allocation gained only 0.4% on arm64 and was level
+  single-threaded.
   Node 26.8.1 jitless materializes this object too: the exact `sc_list`
   body starts with `CreateMappedArguments`, followed by a register move
   for `a = arguments`, `GetNamedProperty` for its length and

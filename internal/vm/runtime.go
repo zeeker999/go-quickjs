@@ -851,7 +851,10 @@ type closureCode struct {
 	// enters, and a crossing from ordinary code (regCallCross). reg stays
 	// the ordinary code, which every other entry runs.
 	regTyped *regCode
-	_        [8]byte
+	// captureObject selects a function-and-cells allocation where this
+	// template opens every local it captures for the first time.
+	captureObject uint8
+	_             [7]byte
 	// reg is the template's register code, once a call has found it has
 	// some, for the register interpreter's calls (see reg_call.go).
 	reg *regCode

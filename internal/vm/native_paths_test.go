@@ -778,6 +778,13 @@ const nativeClosuresSrc = `
 	out.push(cb())
 	function setter() { var v = 1; var get = function () { return v }; var a = get(); v = "s"; return a + get() }
 	out.push(setter())
+	function objectCells(x,y) { return function (v) { var a={v:v},b={v:v+1},c={v:v+2}; var get=function () { return x+y+a.v+b.v+c.v }; var set=function (n) { a={v:n}; b.v++; c.v++ }; return [get,set] } }
+	function manyObjectCells(x0,x1,x2,x3,x4,x5,x6,x7,x8,x9,x10) { return function (v) { var a={v:v},b={v:v+1},c={v:v+2},d={v:v+3}; var get=function () { return x0+x1+x2+x3+x4+x5+x6+x7+x8+x9+x10+a.v+b.v+c.v+d.v }; var set=function (n) { a={v:n}; b.v++; c.v++; d.v++ }; return [get,set] } }
+	var makers=[objectCells(10,20),manyObjectCells(1,2,3,4,5,6,7,8,9,10,11)], kept=[]
+	for (var i=0;i<200;i++) kept.push(makers[i&1](i))
+	var sum=0
+	for (var i=0;i<kept.length;i++) { kept[i][1](i*2); sum+=kept[i][0]() }
+	out.push(sum)
 	out.join("\n")`
 
 // TestRegNativeClosures runs nativeClosuresSrc natively and by the Go
