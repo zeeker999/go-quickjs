@@ -1047,3 +1047,12 @@ Measured and dropped; each needs a new angle before it is tried again.
   +0.1%. Sharing the capture-list pointer across both reads, reloading it
   after the marking barrier, measured +0.7%, slower at both placements.
   Both versions were removed.
+- **Entry initialization omitted for locals assigned before capture**
+  (2026-11-21, Go 1.27.3, JIT off, two placements against `6bc6d022`):
+  treating closure captures as reads in the existing definite-assignment
+  pass removed four of five entry stores in Earley's `loop2`, three of
+  four in `sc_loop1_98`. Earley alone measured +0.2% on M5 Max arm64
+  over five rounds; six closure micro-benchmarks had a geometric ratio
+  of 1.004. Windows i9-9900K measured +6.4% over seven rounds, but its
+  same-binary control differed by 5.1%, so it cannot resolve a small
+  change. The compiler experiment was removed for lack of a measured gain.
