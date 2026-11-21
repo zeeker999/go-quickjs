@@ -3083,11 +3083,16 @@ func (c *core) frameSize() int {
 
 // callsAgain reports a call that may read its operands, and its state's
 // values, after Go has had the registers: a call of Go, which Go may
-// refuse, the call exiting after it; or a call whose pool Go fills, made
-// again from its start (ssa.RefillsPools). What it reads lives across it,
-// saved and restored (allocate's saves).
+// refuse, the call exiting after it; a push of several values, whose
+// growth is push's leaf, which may refuse it too (pushGrow); or a call
+// whose pool Go fills, made again from its start (ssa.RefillsPools). What
+// it reads lives across it, saved and restored (allocate's saves).
 func callsAgain(v *ssa.Value) bool {
-	return v.Op == ssa.OpCall && len(v.Calls()) != 0 && (v.Calls()[0].Go != 0 || ssa.RefillsPools(v))
+	if v.Op != ssa.OpCall || len(v.Calls()) == 0 {
+		return false
+	}
+	c := v.Calls()[0]
+	return c.Go != 0 || c.Push && c.Argc > 1 || ssa.RefillsPools(v)
 }
 
 // savingCall reports a call that saves the registers live across it, and
