@@ -258,6 +258,22 @@ the program's own objects, which only allocating less removes.
   closure micro-benchmarks improve 2.0% and 4.9% geometrically, respectively;
   no case is 3% slower at both placements. Allocation sizes and counts
   are unchanged. This does not yet clear the earlier arm64 finding.
+  The full V8 suite's total time is 0.3% lower on arm64 and 0.9% lower on
+  Windows; the 418 plain micro-benchmarks' geometric ratio is 1.001 and
+  the JIT's 1.000. The arm64 plain audit found `string_switch_mixed`
+  11.6% and `typed_u8c_write` 12.1% slower at both placements. A pad-only
+  experiment restores the native handlers to their parent's offsets,
+  adding 192 and 64 unused bytes before them: both cases return level
+  against the parent over seven rounds. Against the unpadded change,
+  the restored build is 7.8% faster on the switch and 2.4% faster on the
+  stores, both placements; the earlier 12.1% store gap does not repeat.
+  No handler instruction changes in this experiment. arm64 has no layout
+  lock, and the diagnostic pads are not part of the change.
+  Three new score rounds, both arm64 placements, average 11,814 against
+  Node 26.8.1 jitless's 14,138, a 16.4% gap. Earley takes 1.610 ms
+  against 1.064 ms and Boyer 19.768 ms against 20.903 ms. The remaining
+  gap is Earley's; its current allocation profile attributes 74% of
+  allocated bytes to closures and their captured cells.
   Node 26.8.1 jitless materializes this object too: the exact `sc_list`
   body starts with `CreateMappedArguments`, followed by a register move
   for `a = arguments`, `GetNamedProperty` for its length and
@@ -1081,3 +1097,11 @@ Measured and dropped; each needs a new angle before it is tried again.
   of 1.004. Windows i9-9900K measured +6.4% over seven rounds, but its
   same-binary control differed by 5.1%, so it cannot resolve a small
   change. The compiler experiment was removed for lack of a measured gain.
+- **Immutable capture counts classified once per template** (2026-11-21,
+  Go 1.27.3, JIT off, Earley alone, seven rounds at two placements against
+  `c4c36962`): a byte in the shared template's padding replaced the
+  descriptor scan at each closure's allocation. Earley improved only 0.4%
+  on M5 Max arm64 and 0.5% on Windows i9-9900K, concentrated at one
+  placement. Six Windows closure micro-benchmarks had a geometric ratio
+  of 0.987, none 3% slower at both placements. The trial was removed
+  because its target gain did not justify another representation flag.
