@@ -3,8 +3,6 @@
 package vm
 
 import (
-	"weak"
-
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 )
 
@@ -17,13 +15,13 @@ import (
 // ordinal, also names a literal in an inlined callee. The pool is kept
 // weakly, so that this list keeps neither it nor code that has been thrown
 // away.
-func jitLiteralArraySource[_ any](r *Runtime, cl *closure, pool *abi.ObjectPool, pc, n int) *jitPoolSource {
+func jitLiteralArraySource(r *Runtime, cl *closure, pool *abi.ObjectPool, pc, n int) *jitPoolSource {
 	s := &jitPoolSource{array: true, n: n}
 	for _, a := range cl.arraySites() {
 		if a != nil && a.acrossTurns && a.pc == int32(pc) && a.room >= arrayRoomLeast && a.room <= arrayRoomLimit {
 			s.room = a.room
 			if r.jit != nil && pool != nil {
-				r.jit.arrayRooms = append(r.jit.arrayRooms, weak.Make(pool))
+				r.jit.arrayRooms = append(r.jit.arrayRooms, pool.Weak())
 			}
 			break
 		}

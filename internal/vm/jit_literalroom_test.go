@@ -37,11 +37,11 @@ func TestJITLiteralArrayRoom(t *testing.T) {
 	}
 	cl := &closure{closureCode: &closureCode{arrays: &sites}}
 	for _, pc := range []int{5, 11, 13} {
-		if s := jitLiteralArraySource[struct{}](r, cl, nil, pc, 0); s.room != 0 {
+		if s := jitLiteralArraySource(r, cl, nil, pc, 0); s.room != 0 {
 			t.Fatalf("literal at %d inherited unrelated or oversized room %d", pc, s.room)
 		}
 	}
-	src := jitLiteralArraySource[struct{}](r, cl, nil, 7, 0)
+	src := jitLiteralArraySource(r, cl, nil, 7, 0)
 	pool := &abi.ObjectPool{Source: unsafe.Pointer(src)}
 	r.jitFillLiteral(&jitLiteral{array: true, pool: pool})
 	if pool.Count != 1 || cap(src.sample.elemsOf()) != 4096 {
