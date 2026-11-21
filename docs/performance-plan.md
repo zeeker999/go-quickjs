@@ -1034,3 +1034,10 @@ Measured and dropped; each needs a new angle before it is tried again.
     +0.8% on Windows. An arm64 follow-up also reused the restored
     window register for the result store; five rounds gave RayTrace
     +1.0%, EarleyBoyer +1.2%, Splay +0.3%.
+- **Fixed-size allocations for capture batches of up to 16 cells**
+  (2026-11-21, Go 1.27.3, JIT off, five rounds at two placements,
+  against `6bc6d022`): fixed arrays used Go's direct object allocation
+  paths with the same bytes and allocation count, but Earley improved
+  only 0.6% on arm64, at one placement alone. Windows amd64 gave +0.4%;
+  its same-binary control differed by 6.3%, so that result is inconclusive.
+  The allocation helper was removed.
