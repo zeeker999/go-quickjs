@@ -1185,31 +1185,6 @@ func (r *Runtime) jitObjectLiteral(e *jitEntry, cl *closure, pc int, site uint32
 	return l
 }
 
-// jitLiteralArraySource is a pool's source for the empty array literal at
-// register pc pc of cl's code, with the capacity the interpreter's site
-// confirmed at a turn's end before the literal reached native code
-// (arrayRoom's confirmed). Only that: a hint taken within a turn may be
-// an array a callback is still growing, and left several callbacks 7 to
-// 18% slower (docs/performance-plan.md, F3). The pc, unlike the site's
-// ordinal, also names a literal in an inlined callee. The pool is kept
-// weakly, so that this list keeps neither it nor code that has been thrown
-// away. It is laid out here, past the layout lock's anchor J, rather
-// than with the literals' room in jit_arrayroom.go, among the code before
-// it that it would move.
-func jitLiteralArraySource(r *Runtime, cl *closure, pool *abi.ObjectPool, pc, n int) *jitPoolSource {
-	s := &jitPoolSource{array: true, n: n}
-	for _, a := range cl.arraySites() {
-		if a != nil && a.pc == int32(pc) && a.confirmed >= arrayRoomLeast && a.confirmed <= arrayRoomLimit {
-			s.room = int(a.confirmed)
-			if r.jit != nil && pool != nil {
-				r.jit.arrayRooms = append(r.jit.arrayRooms, jit.WeakPool(pool))
-			}
-			break
-		}
-	}
-	return s
-}
-
 // jitArrayLiteral is the array literal at pc of cl's code, of either form,
 // of n elements, made in e: native code makes its arrays from a pool of
 // arrays with room for them, none yet.
