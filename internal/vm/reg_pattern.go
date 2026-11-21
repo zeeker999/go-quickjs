@@ -1,6 +1,8 @@
 package vm
 
 import (
+	"slices"
+
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
 
@@ -30,6 +32,27 @@ func (r *Runtime) regIterRest(f *frame, c *regCode, pc int, w bytecode.RInstr, r
 	}
 	regs[w.A()] = v
 	return nil
+}
+
+// iterRestDense is iterRest of st, a cursor over an array by the intrinsic
+// iterator, where what is left of the array is all in its dense storage:
+// copied at once, as each step would read an element there, running
+// nothing, and the walk ends at its length, done, as iterRest's steps leave
+// it. It reports whether it made the rest; any other cursor's steps it
+// leaves to iterRest, which may run script and throw. The interpreter's
+// iter_rest and native code's (jitRestPlain) make it so.
+func (r *Runtime) iterRestDense(st *iterState) (Value, bool) {
+	if st.done || st.arr == nil || st.arr.flags&objHasSparseElements != 0 {
+		return Undefined, false
+	}
+	el := st.arr.elemsOf()
+	n := len(el)
+	if int64(n) != int64(st.arr.arrayLength()) || st.idx > n || slices.ContainsFunc(el[st.idx:], isHole) {
+		return Undefined, false
+	}
+	v := Obj(r.newArrayFrom(el[st.idx:]))
+	st.idx, st.done = n, true
+	return v, true
 }
 
 // regCheckCoercible is check_coercible.

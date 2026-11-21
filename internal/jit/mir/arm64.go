@@ -3991,9 +3991,14 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 	// As amd64's: a forwarding call's miss past its functions, or of a
 	// receiver Go coerces, Go's.
 	forwardGo := site.Forward && generic
-	miss := stub
-	if forwardGo && site.Generic {
-		miss = goCall()
+	// As amd64's: a push with no room for its arguments, Go's call of it.
+	miss, room := stub, guard
+	if forward := forwardGo && site.Generic; forward || generic && site.Push {
+		if l := goCall(); forward {
+			miss = l
+		} else {
+			room = a64GuardLabel(c, l)
+		}
 	}
 	for k, t := range sites {
 		// As amd64's: the last function's checks fail straight to the stub.
@@ -4039,11 +4044,6 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 			continue
 		}
 		if t.Push {
-			// As amd64's: no room, Go's call of it.
-			room := guard
-			if generic {
-				room = a64GuardLabel(c, goCall())
-			}
 			c.pushGuards(t, v.Args[0], guard, room)
 			done()
 			continue
@@ -9123,15 +9123,10 @@ func (c *a64Compiler) codeCharOr(v *ssa.Value) {
 
 // iterRelease is amd64's, of the state at a64B. It uses a64C.
 func (c *a64Compiler) iterRelease() {
-	if c.enc.IterReleased == 0 {
-		return
+	if c.enc.IterReleased != 0 {
+		c.movImm(a64C, 1)
+		c.a.Store8(a64B, c.enc.IterReleased, a64C)
 	}
-	skip := c.a.NewLabel()
-	c.a.Load(a64C, a64B, c.enc.IterArr)
-	c.a.Cbz(a64C, skip, true)
-	c.movImm(a64C, 1)
-	c.a.Store8(a64B, c.enc.IterReleased, a64C)
-	c.a.Bind(skip)
 }
 
 // oddball is ssa.OpOddballF64, as amd64's. It uses A.

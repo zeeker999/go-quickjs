@@ -1717,9 +1717,16 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 	// natively (Generic), or of a receiver Go coerces, is Go's: it had
 	// left native code at each such call.
 	forwardGo := site.Forward && generic
-	miss := stub
-	if forwardGo && site.Generic {
-		miss = goCall()
+	// A push's array with no room for its arguments is grown by Go's call
+	// of push, where the code may call Go, rather than left at every
+	// growth (pushGuards).
+	miss, room := stub, guard
+	if forward := forwardGo && site.Generic; forward || generic && site.Push {
+		if l := goCall(); forward {
+			miss = l
+		} else {
+			room = guardLabel(c, l)
+		}
 	}
 	for k, t := range sites {
 		// The last function's checks fail straight to the stub, which a
@@ -1766,13 +1773,7 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 			continue
 		}
 		if t.Push {
-			// Array.prototype.push, its fast path's; an array with no room
-			// for the arguments grown by Go's call of it, where the code
-			// may call Go, rather than left at every growth.
-			room := guard
-			if generic {
-				room = guardLabel(c, goCall())
-			}
+			// Array.prototype.push, its fast path's.
 			c.pushGuards(t, v.Args[0], guard, room)
 			done()
 			continue
@@ -5252,20 +5253,15 @@ func (c *compiler) keyedHas(v *ssa.Value, slow amd64.Label) {
 }
 
 // iterRelease marks the cursor closed whose iteration state is at scratchB
-// released where it walks an array (abi.Encoding's IterReleased), as the
-// VM's iter_close does: its loop or pattern reads it no more, and the next
-// cursor over an array takes its place. It uses scratchC.
+// released (abi.Encoding's IterReleased), as the VM's iter_close does for
+// an array's: its loop or pattern reads it no more, and the next cursor
+// over an array takes its place. Another's mark nothing reads. It uses
+// scratchC.
 func (c *compiler) iterRelease() {
-	if c.enc.IterReleased == 0 {
-		return
+	if c.enc.IterReleased != 0 {
+		c.movImm(scratchC, 1)
+		c.a.Store8(scratchB, c.enc.IterReleased, scratchC)
 	}
-	skip := c.a.NewLabel()
-	c.a.Load(scratchC, scratchB, c.enc.IterArr)
-	c.a.Op(amd64.Test, scratchC, scratchC, true)
-	c.a.Jcc(amd64.CondE, skip)
-	c.movImm(scratchC, 1)
-	c.a.Store8(scratchB, c.enc.IterReleased, scratchC)
-	c.a.Bind(skip)
 }
 
 // hasEntryShift is log2 of abi.HasEntrySize, which an entry's slot is
