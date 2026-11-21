@@ -231,9 +231,18 @@ func (r *Runtime) regWhole(f *frame, c *regCode, wb, rpc int) (next int, ok bool
 	if st.wb != wb {
 		panic("vm: register frame's window moved")
 	}
+	// Run for native code, whose frame holds its locals where its slots
+	// cannot say: exec's leaf is told nothing (reuseCallRest).
+	s := r.jit
+	if s != nil {
+		s.reuseQuiet++
+	}
 	next = regTable[w.Op()](st.regs, w, rpc, st)
 	if next < 0 && next != regDone {
 		next = regSlowTable[w.Op()](st.regs, w, ^next, st)
+	}
+	if s != nil {
+		s.reuseQuiet--
 	}
 	err = st.err
 	r.regLeave(st)

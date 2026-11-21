@@ -54,10 +54,17 @@ import (
 // the call's local and the frame's locals (execReuseCall, as
 // regexpdead.go tells it of a result nothing reads), which the leaf
 // takes as it begins, and uses where it makes the array of a match of
-// that receiver. Native code tells it nothing, and so where a runtime runs
-// the JIT nothing is told: a frame native code took over in a loop holds
-// its locals where the slots cannot say. Nor is it where a memory meter
-// counts what is made, or a debugger may read the locals.
+// that receiver. A frame native code runs holds its locals where the
+// slots cannot say, so that its calls are told otherwise: native code's
+// leaf's call of exec tells the leaf its frame's slot of the local as the
+// call's mark, and the array is made again only where that frame made the
+// last (jit_regexpreuse.go); an array a native frame made is held for
+// every other frame's call. A call Go makes for native code -- an
+// instruction run whole at its exit, a call of Go it made (jitReuseQuiet)
+// -- tells nothing, and where native code goes on with a frame past its
+// start, at a loop's header or after a call, the arrays the frame's slots
+// hold are forgotten (execReuseForget). Nor is it told where a memory
+// meter counts what is made, or a debugger may read the locals.
 //
 // The functions are generic, each instantiated with struct{} alone: Go
 // lays a generic function's instantiations out after every function and
@@ -78,6 +85,11 @@ type execReuseCall struct {
 	site   *execReuseSite
 	recv   *Object
 	locals []Value
+	// native says the frame is one native code runs, whose slots say
+	// nothing of its locals (jit_regexpreuse.go), and strs, of such a
+	// frame, that nothing reads the pieces' local past the call before it
+	// is written.
+	native, strs bool
 }
 
 // execReuseEntry is an array a site's call made, of n elements, and the
@@ -92,6 +104,9 @@ type execReuseEntry struct {
 	// cell is the prototypes' cell the array was made under
 	// (execReuseChain), which it is made again only while valid.
 	cell *protoCell
+	// native says a frame native code runs made it, whose slots say
+	// nothing of whether it holds it: held, for any other frame's call.
+	native bool
 }
 
 // execReuseTable is a runtime's arrays to make again, by site and number
@@ -140,7 +155,7 @@ func execReuseLeaf[_ any](r *Runtime) *regexpLeaf[struct{}] {
 // so first, and untold after; told nothing where the runtime runs the JIT,
 // meters memory or has a debugger.
 func reuseCallRest[_ any](r *Runtime, site *execReuseSite, locals []Value, o *Object, fd *funcData, recv Value, args []Value) (Value, error) {
-	if r.regexpExecDead == nil || !recv.IsObject() || r.meter != nil || r.debug != nil || r.jitOn() {
+	if r.regexpExecDead == nil || !recv.IsObject() || r.meter != nil || r.debug != nil || jitBuilt && r.jitOn() && r.jitReuseQuiet() {
 		return r.callRest(o, fd, recv, args)
 	}
 	l := execReuseLeaf[struct{}](r)
@@ -162,6 +177,34 @@ func reuseCallRest[_ any](r *Runtime, site *execReuseSite, locals []Value, o *Ob
 		l.reuse = execReuseCall{}
 	}
 	return v, err
+}
+
+// execReuseForget drops the arrays the table remembers held in a slot of
+// locals, a frame's that native code goes on with past its start (vm's
+// jitRegGoOnAt): native code keeps the frame's locals where its slots
+// cannot say, so that what a slot holds tells nothing of whether the array
+// is done with -- an array native code still reads from a register, made
+// again by a call made beneath it, had been written over under it. An
+// array dropped is left as it is; the site's next call makes a new one.
+func execReuseForget[_ any](r *Runtime, locals []Value) {
+	if r.regexpExecDead == nil || len(locals) == 0 {
+		return
+	}
+	tb := execReuseLeaf[struct{}](r).reuseTable
+	if tb == nil {
+		return
+	}
+	lo := uintptr(unsafe.Pointer(&locals[0]))
+	hi := uintptr(unsafe.Pointer(&locals[len(locals)-1]))
+	in := func(p *Value) bool {
+		at := uintptr(unsafe.Pointer(p))
+		return p != nil && at >= lo && at <= hi
+	}
+	for i := range tb.e {
+		if e := &tb.e[i]; e.site != nil && (in(e.held) || in(e.sHeld)) {
+			*e = execReuseEntry{}
+		}
+	}
 }
 
 // heldBy reports whether the slot p holds the array a: a slot of a frame
@@ -228,7 +271,17 @@ func matchResultReused[_ any](r *Runtime, tbp **execReuseTable, rc execReuseCall
 	if site.s >= 0 {
 		sHeld = &rc.locals[site.s]
 	}
-	if e.site != site || e.n != n || e.cell != cell || e.arr.proto() != r.proto.array || e.held != held && heldBy[struct{}](r, e.held, e.arr) || site.strs && piecesIn[struct{}](r, e.sHeld, e.strs) {
+	again := e.site == site && e.n == n && e.cell == cell && e.arr.proto() == r.proto.array
+	if rc.native {
+		// A native frame's call: its own last array alone, which the
+		// call's result replaces in its local, and the pieces only where
+		// nothing reads theirs past the call (jit_regexpreuse.go).
+		again = again && e.held == held && (!site.strs || rc.strs)
+	} else {
+		// Another frame's array, held where a native frame made it.
+		again = again && (e.held == held || !e.native && !heldBy[struct{}](r, e.held, e.arr)) && !(site.strs && piecesIn[struct{}](r, e.sHeld, e.strs))
+	}
+	if !again {
 		// A new array, with room for a String for each element where the
 		// pieces are made again.
 		var strs []String
@@ -243,7 +296,7 @@ func matchResultReused[_ any](r *Runtime, tbp **execReuseTable, rc execReuseCall
 		}
 		*e = execReuseEntry{site: site, n: n, arr: arr, strs: strs, cell: cell}
 	}
-	e.held, e.sHeld = held, sHeld
+	e.held, e.sHeld, e.native = held, sHeld, rc.native
 	arr, strs := e.arr, e.strs
 	if !site.strs {
 		k := 0

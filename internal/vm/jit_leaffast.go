@@ -207,9 +207,17 @@ func jitLeafGo(ctx *abi.Context, st *abi.GoCallState, back uintptr) (uintptr, ui
 		ok := false
 		if form.check != nil {
 			if r.meter == nil && form.check(r, this, args) {
+				if form.reuse != nil {
+					// exec's at a site whose array it may make again, of
+					// this frame's (jit_regexpreuse.go).
+					jitReuseTell[struct{}](r, form, this, ctx.Locals)
+				}
 				var err error
 				v, err = form.native(r, this, args)
 				ok = err == nil
+				if form.reuse != nil {
+					jitReuseUntell[struct{}](r)
+				}
 			}
 		} else {
 			v, ok = form.apply(r, this, args)
@@ -262,6 +270,11 @@ type jitLeafForm struct {
 	give    *abi.ObjectPool
 	test    bool
 	giveArg bool
+	// reuse is the site of a call of exec whose array the leaf may make
+	// again (abi.GoCallState's Reuse), reuseStrs whether its pieces' too
+	// (jit_regexpreuse.go).
+	reuse     *execReuseSite
+	reuseStrs bool
 }
 
 // jitLeafFormOf makes the form of the leaf's call st describes, keeping it
@@ -298,6 +311,9 @@ func (r *Runtime) jitLeafFormOf(st *abi.GoCallState) *jitLeafForm {
 		}
 		if st.Give != 0 && (op == elemRegExpExec || op == elemRegExpTest) {
 			form.give, form.test = (*abi.ObjectPool)(*(*unsafe.Pointer)(unsafe.Pointer(&st.Give))), op == elemRegExpTest
+		}
+		if op == elemRegExpExec {
+			jitReuseForm[struct{}](form, st)
 		}
 		if st.Give != 0 && op == elemObjCreate {
 			// Object.create's, whose site's pool it fills (jit_create.go).

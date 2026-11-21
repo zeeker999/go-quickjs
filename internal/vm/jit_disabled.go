@@ -39,6 +39,8 @@ func (*Runtime) recordJITSubstrings()             {}
 
 func (*Runtime) jitOn() bool { return false }
 
+func (*Runtime) jitReuseQuiet() bool { return true }
+
 // Typed code has no native code (jit_typed.go).
 func (*Runtime) jitTypedLinked(*closure, *regCode) {}
 

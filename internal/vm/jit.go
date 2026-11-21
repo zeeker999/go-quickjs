@@ -928,6 +928,10 @@ type jitState struct {
 	regForced   bool
 	regGoOnOSR  bool
 	regGoOnRun  uint8
+	// reuseQuiet counts Go's runs of an instruction or a call for native
+	// code under way, in which exec's leaf is told nothing of a call's
+	// locals (reuseCallRest).
+	reuseQuiet int32
 	// regKeptSeeding marks the compiles of register callees that give up
 	// the entries kept for a frame (jitRegCalleesKeptNoEntries), which ask
 	// for no more of them.
@@ -2026,3 +2030,8 @@ func (r *Runtime) SetJITWarmUp(calls, afterICUpdate int) {
 // Richards' setup methods, called twice in each of its runs, are not;
 // Towers' recursion, eight thousand calls in each, is in its first.
 const jitHotWork = 16 << 10
+
+// jitReuseQuiet reports whether Go runs an instruction or a call for
+// native code now, whose frame's slots may not hold what its locals do:
+// exec's leaf is then told nothing of the call (reuseCallRest).
+func (r *Runtime) jitReuseQuiet() bool { return r.jit.reuseQuiet != 0 }

@@ -83,6 +83,10 @@ type jitLearned struct {
 	// creates are the calls of Object.create whose objects the code makes
 	// natively, with their pools (jitCreatePool).
 	creates []jitCreate
+	// reuses are the sites of the calls of exec whose arrays the leaf's
+	// calls from native code make again (ExecReuse), which the code names
+	// by address.
+	reuses []*execReuseSite
 	// strSites are the method reads that met a string receiver, which the
 	// code reads off String.prototype once compiled again
 	// (jitFeedback.StringProperty).
