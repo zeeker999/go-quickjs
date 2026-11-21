@@ -4478,9 +4478,8 @@ func TestJITSSANativePush(t *testing.T) {
 }
 
 // A push of several values is made natively too, the values in their
-// order, its result the last length (mir's push); an array with no room
-// for them all is grown by Go's call of push from native code, which goes
-// on after it, rather than left at each growth. What the fast path may not
+// order, its result the last length (mir's push), leaving native code only
+// for the array to grow, as a push of one does. What the fast path may not
 // take -- an array that is not extensible, a setter for an index on
 // Object.prototype -- answers as the interpreter does, the collector idle
 // and marking.
@@ -4539,8 +4538,10 @@ func TestJITSSANativePushArgs(t *testing.T) {
 				}
 				hosts, reoptimized := e.ssaStats.hosts, r.jit.reoptimized
 				run(c.name, c.src)
-				if c.fn == "plain" && r.jit.reoptimized == reoptimized && e.ssaStats.hosts != hosts {
-					t.Fatalf("plain left %d times for 3000 pushes", e.ssaStats.hosts-hosts)
+				// The array grows half again or a doubling at a time: under
+				// two dozen times for 9,000 elements.
+				if c.fn == "plain" && r.jit.reoptimized == reoptimized && e.ssaStats.hosts-hosts > 24 {
+					t.Fatalf("plain left %d times for 3000 pushes of three", e.ssaStats.hosts-hosts)
 				}
 			}
 		})

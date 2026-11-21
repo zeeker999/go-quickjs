@@ -1717,16 +1717,9 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 	// natively (Generic), or of a receiver Go coerces, is Go's: it had
 	// left native code at each such call.
 	forwardGo := site.Forward && generic
-	// A push's array with no room for its arguments is grown by Go's call
-	// of push, where the code may call Go, rather than left at every
-	// growth (pushGuards).
-	miss, room := stub, guard
-	if forward := forwardGo && site.Generic; forward || generic && site.Push {
-		if l := goCall(); forward {
-			miss = l
-		} else {
-			room = guardLabel(c, l)
-		}
+	miss := stub
+	if forwardGo && site.Generic {
+		miss = goCall()
 	}
 	for k, t := range sites {
 		// The last function's checks fail straight to the stub, which a
@@ -1774,7 +1767,7 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 		}
 		if t.Push {
 			// Array.prototype.push, its fast path's.
-			c.pushGuards(t, v.Args[0], guard, room)
+			c.pushGuards(t, v.Args[0], guard)
 			done()
 			continue
 		}
@@ -6176,7 +6169,7 @@ func (c *compiler) refillOnEmpty(pool uintptr, guard guardTo) {
 // extensible, its length writable, with room, of the first of the
 // prototypes, which are as they were, with no elements. It uses every
 // scratch register.
-func (c *compiler) pushGuards(t *ssa.CallSite, recv *ssa.Value, guard, room guardTo) {
+func (c *compiler) pushGuards(t *ssa.CallSite, recv *ssa.Value, guard guardTo) {
 	if recv.Shadow == nil && c.origin.At(recv) < 0 {
 		// A primitive, never an array: scratchC, the callee, is not 0.
 		c.a.Op(amd64.Test, scratchC, scratchC, true)
@@ -6194,12 +6187,14 @@ func (c *compiler) pushGuards(t *ssa.CallSite, recv *ssa.Value, guard, room guar
 	c.a.OpImm(amd64.And, scratchB, int32(want|c.enc.FlagSparse|c.enc.FlagShared), false)
 	c.a.OpImm(amd64.Cmp, scratchB, int32(want), false)
 	guard.jump(amd64.CondNE)
-	// Room for every argument.
+	// Room for every argument: past the length, below the capacity.
 	c.a.Load(scratchB, scratchC, c.enc.ObjectElems+8)
-	c.a.OpImm(amd64.Add, scratchB, int32(t.Argc), true)
+	if t.Argc > 1 {
+		c.a.OpImm(amd64.Add, scratchB, int32(t.Argc-1), true)
+	}
 	c.a.Load(scratchA, scratchC, c.enc.ObjectElems+16)
 	c.a.Op(amd64.Cmp, scratchB, scratchA, true)
-	room.jump(amd64.CondA)
+	guard.jump(amd64.CondAE)
 	c.loadProtoPlain(scratchB, scratchC)
 	c.cmpWord(scratchB, uint64(t.Protos[0].Object))
 	guard.jump(amd64.CondNE)
@@ -6321,11 +6316,12 @@ func (c *compiler) pop(v *ssa.Value) {
 // xScratch2.
 func (c *compiler) push(v *ssa.Value) {
 	vs := int32(c.enc.ValueSize)
-	recv := v.Args[0]
+	recv, xs := v.Args[0], v.Args[2:]
 	if vs != 16 {
 		panic("mir: a value that is not 16 bytes")
 	}
-	for _, x := range v.Args[2:] {
+	at := abi.OffKeep + int32(v.Index)*vs
+	for k, x := range xs {
 		// The value's words: its pointer word in xScratch1, its number
 		// word in xScratch0.
 		var w amd64.Reg
@@ -6362,6 +6358,14 @@ func (c *compiler) push(v *ssa.Value) {
 		c.a.MovQFromX(scratchC, xScratch1)
 		c.a.Store(scratchA, c.enc.RefOffset, scratchC)
 		c.a.MovQToX(xScratch2, scratchA)
+		last := k == len(xs)-1
+		if last {
+			// The result: the last length, a number.
+			c.a.Cvtsi2sd(xScratch0, scratchB, true)
+			c.a.MovQFromX(scratchA, xScratch0)
+			c.a.Store(regCtx, at+c.enc.NumOffset, scratchA)
+			c.storeImm(regCtx, at+c.enc.RefOffset, 0, scratchB)
+		}
 		// While the collector marks, the element's pointer word stored
 		// again with Go's write barrier (refStore), which shades it: the
 		// array outlives where the value came from.
@@ -6376,17 +6380,12 @@ func (c *compiler) push(v *ssa.Value) {
 			c.a.OpImm(amd64.Add, scratchA, c.enc.RefOffset, true)
 			c.a.MovQFromX(scratchC, xScratch1)
 			c.refStore()
+			if last {
+				c.a.Load(scratchA, regCtx, at+c.enc.NumOffset)
+			}
 			c.a.Jmp(done)
 		})
 	}
-	// The result: the length, a number.
-	c.sourceRef(recv, guardTo{})
-	c.a.Load(scratchB, scratchC, c.enc.ObjectElems+8)
-	c.a.Cvtsi2sd(xScratch0, scratchB, true)
-	c.a.MovQFromX(scratchA, xScratch0)
-	at := abi.OffKeep + int32(v.Index)*vs
-	c.a.Store(regCtx, at+c.enc.NumOffset, scratchA)
-	c.storeImm(regCtx, at+c.enc.RefOffset, 0, scratchB)
 	c.setG(v, scratchA)
 }
 
