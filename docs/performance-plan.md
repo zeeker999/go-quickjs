@@ -204,7 +204,12 @@ the program's own objects, which only allocating less removes.
   M5 Max arm64), Earley takes about 2.3 ms against Node 26.8.1 jitless's
   1.05 ms, while Boyer takes 20.5 ms against 22.2 ms. An Earley-only profile
   puts about half its allocations in closures and their capture lists,
-  rather than pairs. Its `sc_list` aliases `arguments` into a local and
+  rather than pairs. Filling capture lists directly, embedding lists of
+  up to 17 captures and copying immutable sloppy parameters by value reduce
+  Earley's allocations by 16.1% and its allocated bytes by 6.5%. Against
+  the global-instanceof fusion alone, Earley is 9.8% faster on arm64 and
+  11.2% on Windows amd64, at two placements.
+  Its `sc_list` aliases `arguments` into a local and
   reads only that alias's length and indexed elements; the compiler does
   not recognize it as the lazy arguments binding, so it materializes an
   arguments object on each call. Extending the existing lazy arguments
