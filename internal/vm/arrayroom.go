@@ -52,6 +52,10 @@ type arrayRoom struct {
 	listed bool
 	// wait is how many executions are left to skip before the next sample.
 	wait uint8
+	// acrossTurns says room was confirmed at a turn's end: what a result
+	// came to, not what a callback's growing array had reached. Native
+	// code's literal takes only such room (jitLiteralArraySource).
+	acrossTurns bool
 	// pc is the literal's instruction, which names the site to native code:
 	// the site's ordinal does not, and an inlined callee has its own.
 	pc int32
@@ -65,6 +69,7 @@ func arrayObserve[_ any](s *arrayRoom, a *Object) {
 	}
 	if n < arrayRoomLeast {
 		s.room, s.previous, s.wait = 0, 0, arrayRoomPause
+		s.acrossTurns = false
 		return
 	}
 	s.room = min(n, s.previous)
@@ -105,6 +110,7 @@ func arraySamplesLetGo[_ any](r *Runtime) {
 			}
 			if a != nil {
 				arrayObserve[struct{}](s, a)
+				s.acrossTurns = s.room >= arrayRoomLeast
 			}
 		}
 		s.sample, s.weak, s.listed = nil, weak.Pointer[Object]{}, false
