@@ -342,9 +342,11 @@ func (g *armGen) call() {
 	a.Load(rJ, rD, offClCode)
 	g.cmpMem(rJ, r8, offClCode)
 	a.BCond(NE, miss)
-	a.Load(rJ, rD, off("closure.realm"))
-	g.cmpMem(rJ, r8, off("closure.realm"))
-	a.BCond(NE, miss)
+	// The shared template also proves the realm. Keep the code after
+	// this former check at the same offset.
+	for range 4 {
+		a.MovRR(ZR, ZR)
+	}
 	a.Load(rJ, rD, offClCode)
 	g.addMem(rJ, rCtx, ncCCBase)
 	a.Load(rJ, rJ, offCCReg)

@@ -233,6 +233,18 @@ the program's own objects, which only allocating less removes.
   14,015, an 18.6% score gap: Earley takes 1.66 ms against 1.06 ms,
   Boyer 20.58 ms against 21.43 ms. Absolute scores from different runs
   also reflect the machine's frequency and load.
+  Sharing each prepared template's realm and module environment, rather
+  than repeating the two pointers in every closure, makes its closure
+  header 40 bytes instead of 56. Capture-list variants fill the smaller
+  allocation classes; Earley allocates 4.6% fewer bytes with the same
+  allocation count (2026-11-21, Go 1.27.3). At two placements, five arm64
+  rounds leave default-thread Earley time level and reduce single-thread
+  time by 1.7%; three longer alternating runs use 1.1% less CPU. Seven
+  Windows amd64 rounds on fixed CPU groups give 2.5% faster at both
+  placements, with a 0.6% difference in the same-binary control. Three
+  rounds of the full V8 suite give -0.2% total time on arm64 and -0.7%
+  on Windows; six Windows closure micro-benchmarks have a geometric
+  ratio of 1.001, with none 3% slower at both placements.
   Node 26.8.1 jitless materializes this object too: the exact `sc_list`
   body starts with `CreateMappedArguments`, followed by a register move
   for `a = arguments`, `GetNamedProperty` for its length and

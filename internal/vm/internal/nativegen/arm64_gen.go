@@ -111,6 +111,8 @@ func (g *armGen) genStep() {
 	a.Store(rCtx, scr(sE), r8)
 	// Of this realm, or of none.
 	a.Load(r9, r8, offGCl)
+	a.Load(r9, r9, offClCode)
+	g.addMem(r9, rCtx, ncCCBase)
 	a.Load(rC, r9, offClRealm)
 	a.Cbz(rC, realmOK, true)
 	a.Load(rD, rCtx, ncRT)
@@ -118,9 +120,7 @@ func (g *armGen) genStep() {
 	a.BCond(NE, g.exit)
 	a.Bind(realmOK)
 	// Its register code, which keeps no arguments.
-	a.Load(rD, r9, offClCode)
-	g.addMem(rD, rCtx, ncCCBase)
-	a.Load(rC, rD, offCCReg)
+	a.Load(rC, r9, offCCReg)
 	a.Cbz(rC, g.exit, true)
 	a.LoadU8(rD, rC, offRCArgs)
 	a.Cbnz(rD, g.exit, false)

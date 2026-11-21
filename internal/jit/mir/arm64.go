@@ -2659,11 +2659,16 @@ func (c *a64Compiler) byCode(t *ssa.CallSite, next arm64.Label) {
 	c.objectData(a64B, a64C, a64C, c.enc.FuncData, a64GuardLabel(c, miss))
 	c.a.Load(a64B, a64B, c.enc.FuncClosure)
 	c.a.Cbz(a64B, miss, true)
+	c.a.Load(a64A, a64B, c.enc.ClosureFn)
+	c.movImm(a64C, uint64(t.ByCode))
+	c.a.Cmp(a64A, a64C, true)
+	c.a.BCond(arm64.NE, miss)
 	for _, f := range [...]struct {
 		off  int32
 		want uintptr
-	}{{c.enc.ClosureFn, t.ByCode}, {c.enc.ClosureEnv, t.Env}, {c.enc.ClosureRealm, t.Realm}} {
-		c.a.Load(a64A, a64B, f.off)
+	}{{c.enc.CodeEnv, t.Env}, {c.enc.CodeRealm, t.Realm}} {
+		c.a.Load(a64A, a64B, c.enc.ClosureCode)
+		c.a.Load(a64A, a64A, f.off)
 		c.movImm(a64C, uint64(f.want))
 		c.a.Cmp(a64A, a64C, true)
 		c.a.BCond(arm64.NE, miss)
@@ -2969,8 +2974,9 @@ func (c *a64Compiler) genericCheck(v *ssa.Value, site *ssa.CallSite, target int,
 	for _, f := range [...]struct {
 		off  int32
 		want uintptr
-	}{{c.enc.ClosureEnv, site.GenericEnv}, {c.enc.ClosureRealm, site.GenericRealm}} {
-		c.a.Load(a64A, a64B, f.off)
+	}{{c.enc.CodeEnv, site.GenericEnv}, {c.enc.CodeRealm, site.GenericRealm}} {
+		c.a.Load(a64A, a64B, c.enc.ClosureCode)
+		c.a.Load(a64A, a64A, f.off)
 		c.movImm(a64C, uint64(f.want))
 		c.a.Cmp(a64A, a64C, true)
 		c.a.BCond(arm64.NE, miss)
@@ -5910,8 +5916,9 @@ func (c *a64Compiler) genStep(v *ssa.Value, notGen, slow, done arm64.Label) {
 		for _, f := range [...]struct {
 			off  int32
 			want uintptr
-		}{{c.enc.ClosureEnv, t.Env}, {c.enc.ClosureRealm, t.Realm}} {
-			c.a.Load(a64C, a64D, f.off)
+		}{{c.enc.CodeEnv, t.Env}, {c.enc.CodeRealm, t.Realm}} {
+			c.a.Load(a64C, a64D, c.enc.ClosureCode)
+			c.a.Load(a64C, a64C, f.off)
 			c.movImm(a64A, uint64(f.want))
 			c.a.Cmp(a64C, a64A, true)
 			fail.jump(arm64.NE)
@@ -6276,8 +6283,9 @@ func (c *a64Compiler) genNext(v *ssa.Value, slow, done arm64.Label) {
 		for _, f := range [...]struct {
 			off  int32
 			want uintptr
-		}{{c.enc.ClosureEnv, t.Env}, {c.enc.ClosureRealm, t.Realm}} {
-			c.a.Load(a64C, a64D, f.off)
+		}{{c.enc.CodeEnv, t.Env}, {c.enc.CodeRealm, t.Realm}} {
+			c.a.Load(a64C, a64D, c.enc.ClosureCode)
+			c.a.Load(a64C, a64C, f.off)
 			c.movImm(a64A, uint64(f.want))
 			c.a.Cmp(a64C, a64A, true)
 			fail.jump(arm64.NE)

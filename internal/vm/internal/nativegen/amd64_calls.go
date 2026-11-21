@@ -398,9 +398,10 @@ func (g *nativeGen) call() {
 	a.Load(RAX, RDX, offClCode)
 	a.CmpMem(RAX, R8, offClCode, true)
 	a.Jcc(CondNE, miss)
-	a.Load(RAX, RDX, off("closure.realm"))
-	a.CmpMem(RAX, R8, off("closure.realm"), true)
-	a.Jcc(CondNE, miss)
+	// The shared template also proves the realm. Keep the code after
+	// this former check at the same offset.
+	a.Nop(9)
+	a.Nop(5)
 	// Its register code, its closureCode's, the cached one.
 	a.Load(RAX, RDX, offClCode)
 	a.AddMem(RAX, RDI, ncCCBase)

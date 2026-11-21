@@ -132,6 +132,8 @@ func (g *nativeGen) genStep() {
 	a.Store(RDI, scr(sE), R8)
 	// Of this realm, or of none.
 	a.Load(R9, R8, offGCl)
+	a.Load(R9, R9, offClCode)
+	a.AddMem(R9, RDI, ncCCBase)
 	a.Load(RCX, R9, offClRealm)
 	a.Op(Test, RCX, RCX, true)
 	a.Jcc(CondE, realmOK)
@@ -140,9 +142,7 @@ func (g *nativeGen) genStep() {
 	a.Jcc(CondNE, g.exit)
 	a.Bind(realmOK)
 	// Its register code, which keeps no arguments.
-	a.Load(RDX, R9, offClCode)
-	a.AddMem(RDX, RDI, ncCCBase)
-	a.Load(RCX, RDX, offCCReg)
+	a.Load(RCX, R9, offCCReg)
 	a.Op(Test, RCX, RCX, true)
 	a.Jcc(CondE, g.exit)
 	a.LoadU8(RDX, RCX, offRCArgs)

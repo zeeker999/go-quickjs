@@ -485,7 +485,7 @@ func loadOffsets() {
 	offGStarted = off("generator.started")
 	offGReg = off("generator.reg")
 	offGAwaitJob = off("generator.awaitJob")
-	offClRealm = off("closure.realm")
+	offClRealm = ccRel(off("closureCode.realm"))
 	offRCGenFrom = off("regCode.genFrom")
 	offRealmNext = off("Realm.genNextFn")
 	offFDName = off("funcData.name")

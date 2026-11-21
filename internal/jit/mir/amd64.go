@@ -4205,8 +4205,9 @@ func (c *compiler) genStep(v *ssa.Value, notGen, slow, done amd64.Label) {
 		for _, f := range [...]struct {
 			off  int32
 			want uintptr
-		}{{c.enc.ClosureEnv, t.Env}, {c.enc.ClosureRealm, t.Realm}} {
-			c.a.Load(scratchC, scratchA, f.off)
+		}{{c.enc.CodeEnv, t.Env}, {c.enc.CodeRealm, t.Realm}} {
+			c.a.Load(scratchC, scratchA, c.enc.ClosureCode)
+			c.a.Load(scratchC, scratchC, f.off)
 			c.cmpWord(scratchC, uint64(f.want))
 			fail.jump(amd64.CondNE)
 		}
@@ -4611,8 +4612,9 @@ func (c *compiler) genNext(v *ssa.Value, slow, done amd64.Label) {
 		for _, f := range [...]struct {
 			off  int32
 			want uintptr
-		}{{c.enc.ClosureEnv, t.Env}, {c.enc.ClosureRealm, t.Realm}} {
-			c.a.Load(scratchC, scratchA, f.off)
+		}{{c.enc.CodeEnv, t.Env}, {c.enc.CodeRealm, t.Realm}} {
+			c.a.Load(scratchC, scratchA, c.enc.ClosureCode)
+			c.a.Load(scratchC, scratchC, f.off)
 			c.cmpWord(scratchC, uint64(f.want))
 			fail.jump(amd64.CondNE)
 		}
@@ -5803,11 +5805,15 @@ func (c *compiler) byCode(t *ssa.CallSite, next amd64.Label) {
 	c.a.Load(scratchB, scratchB, c.enc.FuncClosure)
 	c.a.Op(amd64.Test, scratchB, scratchB, true)
 	c.a.Jcc(amd64.CondE, miss)
+	c.a.Load(scratchA, scratchB, c.enc.ClosureFn)
+	c.cmpWord(scratchA, uint64(t.ByCode))
+	c.a.Jcc(amd64.CondNE, miss)
 	for _, f := range [...]struct {
 		off  int32
 		want uintptr
-	}{{c.enc.ClosureFn, t.ByCode}, {c.enc.ClosureEnv, t.Env}, {c.enc.ClosureRealm, t.Realm}} {
-		c.a.Load(scratchA, scratchB, f.off)
+	}{{c.enc.CodeEnv, t.Env}, {c.enc.CodeRealm, t.Realm}} {
+		c.a.Load(scratchA, scratchB, c.enc.ClosureCode)
+		c.a.Load(scratchA, scratchA, f.off)
 		c.cmpWord(scratchA, uint64(f.want))
 		c.a.Jcc(amd64.CondNE, miss)
 	}
@@ -5883,8 +5889,9 @@ func (c *compiler) genericCheck(v *ssa.Value, site *ssa.CallSite, target int, ch
 	for _, f := range [...]struct {
 		off  int32
 		want uintptr
-	}{{c.enc.ClosureEnv, site.GenericEnv}, {c.enc.ClosureRealm, site.GenericRealm}} {
-		c.a.Load(scratchA, scratchB, f.off)
+	}{{c.enc.CodeEnv, site.GenericEnv}, {c.enc.CodeRealm, site.GenericRealm}} {
+		c.a.Load(scratchA, scratchB, c.enc.ClosureCode)
+		c.a.Load(scratchA, scratchA, f.off)
 		c.cmpWord(scratchA, uint64(f.want))
 		c.a.Jcc(amd64.CondNE, miss)
 	}

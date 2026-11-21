@@ -976,19 +976,24 @@ type scriptFuncObject5 struct {
 	captured [5]*upvalue
 }
 
-type scriptFuncObject9 struct {
+type scriptFuncObject7 struct {
 	scriptFuncObject
-	captured [9]*upvalue
+	captured [7]*upvalue
 }
 
-type scriptFuncObject13 struct {
+type scriptFuncObject11 struct {
 	scriptFuncObject
-	captured [13]*upvalue
+	captured [11]*upvalue
 }
 
-type scriptFuncObject17 struct {
+type scriptFuncObject15 struct {
 	scriptFuncObject
-	captured [17]*upvalue
+	captured [15]*upvalue
+}
+
+type scriptFuncObject19 struct {
+	scriptFuncObject
+	captured [19]*upvalue
 }
 
 // arrowFuncObject is scriptFuncObject for an arrow, with the surroundings it
@@ -1049,14 +1054,17 @@ func newScriptFuncObject(proto *Object, class Class, upvalues int, arrow bool) (
 	case 5:
 		x := &scriptFuncObject5{}
 		fo, captured = &x.scriptFuncObject, x.captured[:]
-	case 6, 7, 8, 9:
-		x := &scriptFuncObject9{}
+	case 6, 7:
+		x := &scriptFuncObject7{}
 		fo, captured = &x.scriptFuncObject, x.captured[:upvalues:upvalues]
-	case 10, 11, 12, 13:
-		x := &scriptFuncObject13{}
+	case 8, 9, 10, 11:
+		x := &scriptFuncObject11{}
 		fo, captured = &x.scriptFuncObject, x.captured[:upvalues:upvalues]
-	case 14, 15, 16, 17:
-		x := &scriptFuncObject17{}
+	case 12, 13, 14, 15:
+		x := &scriptFuncObject15{}
+		fo, captured = &x.scriptFuncObject, x.captured[:upvalues:upvalues]
+	case 16, 17, 18, 19:
+		x := &scriptFuncObject19{}
 		fo, captured = &x.scriptFuncObject, x.captured[:upvalues:upvalues]
 	default:
 		fo = &scriptFuncObject{}
