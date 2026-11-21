@@ -3800,6 +3800,13 @@ type callRecord struct {
 // every word of the slots from operands on, if not -1, which the call
 // reads its callee's arguments from. Those whose pointer words it writes
 // come first.
+// pushGrows reports whether a push of t's values, made natively, has its
+// array grown by push's leaf where it has no room for them (mir's
+// pushGrow): of several values, as many as a leaf's call takes.
+func pushGrows(t *ssa.CallSite, enc abi.Encoding) bool {
+	return t.Argc > 1 && 2+t.Argc <= abi.MaxGoArgs && enc.LeafFast != 0
+}
+
 // windowCallees is, for register code's native call of sites (ssa.CallSite's
 // Window) that leaves its function out of its callee's window, the
 // function object each site's checks find, 0 for one checked by its code

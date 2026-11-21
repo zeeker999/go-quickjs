@@ -1673,6 +1673,8 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 		c.sourceRef(callee, guard)
 	}
 	checked := c.a.NewLabel()
+	var grow amd64.Label
+	growUsed := false
 	// Past its sites, any other function, through its link
 	// (genericCheck).
 	gen := generic && site.Generic && site.Via == 0 && site.Pool == 0 && !site.Push && !site.Pop && !site.Alloc && !site.Receiver &&
@@ -1766,8 +1768,14 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 			continue
 		}
 		if t.Push {
-			// Array.prototype.push, its fast path's.
-			c.pushGuards(t, v.Args[0], guard)
+			// Array.prototype.push, its fast path's; an array with no room
+			// for several values grown by push's leaf (pushGrow).
+			room := guard
+			if pushGrows(t, c.enc) {
+				grow, growUsed = c.a.NewLabel(), true
+				room = guardLabel(c, grow)
+			}
+			c.pushGuards(t, v.Args[0], guard, room)
 			done()
 			continue
 		}
@@ -1864,6 +1872,15 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 	c.a.Bind(checked)
 	if site.Push {
 		c.push(v)
+		if growUsed {
+			pushed := c.a.NewLabel()
+			c.a.Bind(pushed)
+			c.cold = append(c.cold, func() {
+				c.a.Bind(grow)
+				c.pushGrow(v, site)
+				c.a.Jmp(pushed)
+			})
+		}
 		return
 	}
 	if site.Pop {
@@ -2829,9 +2846,28 @@ func (c *compiler) createMake(v *ssa.Value, slow, done amd64.Label) {
 // R11, or, where Go did nothing, to the refusal's code. Neither the code's
 // routine of calls of Go nor Go's expansion of the call is on the way.
 func (c *compiler) leafCall(v *ssa.Value, site *ssa.CallSite) {
-	size := int32(unsafe.Sizeof(abi.GoArg{}))
 	st, _ := c.goState(goOpWord(site), v.Index, v, nil)
-	for i, x := range v.Args {
+	c.leafCallOf(v, st, v.Args)
+}
+
+// pushGrow is the call of a push of several values whose array has no room
+// for them (pushGuards' room): push's leaf, the realm's Array.prototype.push
+// at the site's Callee (the VM's jitLeafGo), which grows the array as the
+// built-in does, and goes on after it, the receiver and the values written
+// where a leaf's call writes them; refused, the call's exit. A push of one
+// leaves native code for its growth, which has the interpreter make the
+// literal's arrays with the room it learned (arrayEmptyNode).
+func (c *compiler) pushGrow(v *ssa.Value, site *ssa.CallSite) {
+	st, _ := c.goState(goOpWord(&ssa.CallSite{Go: ssa.GoLeaf, Argc: site.Argc, Method: true}), v.Index, v, nil)
+	st.Leaf, st.Unused, st.Give = site.Callee, false, 0
+	c.leafCallOf(v, st, append([]*ssa.Value{v.Args[1], v.Args[0]}, v.Args[2:]...))
+}
+
+// leafCallOf is leafCall of the leaf st describes, its operands ops: the
+// function's, which it does not write, the receiver's, the arguments'.
+func (c *compiler) leafCallOf(v *ssa.Value, st *abi.GoCallState, ops []*ssa.Value) {
+	size := int32(unsafe.Sizeof(abi.GoArg{}))
+	for i, x := range ops {
 		if i != 0 {
 			c.goArg(abi.OffGoArgs+int32(i)*size, x)
 		}
@@ -6169,7 +6205,7 @@ func (c *compiler) refillOnEmpty(pool uintptr, guard guardTo) {
 // extensible, its length writable, with room, of the first of the
 // prototypes, which are as they were, with no elements. It uses every
 // scratch register.
-func (c *compiler) pushGuards(t *ssa.CallSite, recv *ssa.Value, guard guardTo) {
+func (c *compiler) pushGuards(t *ssa.CallSite, recv *ssa.Value, guard, room guardTo) {
 	if recv.Shadow == nil && c.origin.At(recv) < 0 {
 		// A primitive, never an array: scratchC, the callee, is not 0.
 		c.a.Op(amd64.Test, scratchC, scratchC, true)
@@ -6194,7 +6230,7 @@ func (c *compiler) pushGuards(t *ssa.CallSite, recv *ssa.Value, guard guardTo) {
 	}
 	c.a.Load(scratchA, scratchC, c.enc.ObjectElems+16)
 	c.a.Op(amd64.Cmp, scratchB, scratchA, true)
-	guard.jump(amd64.CondAE)
+	room.jump(amd64.CondAE)
 	c.loadProtoPlain(scratchB, scratchC)
 	c.cmpWord(scratchB, uint64(t.Protos[0].Object))
 	guard.jump(amd64.CondNE)

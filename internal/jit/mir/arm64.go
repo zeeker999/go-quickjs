@@ -3995,6 +3995,8 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 	if forwardGo && site.Generic {
 		miss = goCall()
 	}
+	var grow arm64.Label
+	growUsed := false
 	for k, t := range sites {
 		// As amd64's: the last function's checks fail straight to the stub.
 		last := k == len(sites)-1 && !gen
@@ -4039,7 +4041,13 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 			continue
 		}
 		if t.Push {
-			c.pushGuards(t, v.Args[0], guard)
+			// As amd64's: no room for several values, push's leaf.
+			room := guard
+			if pushGrows(t, c.enc) {
+				grow, growUsed = c.a.NewLabel(), true
+				room = a64GuardLabel(c, grow)
+			}
+			c.pushGuards(t, v.Args[0], guard, room)
 			done()
 			continue
 		}
@@ -4118,6 +4126,15 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 	c.a.Bind(checked)
 	if site.Push {
 		c.push(v)
+		if growUsed {
+			pushed := c.a.NewLabel()
+			c.a.Bind(pushed)
+			c.cold = append(c.cold, func() {
+				c.a.Bind(grow)
+				c.pushGrow(v, site)
+				c.a.B(pushed)
+			})
+		}
 		return
 	}
 	if site.Pop {
@@ -4720,7 +4737,7 @@ func (c *a64Compiler) restoreSavesOf(v *ssa.Value, refused bool) {
 
 // pushGuards checks a call of Array.prototype.push may append, as amd64's
 // does. It uses A, B and C.
-func (c *a64Compiler) pushGuards(t *ssa.CallSite, recv *ssa.Value, guard a64Guard) {
+func (c *a64Compiler) pushGuards(t *ssa.CallSite, recv *ssa.Value, guard, room a64Guard) {
 	if recv.Shadow == nil && c.origin.At(recv) < 0 {
 		c.a.CmpImm(a64C, 0, true)
 		guard.jump(arm64.NE)
@@ -4746,7 +4763,7 @@ func (c *a64Compiler) pushGuards(t *ssa.CallSite, recv *ssa.Value, guard a64Guar
 	}
 	c.a.Load(a64A, a64C, c.enc.ObjectElems+16)
 	c.a.Cmp(a64B, a64A, true)
-	guard.jump(arm64.HS)
+	room.jump(arm64.HS)
 	c.loadProtoPlain(a64B, a64C)
 	c.movImm(a64A, uint64(t.Protos[0].Object))
 	c.a.Cmp(a64B, a64A, true)
@@ -5584,9 +5601,21 @@ func (c *a64Compiler) createMake(v *ssa.Value, slow, done arm64.Label) {
 // leafCall is amd64's: the description's address in C, where to come back
 // in A, the result's number word back in B.
 func (c *a64Compiler) leafCall(v *ssa.Value, site *ssa.CallSite) {
-	size := int32(unsafe.Sizeof(abi.GoArg{}))
 	st, _ := c.goState(goOpWord(site), v.Index, v, nil)
-	for i, x := range v.Args {
+	c.leafCallOf(v, st, v.Args)
+}
+
+// pushGrow is amd64's: a push of several values with no room, push's leaf.
+func (c *a64Compiler) pushGrow(v *ssa.Value, site *ssa.CallSite) {
+	st, _ := c.goState(goOpWord(&ssa.CallSite{Go: ssa.GoLeaf, Argc: site.Argc, Method: true}), v.Index, v, nil)
+	st.Leaf, st.Unused, st.Give = site.Callee, false, 0
+	c.leafCallOf(v, st, append([]*ssa.Value{v.Args[1], v.Args[0]}, v.Args[2:]...))
+}
+
+// leafCallOf is amd64's: leafCall of st's leaf, its operands ops.
+func (c *a64Compiler) leafCallOf(v *ssa.Value, st *abi.GoCallState, ops []*ssa.Value) {
+	size := int32(unsafe.Sizeof(abi.GoArg{}))
+	for i, x := range ops {
 		if i != 0 {
 			c.goArg(abi.OffGoArgs+int32(i)*size, x)
 		}
