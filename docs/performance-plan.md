@@ -1041,3 +1041,9 @@ Measured and dropped; each needs a new angle before it is tried again.
   only 0.6% on arm64, at one placement alone. Windows amd64 gave +0.4%;
   its same-binary control differed by 6.3%, so that result is inconclusive.
   The allocation helper was removed.
+- **Adjacent captured-variable reads fused in native code** (2026-11-21,
+  Go 1.27.3, M5 Max arm64, JIT off, Earley alone, five rounds at two
+  placements against `6bc6d022`): the pair saved a dispatch but measured
+  +0.1%. Sharing the capture-list pointer across both reads, reloading it
+  after the marking barrier, measured +0.7%, slower at both placements.
+  Both versions were removed.
