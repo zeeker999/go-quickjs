@@ -222,6 +222,17 @@ the program's own objects, which only allocating less removes.
   After these changes, three score rounds at both placements average
   10,941 against Node jitless's 13,799 on arm64, and 3,585 against 4,293
   on Windows amd64. Earley remains slower; Boyer is faster than Node.
+  Reading the saved argument count in the native `args_len` handler saves
+  a further 3.4% on arm64 in five rounds at two placements, 1.1% with
+  `GOMAXPROCS=1`. On Windows amd64, one thread per fixed CPU group,
+  groups swapped between rounds, gives 2.0% faster at both placements;
+  the same-binary control differs by 0.2%. Default-thread Windows runs
+  slowed severalfold even for unchanged binaries and disagree between
+  placements, so they establish no gain or regression. Three new arm64
+  score rounds at both placements average 11,402 against Node jitless's
+  14,015, an 18.6% score gap: Earley takes 1.66 ms against 1.06 ms,
+  Boyer 20.58 ms against 21.43 ms. Absolute scores from different runs
+  also reflect the machine's frequency and load.
   Node 26.8.1 jitless materializes this object too: the exact `sc_list`
   body starts with `CreateMappedArguments`, followed by a register move
   for `a = arguments`, `GetNamedProperty` for its length and
