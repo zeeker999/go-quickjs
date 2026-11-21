@@ -193,6 +193,9 @@ func (c *compiler) compileFunctionBody(fn *ast.FuncLit) {
 		}
 		c.facts.makesArgs = true
 	}, wantArguments)
+	if wantArguments && !c.lazyArguments && !c.opts.Debug && !fn.Generator && !fn.Async && c.fn.HasSimpleParams {
+		c.reg.NoteArgumentsAliases(fn.Body)
+	}
 
 	// Hoist var declarations and nested function declarations to the top of
 	// the function, as their scope requires.

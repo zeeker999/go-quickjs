@@ -209,13 +209,30 @@ the program's own objects, which only allocating less removes.
   Earley's allocations by 16.1% and its allocated bytes by 6.5%. Against
   the global-instanceof fusion alone, Earley is 9.8% faster on arm64 and
   11.2% on Windows amd64, at two placements.
-  Its `sc_list` aliases `arguments` into a local and
-  reads only that alias's length and indexed elements; the compiler does
-  not recognize it as the lazy arguments binding, so it materializes an
-  arguments object on each call. Extending the existing lazy arguments
-  analysis to aliases would need to account for rebinding, captures,
-  mapped parameters, reads before initialization, `with`, eval and debug
-  inspection.
+  Its `sc_list` aliases `arguments` into a local and reads only that alias's
+  length and indexed elements. The compiler now recognizes body-level
+  aliases whose resolved bindings cannot be captured, reassigned or read
+  before initialization, using the existing walk and lazy arguments
+  operations. Mapped parameters keep their existing slow path; `with`,
+  eval, debugger inspection, stores and member-call receivers retain the
+  ordinary object. This saves a further 19.8% of Earley's allocations and
+  21.9% of its allocated bytes; Earley-only comparisons against the closure
+  changes are 13.8% faster on arm64 and 14.2% on Windows amd64, at two
+  placements. At `GOMAXPROCS=1`, wall and CPU time both improve about 13%.
+  After these changes, three score rounds at both placements average
+  10,941 against Node jitless's 13,799 on arm64, and 3,585 against 4,293
+  on Windows amd64. Earley remains slower; Boyer is faster than Node.
+  Node 26.8.1 jitless materializes this object too: the exact `sc_list`
+  body starts with `CreateMappedArguments`, followed by a register move
+  for `a = arguments`, `GetNamedProperty` for its length and
+  `GetKeyedProperty` for its elements. V8's
+  `src/objects/arguments.tq` specializes a zero-formal-parameter function
+  to copied elements without a parameter map. The creation handler calls
+  generated allocation code, whose fast path bumps the young generation's
+  allocation pointer, and the property handlers use inline caches even
+  with the JIT disabled. Recognizing the alias here would avoid an
+  allocation V8's interpreter still performs; it is not a missing V8
+  interpreter optimization to copy.
 - **An array's outgrown elements reused** (F3). Go's `append` allocates a
   new block and copies, so about half the bytes a growing array allocates
   are blocks it has outgrown, dead once copied. A free list of element

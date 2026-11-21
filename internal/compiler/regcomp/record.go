@@ -144,6 +144,9 @@ type Record struct {
 	// declareLexicalNameMarked). In a debugger's code, where every binding
 	// is captured for the debugger, the register form leaves them so too.
 	Unmarked map[uint32]bool
+	// arguments holds the existing walk's notes of possible arguments
+	// aliases, allocated only for a function with a candidate declaration.
+	arguments *argumentsNotes
 	// Bail says the record saw one name resolved, or probed, two ways,
 	// which it cannot express.
 	Bail bool
