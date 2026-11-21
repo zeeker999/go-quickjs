@@ -142,6 +142,8 @@ C QuickJS marked v0.39.0 are from the comparison at `3ecb8200` on a Ryzen
   equality and null predicates, and `sc_cons` still enter frames. The
   instanceof wrappers account for only about 10,000 calls per Boyer run;
   most of its instanceof checks are expressions in larger functions.
+  Call counts show that `sc_isEq` and `sc_isNull` are not called in either
+  sub-benchmark, so extending those leaf kinds would not help this suite.
 - **Growing an array by index.** `array_prop_create` took 2.51 times
   QuickJS's time at `6a53e072`, the prototypes checked at each append and
   Go's slice growth (*unverified*). Arrays could start at a capacity of 8
@@ -189,13 +191,26 @@ cursors 8.5%. Those three took 200 pages from 1,455 MB in 13.5 million
 allocations to 575 MB in 4.9 million (2026-11-06). What is left is mostly
 the program's own objects, which only allocating less removes.
 
-- **Small objects in EarleyBoyer.** A profile at `7c7a10d5` (2026-11-20,
-  Go 1.27.3, M5 Max arm64, JIT off) allocates 15,029 MiB in 225,482,674
-  allocations over 800 runs. `newShapedLiteral`, mostly pairs, accounts
+- **Small objects in Boyer.** A combined EarleyBoyer profile at `7c7a10d5`
+  (2026-11-20, Go 1.27.3, M5 Max arm64, JIT off) allocates 15,029 MiB in
+  225,482,674 allocations over 800 runs. `newShapedLiteral`, mostly pairs, accounts
   for 94% of the allocation count and 86% of the bytes. The pair
   constructor already runs without a frame, both idle and marking; its
   native path still calls the allocator for each pair. `nativeNew` takes
   10.5% of CPU samples cumulatively and background collection about 12%.
+  This is dominated by Boyer: the two sub-benchmarks' times must be measured
+  separately, since the suite scores their geometric mean, not their sum.
+  At `32ebc9b5` with the global-instanceof fusion (2026-11-20, Go 1.27.3,
+  M5 Max arm64), Earley takes about 2.3 ms against Node 26.8.1 jitless's
+  1.05 ms, while Boyer takes 20.5 ms against 22.2 ms. An Earley-only profile
+  puts about half its allocations in closures and their capture lists,
+  rather than pairs. Its `sc_list` aliases `arguments` into a local and
+  reads only that alias's length and indexed elements; the compiler does
+  not recognize it as the lazy arguments binding, so it materializes an
+  arguments object on each call. Extending the existing lazy arguments
+  analysis to aliases would need to account for rebinding, captures,
+  mapped parameters, reads before initialization, `with`, eval and debug
+  inspection.
 - **An array's outgrown elements reused** (F3). Go's `append` allocates a
   new block and copies, so about half the bytes a growing array allocates
   are blocks it has outgrown, dead once copied. A free list of element
