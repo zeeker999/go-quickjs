@@ -29,7 +29,7 @@ func TestJITLiteralArrayRoomWeakPools(t *testing.T) {
 // does not.
 func TestJITLiteralArrayRoom(t *testing.T) {
 	t.Parallel()
-	r := New(Config{})
+	r := newTestRuntime(t, Config{})
 	defer r.Close()
 	sites := []*arrayRoom{
 		{pc: 3, room: arrayRoomLimit, acrossTurns: true}, {pc: 7, room: 4096, acrossTurns: true},
