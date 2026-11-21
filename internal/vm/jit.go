@@ -1032,7 +1032,8 @@ type jitState struct {
 	typeofCells *[8]Value
 	// builders are the strings loops' appends build (jitAppend), until
 	// native code leaves for Go (jitFreezeBuilders); appended counts the
-	// appends made in place.
+	// appends made in place, a builder's and a marked addition's
+	// (jitStrAppend).
 	builders []jitBuilder
 	appended uint64
 	// arena holds the code of every entry: a few mappings, however many

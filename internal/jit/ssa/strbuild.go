@@ -13,7 +13,9 @@ package ssa
 // built is mutable only while nothing else can see it, and is frozen
 // (OpFreeze) wherever the loop's code uses it outside the loop, and by Go
 // wherever native code leaves for Go: after that, an append makes another,
-// of the frozen one and the rest.
+// of the frozen one and the rest. An addition the compiler marked as its
+// binding's alone (Owned) is no builder's: Go grows its string in place
+// as the interpreter does, and the compiler has its reads freeze it.
 //
 // The values the loop builds the string in are a web: the phi at the
 // loop's header, the additions' results, and the phis of the loop that
@@ -306,13 +308,16 @@ func (c *builderCheck) appendsLast(f *Func, inWeb []bool, appends []*Value, inde
 }
 
 // isGoAdd reports whether v is an addition Go makes (GoAdd), of two
-// operands.
+// operands, that a builder may append: not one the compiler marked
+// (Owned), which Go grows in place as the interpreter's append does (the
+// VM's strAppend), the string's reads freezing it where the compiler put
+// them.
 func isGoAdd(v *Value) bool {
 	if v.Op != OpCall || len(v.Args) != 2 {
 		return false
 	}
 	calls := v.Calls()
-	return len(calls) == 1 && calls[0].Go == GoAdd
+	return len(calls) == 1 && calls[0].Go == GoAdd && !calls[0].Owned
 }
 
 // loopBlocks marks in inLoop, by the blocks' places in f.Blocks (index, by
