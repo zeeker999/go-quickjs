@@ -98,6 +98,10 @@
 # JIT: the keyed stores' and the megamorphic reads' code grew the JIT's
 # compiler, linked before it, by 7,456 bytes, and string_build3 was 4%
 # slower with the JIT at every placement.
+# PR holds regRunFD and the frame entries and capture-closing helpers
+# after it at c4c36962's layout. Growing regClosure by 96 bytes moved
+# those helpers; JIT closure_make was 11% slower at both placements with
+# GC disabled. Restoring their offsets makes that comparison level.
 #
 # The wasm and jit+wasm configurations are v8bench built with the
 # quickjs_wasm tag (and quickjs_jit), which links the WebAssembly engine
@@ -129,6 +133,7 @@ anchor L  0x00300 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).add
 anchor B  0x00ae0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).callObject
 anchor N  0x00ce0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).nativeRun
 anchor P  0x00580 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).regCall
+anchor PR 0x00ae0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).regRunFD
 anchor Q  0x00d80 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).runReg
 anchor W  0x00c80 github.com/go-quickjs/go-quickjs/internal/vm.rhCallW
 anchor U  0x00bc0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).regBinImm
@@ -159,6 +164,7 @@ anchor L  0x00940 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).add
 anchor B  0x000e0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).callObject
 anchor J  0x00fa0 github.com/go-quickjs/go-quickjs/internal/vm.jitLeafGo
 anchor N  0x005c0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).nativeRun
+anchor PR 0x00680 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).regRunFD
 anchor Q  0x000e0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).runReg
 anchor W  0x00fe0 github.com/go-quickjs/go-quickjs/internal/vm.rhCallW
 anchor U  0x00fe0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).regBinImm
@@ -190,6 +196,7 @@ anchor L  0x00540 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).add
 anchor B  0x00d20 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).callObject
 anchor N  0x00f20 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).nativeRun
 anchor P  0x007c0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).regCall
+anchor PR 0x00d20 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).regRunFD
 anchor Q  0x00fc0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).runReg
 anchor W  0x00ec0 github.com/go-quickjs/go-quickjs/internal/vm.rhCallW
 anchor U  0x00e00 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).regBinImm
@@ -220,6 +227,7 @@ anchor L  0x00800 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).add
 anchor B  0x00fa0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).callObject
 anchor J  0x00e60 github.com/go-quickjs/go-quickjs/internal/vm.jitLeafGo
 anchor N  0x00480 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).nativeRun
+anchor PR 0x00520 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).regRunFD
 anchor Q  0x00fa0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).runReg
 anchor W  0x00ea0 github.com/go-quickjs/go-quickjs/internal/vm.rhCallW
 anchor U  0x00ea0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).regBinImm
@@ -251,6 +259,7 @@ anchor L  0x00300 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).add
 anchor B  0x00ae0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).callObject
 anchor N  0x00ce0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).nativeRun
 anchor P  0x00580 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).regCall
+anchor PR 0x00ae0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).regRunFD
 anchor Q  0x00d80 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).runReg
 anchor W  0x00c80 github.com/go-quickjs/go-quickjs/internal/vm.rhCallW
 anchor U  0x00bc0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).regBinImm
@@ -281,6 +290,7 @@ anchor L  0x00940 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).add
 anchor B  0x000e0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).callObject
 anchor J  0x00fa0 github.com/go-quickjs/go-quickjs/internal/vm.jitLeafGo
 anchor N  0x005c0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).nativeRun
+anchor PR 0x00680 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).regRunFD
 anchor Q  0x000e0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).runReg
 anchor W  0x00fe0 github.com/go-quickjs/go-quickjs/internal/vm.rhCallW
 anchor U  0x00fe0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).regBinImm
@@ -312,6 +322,7 @@ anchor L  0x00540 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).add
 anchor B  0x00d20 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).callObject
 anchor N  0x00f20 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).nativeRun
 anchor P  0x007c0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).regCall
+anchor PR 0x00d20 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).regRunFD
 anchor Q  0x00fc0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).runReg
 anchor W  0x00ec0 github.com/go-quickjs/go-quickjs/internal/vm.rhCallW
 anchor U  0x00e00 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).regBinImm
@@ -342,6 +353,7 @@ anchor L  0x00800 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).add
 anchor B  0x00fa0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).callObject
 anchor J  0x00e60 github.com/go-quickjs/go-quickjs/internal/vm.jitLeafGo
 anchor N  0x00480 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).nativeRun
+anchor PR 0x00520 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).regRunFD
 anchor Q  0x00fa0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).runReg
 anchor W  0x00ea0 github.com/go-quickjs/go-quickjs/internal/vm.rhCallW
 anchor U  0x00ea0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).regBinImm

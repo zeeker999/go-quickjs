@@ -288,6 +288,51 @@ the program's own objects, which only allocating less removes.
   0.2%. Single-thread arm64 improves 2.1%. An initial version that counted
   the cells at each allocation gained only 0.4% on arm64 and was level
   single-threaded.
+  The initial broader audit of this change leaves V8's plain total 0.2% lower
+  on arm64 and 0.2% higher on Windows, and its JIT total 0.3% and 0.4%
+  higher. The 418 micro-benchmarks' geometric ratios are 0.999 plain and
+  1.000 with the JIT on arm64, and 0.999 and 1.001 on Windows. Seven-round
+  arm64 repeats clear the initial micro findings and JIT Splay finding.
+  Windows repeats find `local_append_read` 17.7% slower plain, and
+  `closure_make` 25.3% and `subclass_new` 30.9% slower with the JIT.
+  Their JIT output is unchanged apart from addresses. Longer individual
+  runs have the same allocations and bytes; the append takes 0.6% more
+  total time and 0.4% more CPU, and a repeat on CPU groups 6 and 10 is
+  level. The original JIT closure gap persists at 11% with GC disabled.
+  Growing `regClosure` moved `regRunFD`, `regCtorThis` and `regCloseRegs`
+  by 96 bytes. A new layout position before `reg_call_run.go` holds
+  these at their parent's offsets, plain and with the JIT, on both amd64
+  targets. With those offsets restored and verified at both placements,
+  the GC-disabled JIT closure and subclass comparisons are level, and
+  the subclass is level with GC enabled too. With the restored layout,
+  Earley remains 2.5% faster on arm64 and 4.4% faster on Windows over
+  seven rounds at both placements. These compare the allocation change
+  and its layout fix together with the parent before coallocation.
+  The corrected Windows broad audit leaves V8's plain total 0.5% lower
+  and its JIT total 0.1% higher; the 418 micro-benchmarks' geometric
+  ratios are 1.001 and 0.999. Seven-round targeted repeats put normal-GC
+  `closure_make` level, at -0.2%; an earlier +16.1% mean did not repeat.
+  Two remaining parallel findings, plain `typed_u32_reduce` at +4.1%
+  and JIT `generator_objects` at +19.7%, prompted isolated profiles.
+  Over 300 runs the reduce's total CPU differs by +0.2%, the generator's
+  by -0.1%, with matching allocations and bytes. The generator's JIT
+  code is unchanged apart from addresses, both with clocks held and
+  running normally. Its normal-GC profiles have 156 and 157 collections,
+  with 4.095 and 4.127 seconds of summed marking wall time.
+  Eleven sequential rounds on Windows CPU 6, at both placements, put
+  the generator 3.3% faster and the reduce 2.6% slower at only one
+  placement. A further parallel generator repeat still finds +8.7%,
+  but same-binary controls differ by 5.2%, both parallel and sequential;
+  the short-run generator timing remains noisy. These runs establish no
+  remaining slowdown at both placements in isolation, without assigning
+  a cause to the parallel difference. The layout fix adds 5,120 bytes
+  to the Windows plain binary and changes no function body.
+  The full suites pass plain, with the JIT and with the Go handler table;
+  Windows amd64, arm64 and 386 builds and the 386 capture and large-length
+  tests pass. test262 passes 100,277 tests with zero failures plain and
+  under JIT stress. CI's macOS Go 1.27 pointer-check lane times out at
+  20 minutes; local pointer checks pass for the capture tests and the
+  three tests still running at that timeout.
   Node 26.8.1 jitless materializes this object too: the exact `sc_list`
   body starts with `CreateMappedArguments`, followed by a register move
   for `a = arguments`, `GetNamedProperty` for its length and

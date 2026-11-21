@@ -152,6 +152,7 @@ var positions = []position{
 	{"J", "jit_layoutpad.go", "after jit_keyedwrite.go, before jit_lazyframes.go and jit_leaffast.go: the JIT's leaf calls, jitLeafGo (without the JIT, N and P hold what follows)"},
 	{"N", "native_r_layoutpad.go", "after native_predicate.go, before native_run.go: the native dispatcher's Go side, nativeRun first, and its calls of Go, nativeApply, nativeNew and nativeBuiltin"},
 	{"P", "reg_cal_layoutpad.go", "after reg_caches.go, before reg_call.go: without the JIT, the register interpreter's calls, regCall"},
+	{"PR", "reg_call_r_layoutpad.go", "after reg_call.go, before reg_call_run.go: the register interpreter frame entries and the capture-closing helpers after them"},
 	{"Q", "reg_ru_layoutpad.go", "after reg_report.go, before reg_run.go: the register interpreter's loop, runReg"},
 	{"W", "reg_run_a_layoutpad.go", "after reg_run.go, before reg_run_call.go: the register interpreter's calls after its loop, rhCallW first"},
 	{"U", "reg_runr_layoutpad.go", "after reg_run_call.go, before reg_runs.go: the register interpreter's operations in Go, regBinImm first, regBinary"},

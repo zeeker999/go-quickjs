@@ -82,6 +82,7 @@ concurrently.
   `regexp_abstract.go`, `strh_layoutpad.go` before `string.go`,
   `jit_layoutpad.go` before `jit_leaffast.go`, `native_r_layoutpad.go`
   before `native_run.go`, `reg_cal_layoutpad.go` before `reg_call.go`,
+  `reg_call_r_layoutpad.go` before `reg_call_run.go`,
   `reg_gene_layoutpad.go` before `reg_generator.go`,
   `reg_ru_layoutpad.go` and `reg_run_a_layoutpad.go` around
   `reg_run.go`, `reg_runr_layoutpad.go` before `reg_runs.go`,
