@@ -143,6 +143,8 @@ var positions = []position{
 	{"I", "bigi_layoutpad.go", "after atom.go, before bigint.go: the BigInts' arithmetic, bigParts and bigOp"},
 	{"E", "builtin_layoutpad.go", "after bigown.go, before builtins.go: the built-ins' hot loops, firstElem"},
 	{"T", "builtins_j_layoutpad.go", "after builtins_iterzip.go, before builtins_json.go: the JSON codec, its encoder's encode"},
+	{"JE", "builtins_json_e_layoutpad.go", "after builtins_json.go, before builtins_json_escape.go: a string's quoting and escapes, appendJSONString first"},
+	{"JM", "builtins_json_m_layoutpad.go", "after builtins_json_escape.go, before builtins_json_members.go: an array's elements and an object's properties, encodeElements first"},
 	{"JP", "builtins_json_p_layoutpad.go", "after builtins_json.go, before builtins_json_parse.go: JSON.parse's parser, parseJSON first, and the built-ins after it up to C"},
 	{"C", "calls_layoutpad.go", "after callbound.go, before callsite.go: the case conversion's memo, asciiCaseMemo"},
 	{"D", "defg_layoutpad.go", "after deferred.go, before define.go: the files after the built-ins"},
