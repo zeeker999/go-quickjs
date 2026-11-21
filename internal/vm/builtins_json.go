@@ -1,16 +1,11 @@
 package vm
 
 import (
-	"encoding/binary"
 	"math"
-	"math/bits"
-	"strconv"
 	"strings"
-	"unicode/utf8"
 	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/jsnum"
-	"github.com/go-quickjs/go-quickjs/internal/jsonscan"
 	"github.com/go-quickjs/go-quickjs/internal/wtf8"
 )
 
