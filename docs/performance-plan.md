@@ -1105,3 +1105,12 @@ Measured and dropped; each needs a new angle before it is tried again.
   placement. Six Windows closure micro-benchmarks had a geometric ratio
   of 0.987, none 3% slower at both placements. The trial was removed
   because its target gain did not justify another representation flag.
+- **Immutable captures read directly from their closed cells** (2026-11-21,
+  Go 1.27.3, M5 Max arm64, JIT off, Earley alone, seven rounds at two
+  placements against `c4c36962`): the compiler propagated the closed-cell
+  representation through forwarded captures and emitted a separate read
+  operation. Its plain native handler removed the load through the cell's
+  slot pointer; the Go and JIT paths kept the ordinary read for shared open
+  cells. Earley took 1.66 and 1.67 ms against 1.64 and 1.63 ms, 1.9%
+  slower overall and slower at both placements. Capture, marking,
+  generated-handler and JIT tests passed. The trial was removed.
