@@ -32,8 +32,8 @@ func TestJITLiteralArrayRoom(t *testing.T) {
 	r := newTestRuntime(t, Config{})
 	defer r.Close()
 	sites := []*arrayRoom{
-		{pc: 3, room: arrayRoomLimit, acrossTurns: true}, {pc: 7, room: 4096, acrossTurns: true},
-		{pc: 11, room: arrayRoomLimit + 1, acrossTurns: true}, {pc: 13, room: 4096},
+		{pc: 3, room: arrayRoomLimit, confirmed: arrayRoomLimit}, {pc: 7, room: 4096, confirmed: 4096},
+		{pc: 11, room: arrayRoomLimit + 1, confirmed: arrayRoomLimit + 1}, {pc: 13, room: 4096},
 	}
 	cl := &closure{closureCode: &closureCode{arrays: &sites}}
 	for _, pc := range []int{5, 11, 13} {
@@ -73,8 +73,8 @@ func TestJITLiteralArrayRoom(t *testing.T) {
 			}
 		}
 	}
-	// The site's flag sits in padding: its size stays put.
-	if unsafe.Sizeof(arrayRoom{}) != 40 {
+	// The confirmed room takes a word more.
+	if unsafe.Sizeof(arrayRoom{}) != 48 {
 		t.Fatalf("arrayRoom is %d bytes", unsafe.Sizeof(arrayRoom{}))
 	}
 }
@@ -116,7 +116,7 @@ func TestJITLiteralArrayRoomNative(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if as := cl.arraySites(); len(as) != 1 || as[0].room != 4096 || !as[0].acrossTurns {
+			if as := cl.arraySites(); len(as) != 1 || as[0].room != 4096 || as[0].confirmed != 4096 {
 				t.Fatalf("the interpreter did not confirm the grown length: %+v", as)
 			}
 			cl.closureCode.jitRegRefused = false
