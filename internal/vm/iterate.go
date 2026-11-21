@@ -1311,6 +1311,11 @@ func (r *Runtime) iterStep(cursor Value) (Value, error) {
 // iterRest drains what is left of a cursor into a dense array, which is what a
 // pattern's rest element binds.
 func (r *Runtime) iterRest(cursor Value) (Value, error) {
+	if st := cursorOf(cursor); st != nil {
+		if v, ok := r.iterRestDense(st); ok {
+			return v, nil
+		}
+	}
 	out := newObject(r.proto.array, ClassArray)
 	for {
 		v, ok, err := r.iterNext(cursor)
@@ -1322,6 +1327,27 @@ func (r *Runtime) iterRest(cursor Value) (Value, error) {
 		}
 		out.extOf().elems = append(out.elemsOf(), v)
 	}
+}
+
+// iterRestDense is iterRest of st, a cursor over an array by the intrinsic
+// iterator, where what is left of the array is all in its dense storage:
+// copied at once, as each step would read an element there, running
+// nothing, and the walk ends at its length, done, as iterRest's steps leave
+// it. It reports whether it made the rest; any other cursor's steps it
+// leaves to iterRest, which may run script and throw. The interpreter's
+// iter_rest and native code's (jitRestPlain) make it so.
+func (r *Runtime) iterRestDense(st *iterState) (Value, bool) {
+	if st.done || st.arr == nil || st.arr.flags&objHasSparseElements != 0 {
+		return Undefined, false
+	}
+	el := st.arr.elemsOf()
+	n := len(el)
+	if int64(n) != int64(st.arr.arrayLength()) || st.idx > n || slices.ContainsFunc(el[st.idx:], isHole) {
+		return Undefined, false
+	}
+	v := Obj(r.newArrayFrom(el[st.idx:]))
+	st.idx, st.done = n, true
+	return v, true
 }
 
 // iterCloseNormal closes a destructuring pattern's cursor once the pattern is
