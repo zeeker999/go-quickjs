@@ -265,7 +265,6 @@ func levers() []lever {
 		ls = append(ls, lever{name: p.name, kind: 'f', pad: vmPrefix + "layoutPad" + p.name})
 		ls = append(ls, lever{name: "G" + p.name, kind: 'g', pad: vmPrefix + "layoutPadG" + p.name + "[go.shape.struct {}]"})
 		ls = append(ls, lever{name: "M" + p.name, kind: 'g', pad: vmPrefix + "layoutPadM" + p.name + "[go.shape.struct {}]"})
-		ls = append(ls, lever{name: "Z" + p.name, kind: 'c', pad: vmPrefix + "layoutPad" + p.name + ".func1"})
 	}
 	ls = append(ls, lever{name: "CZ", kind: 'c', pad: vmPrefix + "layoutPadCZ[go.shape.struct {}].func1"})
 	for _, o := range outers {
@@ -375,7 +374,7 @@ func main() {
 	only := flag.String("config", "", "only the configurations named, comma-separated, as GOOS/GOARCH/KIND, KIND plain, jit, wasm or jit+wasm")
 	verbose := flag.Bool("v", false, "print each build's anchors away from their targets and what each lever is set to")
 	targetsPath := flag.String("targets", targetsRel, "the targets file, from the repository's root")
-	generics := flag.Bool("generics", false, "with -show -all, write every generic pad and closure pad as well")
+	generics := flag.Bool("generics", false, "with -show -all, write every generic pad as well")
 	all := flag.Bool("all", false, "with -show, write the pads and set every lever of the configurations to 0 first, to see where each lands")
 	recordPages := flag.Bool("pages", false, "pad as by default, and record each code anchor's address (its page) as the build has it, where an anchor moved a page and the move is meant")
 	hot := flag.Bool("hot", false, "profile this machine's configurations' micro-benchmarks and list the hot functions that lie far past their range's anchor, each wanting a position (docs/optimizing.md)")
@@ -1166,7 +1165,7 @@ func writeSources(t *targets) error {
 	}
 	if everyGeneric {
 		for _, p := range positions {
-			used["G"+p.name], used["M"+p.name], used["Z"+p.name] = true, true, true
+			used["G"+p.name], used["M"+p.name] = true, true
 		}
 	}
 	for i, p := range positions {
@@ -1275,16 +1274,8 @@ func positionFile(p position, last bool, used map[string]bool) string {
 	if last {
 		b.WriteString("import \"unsafe\"\n\n")
 	}
-	g, m, z := used["G"+p.name], used["M"+p.name], used["Z"+p.name]
+	g, m := used["G"+p.name], used["M"+p.name]
 	fmt.Fprintf(&b, "// layoutPad%s is the layout lock's pad %s, %s.\n// It is never called: see internal/cmd/layoutpad.\n//\n//go:noinline\nfunc layoutPad%s() {\n", p.name, p.name, p.doc, p.name)
-	if z {
-		// The closure pad: the closures of the named functions are laid
-		// out in about their files' order, so this one comes right before
-		// those of the file after the position's.
-		fmt.Fprintf(&b, "\tif layoutPadNZ%s >= 0 {\n\t\tlayoutPadFunc = func() {\n", p.name)
-		stores(&b, "\t\t\t", "layoutPadNZ"+p.name)
-		b.WriteString("\t\t}\n\t}\n")
-	}
 	if g {
 		fmt.Fprintf(&b, "\tif layoutPadNG%s >= 0 {\n\t\tlayoutPadG%s[struct{}]()\n\t}\n", p.name, p.name)
 	}
@@ -1339,9 +1330,6 @@ var (
 	b.WriteString("// init keeps the pads in the binary: layoutPadLive is never true.\nfunc init() {\n\tif layoutPadLive {\n")
 	for _, q := range positions {
 		cond := "layoutPadN" + q.name + " >= 0"
-		if used["Z"+q.name] {
-			cond += " || layoutPadNZ" + q.name + " >= 0"
-		}
 		if used["G"+q.name] {
 			cond += " || layoutPadNG" + q.name + " >= 0"
 		}
