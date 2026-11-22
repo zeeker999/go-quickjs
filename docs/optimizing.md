@@ -223,12 +223,13 @@ byte stores, 7 bytes of code each, so that it fills any whole number of
 | O | `layoutPadO`, before `vm_object.go` | `vm_object.go` and every function after it | what follows the literal constructors, `newErrorObject`, and with it the property definitions after it (`setOwnRaw`, `appendProp`, `setArrayLength`, `vm_property.go`, `vm_shape.go`), at `16f8b5e9`'s layout; the functions before the constructors in `vm_object.go` (`newObject`) move with the pad |
 | R S | `layoutPadX`, the same, after the register interpreter's files | every function after it to the next position | a replace's loop, `regExpReplaceIn` with its templates after it (`regexp_abstract.go`, R), and the string builder, `partsBuilder` (`string.go`, S) |
 | Z | `layoutPadZ`, after every file | the closures, and the generics the last files call | the closures of the named functions, `init.func1` first, at `41a137be`'s layout |
-| G*x* M*x* CZ | a generic a position's pad, or a method at it, calls; a closure in a generic the last file calls | the generics plain functions or methods meet first, from that file back; the closures of generics and every generic after them | CZ: the generics after the native handlers' block, `appendGrown` (an array's growth by push) first, at `41a137be`'s layout; G and M: nothing at present |
+| G*x* M*x* CZ | a generic a position's pad, or a method at it, calls; a closure in a generic the last file calls | the generics plain functions or methods meet first, from that file back; the closures of generics and every generic after them | CZ: the generics after the native handlers' block, `appendGrown` (an array's growth by push) first, at `41a137be`'s layout; GK: the string appends, `strAppendOp` and `strAppend`, after `typeofKind`; MVT: the regular expression leaves, `(*regexpLeaf).match` and the match results before it, after `rootOfKeys`; the other G and M: nothing at present |
 | DH DW DG | 8-byte pointer variables, 8- and 16-byte variables without | the zeroed data after them, which the linker sorts by size | `runtime.mheap_`, `runtime.writeBarrier`, `runtime.gcController` |
 | X | `layoutPadX`, a function in `internal/regexp/aa_layoutpad.go`, its constant in that package's own configuration files | every function of package regexp, and what follows it up to vm, whose levers absorb it | the matcher, `(*matcherASCII).run`, and with it its `search` and the searches for a unit (`indexUnit`, `skipUnitsASCII`) |
 | XJ | `layoutPadXJ`, a function in `internal/jit/aa_layoutpad.go`, its constant in that package's own configuration files | every function of package jit, and what follows it up to vm, whose levers absorb it | native code's calls of Go, `ExpandGoCall`, at `8097c77b`'s layout, in the builds with the JIT |
 | H | `layoutPadH`, an assembly function of whole 32-byte slots of int3 bytes in `native_a_layoutpad_*.s`, one file a configuration, sorted after the JIT's assembly and before `native_<arch>.s` | the native handlers' block, and vm's `init` and the closures of generics after it, which CZ absorbs | `regNativeHandlers`, and with it `nativeEnter`, `nativeCallH` and, in a build with the JIT, the feedback handlers before it |
 | HJ | `layoutPadHJ`, the same in `jit_l_layoutpad_*.s`, sorted after the JIT's BigInt leaves' assembly and before `jit_leaffast_<arch>.s`, in the builds with the JIT | the JIT's leaf stubs and the assembly after them up to H | `jitLeafFast` and `jitGoFast`, native code's leaf and Go call stubs, which every closure added had moved |
+| HT | `layoutPadHT`, the same in `native_ta_layoutpad_*.s`, sorted after `native_handlers_<arch>.s` and before `native_typed_<arch>.s` | the typed code's handlers and what follows them up to CZ | `regNativeTypedHandlers`, which lay 98 KB past H, after the whole native handlers' block |
 
 What each lever cannot move:
 
@@ -304,7 +305,13 @@ What each lever cannot move:
   functions' in descending init order, then a group in reverse file order.
   Z holds them at their start, `init.func1`, against the functions before
   them: CZ's pad, which the last file's init calls, had moved them 32
-  bytes. Closures against each other are not pinned. The package's
+  bytes. Closures against each other are not pinned, nor can a position
+  pin them: a closure pad put in a position's file is laid out with the
+  closures of the other pads, not before those of the file after it (a
+  trial with one at every position put them all together, by
+  `initTemporalPlainMonthDay`'s closures), so the typed arrays' callback
+  closures (`defineTypedArrayMethods.func17` and `func18`, 0.5% of the
+  plain build's samples, 82 KB past Z) are held by nothing. The package's
   assembly -- the native handlers' block, its entry and exit stubs, the
   JIT's leaf stubs -- is laid out after the closures, so a closure added
   moves it, which H takes up.
@@ -324,7 +331,12 @@ What each lever cannot move:
   block before them, whose growth had moved them: the fused branches'
   handlers grew it 967 bytes, moved `appendGrown` 960, and made
   `array_push_args5_single` 7% slower with the JIT at every placement.
-  No anchor holds the generics against each other, and so a function
+  GK and MVT hold two groups against the generics before them: a G or
+  M pad lands where the compiler's order puts it, not where its file
+  sorts, so `layoutpad -show -all -generics` writes one at every
+  position and shows where each lands, and a group gets the pad that
+  lands right before it. Other generics are not held against each
+  other, and so a function
   pinned at an older offset is not held against the generics it calls,
   nor the native handlers' block's time, which depends on where the Go
   handlers sit against the generics: code against code, which no single

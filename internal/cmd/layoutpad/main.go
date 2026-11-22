@@ -28,7 +28,9 @@
 //     after it.
 //   - A method's generic pad (layoutPadMA ... layoutPadMZ), which a method
 //     of *Runtime at the file calls, the same among the generics methods
-//     meet first.
+//     meet first. The method comes before the function pad in its file,
+//     so that it moves nothing the function pad holds.
+//   - An assembly pad (H, HT, HJ): see below.
 //   - A generic closure pad (layoutPadCZ), a closure in a generic the last
 //     file calls: the closures of generics come first among the generics.
 //   - Data pads: 8-byte pointer variables (DH) and 8- and 16-byte variables
@@ -44,7 +46,8 @@
 //   - An assembly pad (H), a function of raw bytes in an assembly file
 //     sorted before the native handlers' files
 //     (native_a_layoutpad_*.s), its size a whole number of 32-byte
-//     slots: package vm's assembly is laid out after every closure of its
+//     slots (HT, before the typed code's handlers, and HJ, before the
+//     JIT's leaf stubs, are the same): package vm's assembly is laid out after every closure of its
 //     named functions, so that any closure's growth moves the native
 //     handlers' block (nativeEnter, nativeCallH, the feedback handlers and
 //     regNativeHandlers), which no Go pad can reach without moving the
@@ -381,6 +384,7 @@ func main() {
 	hotRuns := flag.Int("hotruns", 10, "with -hot, the micro-benchmarks' runs")
 	hotShare := flag.Float64("hotshare", 0.002, "with -hot, the share of the samples that makes a function hot")
 	hotDist := flag.Int64("hotdist", 8192, "with -hot, the bytes past its range's anchor that a hot function may lie")
+	reserve := flag.String("reserve", "", "with -pages, the levers, comma-separated, whose pads take their reserve now, their anchors and every one after them recorded as many pages on as that needs (XJ,CZ)")
 	recordEq := flag.Bool("eq", false, "pad as by default, and record the builds' equality functions (type:.eq.*) in "+eqRel+", where a new one is meant")
 	flag.Parse()
 	root, err := repoRoot()
@@ -559,6 +563,15 @@ func main() {
 				eqFailed = eqFailed || failed
 			}
 			if *recordPages {
+				forced := map[string]bool{}
+				for _, name := range strings.Split(*reserve, ",") {
+					forced[name] = name != ""
+				}
+				if reservePages(c, syms, readValues(c), forced) {
+					if syms, err = solve(c, *verbose); err != nil {
+						fatal(err)
+					}
+				}
 				setPages(c, syms)
 				continue
 			}
