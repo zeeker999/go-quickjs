@@ -340,9 +340,9 @@ anchor VT 0x00720 @0x1403b1720 github.com/go-quickjs/go-quickjs/internal/vm.rsAd
 anchor HT 0x009c0 @0x1404af9c0 github.com/go-quickjs/go-quickjs/internal/vm.regNativeTypedHandlers
 anchor GK 0x004c0 @0x1404be4c0 github.com/go-quickjs/go-quickjs/internal/vm.strAppend[go.shape.struct {}]
 anchor MVT 0x008e0 @0x1404d58e0 github.com/go-quickjs/go-quickjs/internal/vm.(*regexpLeaf[go.shape.struct {}]).match
-anchor BM 0x006e0 github.com/go-quickjs/go-quickjs/internal/vm.(*jsMap).find
-anchor TA 0x00b40 github.com/go-quickjs/go-quickjs/internal/vm.(*typedArrayData).getElem
-anchor CB 0x00020 github.com/go-quickjs/go-quickjs/internal/vm.(*regCallback).call
+anchor BM 0x006e0 @0x1403216e0 github.com/go-quickjs/go-quickjs/internal/vm.(*jsMap).find
+anchor TA 0x00b40 @0x14033ab40 github.com/go-quickjs/go-quickjs/internal/vm.(*typedArrayData).getElem
+anchor CB 0x00020 @0x14033f020 github.com/go-quickjs/go-quickjs/internal/vm.(*regCallback).call
 anchor DH 0x000 runtime.mheap_
 anchor DW 0x020 runtime.writeBarrier
 anchor DG 0x020 runtime.gcController
@@ -387,9 +387,9 @@ anchor VT 0x00fa0 @0x140725fa0 github.com/go-quickjs/go-quickjs/internal/vm.rsAd
 anchor HT 0x00fe0 @0x140827fe0 github.com/go-quickjs/go-quickjs/internal/vm.regNativeTypedHandlers
 anchor GK 0x002c0 @0x14083d2c0 github.com/go-quickjs/go-quickjs/internal/vm.strAppend[go.shape.struct {}]
 anchor MVT 0x008e0 @0x1408538e0 github.com/go-quickjs/go-quickjs/internal/vm.(*regexpLeaf[go.shape.struct {}]).match
-anchor BM 0x00e60 github.com/go-quickjs/go-quickjs/internal/vm.(*jsMap).find
-anchor TA 0x00280 github.com/go-quickjs/go-quickjs/internal/vm.(*typedArrayData).getElem
-anchor CB 0x007a0 github.com/go-quickjs/go-quickjs/internal/vm.(*regCallback).call
+anchor BM 0x00e60 @0x140607e60 github.com/go-quickjs/go-quickjs/internal/vm.(*jsMap).find
+anchor TA 0x00280 @0x140621280 github.com/go-quickjs/go-quickjs/internal/vm.(*typedArrayData).getElem
+anchor CB 0x007a0 @0x1406257a0 github.com/go-quickjs/go-quickjs/internal/vm.(*regCallback).call
 anchor DH 0x000 runtime.mheap_
 anchor DW 0x000 runtime.writeBarrier
 anchor DG 0x020 runtime.gcController
@@ -427,9 +427,9 @@ anchor VT 0x00960 @0x7a8960 github.com/go-quickjs/go-quickjs/internal/vm.rsAdd
 anchor HT 0x00c00 @0x8a6c00 github.com/go-quickjs/go-quickjs/internal/vm.regNativeTypedHandlers
 anchor GK 0x00700 @0x8b5700 github.com/go-quickjs/go-quickjs/internal/vm.strAppend[go.shape.struct {}]
 anchor MVT 0x00b80 @0x8ccb80 github.com/go-quickjs/go-quickjs/internal/vm.(*regexpLeaf[go.shape.struct {}]).match
-anchor BM 0x00920 github.com/go-quickjs/go-quickjs/internal/vm.(*jsMap).find
-anchor TA 0x00d80 github.com/go-quickjs/go-quickjs/internal/vm.(*typedArrayData).getElem
-anchor CB 0x00260 github.com/go-quickjs/go-quickjs/internal/vm.(*regCallback).call
+anchor BM 0x00920 @0x718920 github.com/go-quickjs/go-quickjs/internal/vm.(*jsMap).find
+anchor TA 0x00d80 @0x731d80 github.com/go-quickjs/go-quickjs/internal/vm.(*typedArrayData).getElem
+anchor CB 0x00260 @0x736260 github.com/go-quickjs/go-quickjs/internal/vm.(*regCallback).call
 anchor DH 0x000 runtime.mheap_
 anchor DW 0x020 runtime.writeBarrier
 anchor DG 0x000 runtime.gcController
@@ -474,9 +474,9 @@ anchor VT 0x00e60 @0xaf0e60 github.com/go-quickjs/go-quickjs/internal/vm.rsAdd
 anchor HT 0x00ea0 @0xbf2ea0 github.com/go-quickjs/go-quickjs/internal/vm.regNativeTypedHandlers
 anchor GK 0x00160 @0xc08160 github.com/go-quickjs/go-quickjs/internal/vm.strAppend[go.shape.struct {}]
 anchor MVT 0x007e0 @0xc1e7e0 github.com/go-quickjs/go-quickjs/internal/vm.(*regexpLeaf[go.shape.struct {}]).match
-anchor BM 0x00d20 github.com/go-quickjs/go-quickjs/internal/vm.(*jsMap).find
-anchor TA 0x00140 github.com/go-quickjs/go-quickjs/internal/vm.(*typedArrayData).getElem
-anchor CB 0x00660 github.com/go-quickjs/go-quickjs/internal/vm.(*regCallback).call
+anchor BM 0x00d20 @0x9d2d20 github.com/go-quickjs/go-quickjs/internal/vm.(*jsMap).find
+anchor TA 0x00140 @0x9ec140 github.com/go-quickjs/go-quickjs/internal/vm.(*typedArrayData).getElem
+anchor CB 0x00660 @0x9f0660 github.com/go-quickjs/go-quickjs/internal/vm.(*regCallback).call
 anchor DH 0x000 runtime.mheap_
 anchor DW 0x030 runtime.writeBarrier
 anchor DG 0x020 runtime.gcController
