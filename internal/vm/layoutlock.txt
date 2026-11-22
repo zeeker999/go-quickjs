@@ -107,14 +107,17 @@
 # calls of Go (ExpandGoCall) at 8097c77b's layout in the builds with the
 # JIT: the keyed stores' and the megamorphic reads' code grew the JIT's
 # compiler, linked before it, by 7,456 bytes, and string_build3 was 4%
-# slower with the JIT at every placement. TA, CB, JB, JU, JN, JS, VT,
-# VA, PR and SH, and the assembly pad HJ, are positions the lock's rule
+# slower with the JIT at every placement. BM, TA, CB, JB, JU, JN, JS,
+# VT, VA, PR and SH, and the assembly pads HJ and HT, are positions the lock's rule
 # for them asked for (docs/optimizing.md, "Adding a position"): hot
 # functions more than 8 KB past their range's anchor at 1d08a62d --
 # jitHostCall 251 KB past J, the JIT's leaf stubs (jitLeafFast,
 # jitGoFast) 485 KB past Z, the array methods' callbacks 140 KB past JP
 # -- each anchored where its pad, at its least, left it; P holds regCall
-# with the JIT too.
+# with the JIT too. GK and MVT hold two groups of generics, the string
+# appends (strAppend) and the regular expression leaves
+# ((*regexpLeaf).match), where layoutpad -show -all -generics found a
+# generic pad landing right before them.
 #
 # The wasm and jit+wasm configurations are v8bench built with the
 # quickjs_wasm tag (and quickjs_jit), which links the WebAssembly engine
