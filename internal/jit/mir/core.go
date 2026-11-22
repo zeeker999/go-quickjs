@@ -1489,6 +1489,10 @@ func (c *core) allocate() error {
 				if v.Op == ssa.OpKeep {
 					c.keepRunAt(b, i, v)
 				}
+			default:
+				if goesLive(v) {
+					kv = append(kv, v)
+				}
 			}
 			// A fused value is computed at its block's branch (findFused):
 			// what it reads is used there.
@@ -1559,7 +1563,7 @@ func (c *core) allocate() error {
 				// others, as they are in one block.
 				continue
 			}
-			refused, own = at != p && v.Calls()[0].Go != 0, first
+			refused, own = at != p && (goesLive(v) || v.Calls()[0].Go != 0), first
 			laterState(v.State, at)
 			refused, own, first = false, -1, -1
 		}
@@ -2594,10 +2598,11 @@ func (c *core) allocate() error {
 	open, next := c.intervalRefs(len(all))[:0], 0
 	{
 		for _, v := range kv {
-			if !savingCall(v) {
+			if !savingCall(v) && !goesLive(v) {
 				// A call, native or Go's; or a Math function's call of
 				// Go, which saves what lives across it too (mir's
-				// mathCall).
+				// mathCall); or a value whose operation calls Go out of
+				// line (goesLive).
 				continue
 			}
 			if v.Op == ssa.OpCall && iv[v.ID].v != nil && iv[v.ID].end == pos[v.ID] {
@@ -3146,6 +3151,11 @@ func (c *core) frameSize() int {
 // whose pool Go fills, made again from its start (ssa.RefillsPools). What
 // it reads lives across it, saved and restored (allocate's saves).
 func callsAgain(v *ssa.Value) bool {
+	if goesLive(v) {
+		// Its call of Go, which may refuse: the exit reads its state after
+		// Go has had the registers.
+		return true
+	}
 	if v.Op != ssa.OpCall || len(v.Calls()) == 0 {
 		return false
 	}
@@ -3158,6 +3168,16 @@ func callsAgain(v *ssa.Value) bool {
 // function's call of Go.
 func savingCall(v *ssa.Value) bool {
 	return v.Op == ssa.OpCall && v.Calls() != nil || v.Op == ssa.OpMathCall
+}
+
+// goesLive reports a value that is no call but whose operation calls Go out
+// of line, saving what lives across it in registers (savesOf), as a call
+// of Go does, and no other register (the backends' goLive): an oddball's
+// conversion that leaves a string to Go (ssa.GoNumber). Its saves are
+// made as a call's, but it is no call to the allocation, which keeps the
+// values live across it in registers as it would.
+func goesLive(v *ssa.Value) bool {
+	return v.Op == ssa.OpOddballF64 && v.Index == 1 && exitKind(v.Aux) == abi.ExitHost
 }
 
 // remat reports a value an exit recomputes from its operands rather than

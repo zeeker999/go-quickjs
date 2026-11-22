@@ -8740,6 +8740,65 @@ func (c *compiler) goCallingLive(v *ssa.Value, st *abi.GoCallState, stub amd64.L
 	})
 }
 
+// goLive calls Go, op, its operands in the context's GoArgs, for v, a
+// value whose operation calls Go out of line (core's goesLive): what lives
+// across v in registers saved and restored (savesOf), not every register,
+// through the VM's routine for calls of Go (GoFast), as mathCall's; the
+// budget a loop counts in a register stored back around it, as goCalling
+// does. If Go refuses, it goes to stub once it has restored them -- the
+// stub's part past the budget's store, the budget where Go left it. Where
+// there is no GoFast, it is goSaving.
+func (c *compiler) goLive(v *ssa.Value, op uint64, stub amd64.Label) {
+	if c.enc.GoFast == 0 || c.goCallBig {
+		c.goSaving(op, &stub)
+		return
+	}
+	st, _ := c.goState(op, 0, nil, nil)
+	saves := c.savesOf(v)
+	for _, sv := range saves {
+		if sv.float {
+			c.spillStoreSD(sv.slot, amd64.XReg(sv.reg))
+		} else {
+			c.spillStore(sv.slot, amd64.Reg(sv.reg))
+		}
+	}
+	reg := c.budgetReg(c.budget)
+	if reg >= 0 {
+		c.budgetFlush(amd64.Reg(reg))
+	}
+	back, fail := c.a.NewLabel(), c.a.NewLabel()
+	c.movImm(scratchC, uint64(uintptr(unsafe.Pointer(st))))
+	c.a.LeaLabel(scratchA, back)
+	c.movImm(scratchB, c.enc.GoFast)
+	c.a.JmpReg(scratchB)
+	c.a.Bind(back)
+	restore := func() {
+		c.a.Load(regLocals, regCtx, abi.OffLocals)
+		c.a.Load(regStack, regCtx, abi.OffStack)
+		for _, sv := range saves {
+			if sv.float {
+				c.spillLoadSD(amd64.XReg(sv.reg), sv.slot)
+			} else {
+				c.spillLoad(amd64.Reg(sv.reg), sv.slot)
+			}
+		}
+	}
+	restore()
+	if reg >= 0 {
+		c.budgetStart(amd64.Reg(reg))
+	}
+	to := stub
+	if real, ok := c.budgetReal[to]; ok {
+		to = real
+	}
+	c.goFails = append(c.goFails, goFail{st, back, fail})
+	c.cold = append(c.cold, func() {
+		c.a.Bind(fail)
+		restore()
+		c.a.Jmp(to)
+	})
+}
+
 // liveCall is the routine of goCallingLive's calls: the description and
 // where the call goes on (GoSite) in the context, Go called -- through
 // target, CallGo or BigFast -- its return to the code's resumeLive -- the
@@ -10436,7 +10495,7 @@ func (c *compiler) oddball(v *ssa.Value, fail guardTo) {
 			c.a.Bind(slow)
 			stub := c.stubLabel(v.State, exitKind(v.Aux))
 			c.goArg(abi.OffGoArgs, v.Args[0])
-			c.goSaving(uint64(ssa.GoNumber), &stub)
+			c.goLive(v, uint64(ssa.GoNumber), stub)
 			c.a.LoadSD(xScratch0, regCtx, abi.OffGoArgs+c.enc.NumOffset)
 			c.a.Jmp(done)
 		})
