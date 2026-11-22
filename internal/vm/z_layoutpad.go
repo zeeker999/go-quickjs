@@ -370,6 +370,9 @@ func init() {
 		if layoutPadNJP >= 0 {
 			layoutPadJP()
 		}
+		if layoutPadNBM >= 0 {
+			layoutPadBM()
+		}
 		if layoutPadNTA >= 0 {
 			layoutPadTA()
 		}
