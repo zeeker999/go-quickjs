@@ -383,11 +383,12 @@ func (c *core) refIntervals() ([]interval, []realUse, func(a, b *ssa.Value) bool
 		}
 	}
 	// The calls that save the registers, by position: at[p] is their
-	// block.
+	// block. A value whose operation calls Go out of line (goesLive) is
+	// one.
 	calls := make([]bool, len(at))
 	for _, b := range c.order {
 		for _, v := range b.Values {
-			if savingCall(v) {
+			if savingCall(v) || goesLive(v) {
 				calls[pos[v.ID]] = true
 			}
 		}

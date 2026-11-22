@@ -2602,6 +2602,61 @@ func (c *a64Compiler) goCallingLive(v *ssa.Value, st *abi.GoCallState, stub arm6
 	})
 }
 
+// goLive is amd64's: Go called for v, what lives across it saved.
+func (c *a64Compiler) goLive(v *ssa.Value, op uint64, stub arm64.Label) {
+	if c.enc.GoFast == 0 || c.goCallBig {
+		c.goSaving(op, &stub)
+		return
+	}
+	st, _ := c.goState(op, 0, nil, nil)
+	saves := c.savesOf(v)
+	for _, sv := range saves {
+		if sv.float {
+			c.spillStoreF(sv.slot, arm64.FReg(sv.reg))
+		} else {
+			c.spillStore(sv.slot, arm64.Reg(sv.reg))
+		}
+	}
+	reg := c.budgetReg(c.budget)
+	if reg >= 0 {
+		c.budgetFlush(arm64.Reg(reg))
+	}
+	back, fail := c.a.NewLabel(), c.a.NewLabel()
+	c.movImm(a64C, uint64(uintptr(unsafe.Pointer(st))))
+	c.a.Adr(a64A, back)
+	c.movImm(a64B, c.enc.GoFast)
+	c.a.Br(a64B)
+	c.a.Bind(back)
+	restore := func(refused bool) {
+		c.a.Load(a64Locals, a64Ctx, abi.OffLocals)
+		c.a.Load(a64Stack, a64Ctx, abi.OffStack)
+		for _, sv := range saves {
+			switch {
+			case sv.cold && !refused:
+				// What its state reads, read by its refusal's exit alone.
+			case sv.float:
+				c.spillLoadF(arm64.FReg(sv.reg), sv.slot)
+			default:
+				c.spillLoad(arm64.Reg(sv.reg), sv.slot)
+			}
+		}
+	}
+	restore(false)
+	if reg >= 0 {
+		c.budgetStart(arm64.Reg(reg))
+	}
+	to := stub
+	if real, ok := c.budgetReal[to]; ok {
+		to = real
+	}
+	c.goFails = append(c.goFails, a64GoFail{st, back, fail})
+	c.cold = append(c.cold, func() {
+		c.a.Bind(fail)
+		restore(true)
+		c.a.B(to)
+	})
+}
+
 // liveCall is amd64's.
 func (c *a64Compiler) liveCall(target uint64) {
 	resume := c.a.NewLabel()
@@ -9242,7 +9297,7 @@ func (c *a64Compiler) oddball(v *ssa.Value, fail a64Guard) {
 			c.a.Bind(slow)
 			stub := c.stubLabel(v.State, exitKind(v.Aux))
 			c.goArg(abi.OffGoArgs, v.Args[0])
-			c.goSaving(uint64(ssa.GoNumber), &stub)
+			c.goLive(v, uint64(ssa.GoNumber), stub)
 			c.a.LoadF(d, a64Ctx, abi.OffGoArgs+c.enc.NumOffset)
 			c.a.B(done)
 		})
