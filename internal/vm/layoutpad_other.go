@@ -109,6 +109,7 @@ const (
 	layoutPadNCZ  = -1
 	layoutPadNHJ  = -1
 	layoutPadNH   = -1
+	layoutPadNHT  = -1
 	layoutPadNDH  = 0
 	layoutPadNDW  = 0
 	layoutPadNDG  = 0
@@ -119,3 +120,6 @@ func layoutPadHJ() {}
 
 // layoutPadH stands for an assembly pad, which this platform has not.
 func layoutPadH() {}
+
+// layoutPadHT stands for an assembly pad, which this platform has not.
+func layoutPadHT() {}

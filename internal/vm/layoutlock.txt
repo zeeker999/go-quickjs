@@ -161,13 +161,13 @@ anchor H  0x00a40 @0x140497a40 github.com/go-quickjs/go-quickjs/internal/vm.regN
 anchor CZ 0x00c80 @0x1404bbc80 github.com/go-quickjs/go-quickjs/internal/vm.appendGrown[go.shape.struct {}]
 anchor TA 0x00b20 @0x14033ab20 github.com/go-quickjs/go-quickjs/internal/vm.(*typedArrayData).getElem
 anchor CB 0x00000 @0x14033f000 github.com/go-quickjs/go-quickjs/internal/vm.(*regCallback).call
-anchor VT new github.com/go-quickjs/go-quickjs/internal/vm.rsAdd
+anchor VT 0x00720 @0x1403b1720 github.com/go-quickjs/go-quickjs/internal/vm.rsAdd
 anchor VA 0x009e0 @0x1403fb9e0 github.com/go-quickjs/go-quickjs/internal/vm.Value.IsNumber
 anchor PR 0x000c0 @0x1404140c0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).getProp
 anchor SH 0x00320 @0x140419320 github.com/go-quickjs/go-quickjs/internal/vm.rootFor
-anchor HT new github.com/go-quickjs/go-quickjs/internal/vm.regNativeTypedHandlers
-anchor GK new github.com/go-quickjs/go-quickjs/internal/vm.strAppend[go.shape.struct {}]
-anchor MVT new github.com/go-quickjs/go-quickjs/internal/vm.(*regexpLeaf[go.shape.struct {}]).match
+anchor HT 0x009c0 @0x1404af9c0 github.com/go-quickjs/go-quickjs/internal/vm.regNativeTypedHandlers
+anchor GK 0x004c0 @0x1404be4c0 github.com/go-quickjs/go-quickjs/internal/vm.strAppend[go.shape.struct {}]
+anchor MVT 0x008e0 @0x1404d58e0 github.com/go-quickjs/go-quickjs/internal/vm.(*regexpLeaf[go.shape.struct {}]).match
 anchor DH 0x000 runtime.mheap_
 anchor DW 0x010 runtime.writeBarrier
 anchor DG 0x020 runtime.gcController
@@ -201,7 +201,7 @@ anchor H  0x00060 @0x140805060 github.com/go-quickjs/go-quickjs/internal/vm.regN
 anchor CZ 0x00f40 @0x14082df40 github.com/go-quickjs/go-quickjs/internal/vm.appendGrown[go.shape.struct {}]
 anchor TA 0x00260 @0x140617260 github.com/go-quickjs/go-quickjs/internal/vm.(*typedArrayData).getElem
 anchor CB 0x00780 @0x14061b780 github.com/go-quickjs/go-quickjs/internal/vm.(*regCallback).call
-anchor VT new github.com/go-quickjs/go-quickjs/internal/vm.rsAdd
+anchor VT 0x00fa0 @0x14071afa0 github.com/go-quickjs/go-quickjs/internal/vm.rsAdd
 anchor VA 0x00040 @0x140766040 github.com/go-quickjs/go-quickjs/internal/vm.Value.IsNumber
 anchor PR 0x00860 @0x14077e860 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).getProp
 anchor SH 0x00ac0 @0x140783ac0 github.com/go-quickjs/go-quickjs/internal/vm.rootFor
@@ -211,9 +211,9 @@ anchor JN 0x009e0 @0x1406969e0 github.com/go-quickjs/go-quickjs/internal/vm.(*Ru
 anchor JS 0x005a0 @0x1406bd5a0 github.com/go-quickjs/go-quickjs/internal/vm.jitHostCall
 anchor P  0x000a0 @0x1406f30a0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).regCall
 anchor HJ 0x00940 @0x140803940 github.com/go-quickjs/go-quickjs/internal/vm.jitLeafFast.abi0
-anchor HT new github.com/go-quickjs/go-quickjs/internal/vm.regNativeTypedHandlers
-anchor GK new github.com/go-quickjs/go-quickjs/internal/vm.strAppend[go.shape.struct {}]
-anchor MVT new github.com/go-quickjs/go-quickjs/internal/vm.(*regexpLeaf[go.shape.struct {}]).match
+anchor HT 0x00fe0 @0x14081cfe0 github.com/go-quickjs/go-quickjs/internal/vm.regNativeTypedHandlers
+anchor GK 0x002c0 @0x1408312c0 github.com/go-quickjs/go-quickjs/internal/vm.strAppend[go.shape.struct {}]
+anchor MVT 0x008e0 @0x1408478e0 github.com/go-quickjs/go-quickjs/internal/vm.(*regexpLeaf[go.shape.struct {}]).match
 anchor DH 0x000 runtime.mheap_
 anchor DW 0x000 runtime.writeBarrier
 anchor DG 0x020 runtime.gcController
@@ -246,13 +246,13 @@ anchor H  0x00c80 @0x88ec80 github.com/go-quickjs/go-quickjs/internal/vm.regNati
 anchor CZ 0x00ec0 @0x8b2ec0 github.com/go-quickjs/go-quickjs/internal/vm.appendGrown[go.shape.struct {}]
 anchor TA 0x00d60 @0x731d60 github.com/go-quickjs/go-quickjs/internal/vm.(*typedArrayData).getElem
 anchor CB 0x00240 @0x736240 github.com/go-quickjs/go-quickjs/internal/vm.(*regCallback).call
-anchor VT new github.com/go-quickjs/go-quickjs/internal/vm.rsAdd
+anchor VT 0x00960 @0x7a8960 github.com/go-quickjs/go-quickjs/internal/vm.rsAdd
 anchor VA 0x00c20 @0x7f2c20 github.com/go-quickjs/go-quickjs/internal/vm.Value.IsNumber
 anchor PR 0x00300 @0x80b300 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).getProp
 anchor SH 0x00560 @0x810560 github.com/go-quickjs/go-quickjs/internal/vm.rootFor
-anchor HT new github.com/go-quickjs/go-quickjs/internal/vm.regNativeTypedHandlers
-anchor GK new github.com/go-quickjs/go-quickjs/internal/vm.strAppend[go.shape.struct {}]
-anchor MVT new github.com/go-quickjs/go-quickjs/internal/vm.(*regexpLeaf[go.shape.struct {}]).match
+anchor HT 0x00c00 @0x8a6c00 github.com/go-quickjs/go-quickjs/internal/vm.regNativeTypedHandlers
+anchor GK 0x00700 @0x8b5700 github.com/go-quickjs/go-quickjs/internal/vm.strAppend[go.shape.struct {}]
+anchor MVT 0x00b80 @0x8ccb80 github.com/go-quickjs/go-quickjs/internal/vm.(*regexpLeaf[go.shape.struct {}]).match
 anchor DH 0x000 runtime.mheap_
 anchor DW 0x010 runtime.writeBarrier
 anchor DG 0x000 runtime.gcController
@@ -286,7 +286,7 @@ anchor H  0x00f20 @0xbcff20 github.com/go-quickjs/go-quickjs/internal/vm.regNati
 anchor CZ 0x00de0 @0xbf8de0 github.com/go-quickjs/go-quickjs/internal/vm.appendGrown[go.shape.struct {}]
 anchor TA 0x00120 @0x9e2120 github.com/go-quickjs/go-quickjs/internal/vm.(*typedArrayData).getElem
 anchor CB 0x00640 @0x9e6640 github.com/go-quickjs/go-quickjs/internal/vm.(*regCallback).call
-anchor VT new github.com/go-quickjs/go-quickjs/internal/vm.rsAdd
+anchor VT 0x00e60 @0xae5e60 github.com/go-quickjs/go-quickjs/internal/vm.rsAdd
 anchor VA 0x00f00 @0xb30f00 github.com/go-quickjs/go-quickjs/internal/vm.Value.IsNumber
 anchor PR 0x00720 @0xb49720 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).getProp
 anchor SH 0x00980 @0xb4e980 github.com/go-quickjs/go-quickjs/internal/vm.rootFor
@@ -296,9 +296,9 @@ anchor JN 0x008a0 @0xa618a0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runti
 anchor JS 0x00460 @0xa88460 github.com/go-quickjs/go-quickjs/internal/vm.jitHostCall
 anchor P  0x00f40 @0xabdf40 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).regCall
 anchor HJ 0x00800 @0xbce800 github.com/go-quickjs/go-quickjs/internal/vm.jitLeafFast.abi0
-anchor HT new github.com/go-quickjs/go-quickjs/internal/vm.regNativeTypedHandlers
-anchor GK new github.com/go-quickjs/go-quickjs/internal/vm.strAppend[go.shape.struct {}]
-anchor MVT new github.com/go-quickjs/go-quickjs/internal/vm.(*regexpLeaf[go.shape.struct {}]).match
+anchor HT 0x00ea0 @0xbe7ea0 github.com/go-quickjs/go-quickjs/internal/vm.regNativeTypedHandlers
+anchor GK 0x00160 @0xbfc160 github.com/go-quickjs/go-quickjs/internal/vm.strAppend[go.shape.struct {}]
+anchor MVT 0x007e0 @0xc127e0 github.com/go-quickjs/go-quickjs/internal/vm.(*regexpLeaf[go.shape.struct {}]).match
 anchor DH 0x000 runtime.mheap_
 anchor DW 0x030 runtime.writeBarrier
 anchor DG 0x020 runtime.gcController
@@ -334,6 +334,10 @@ anchor CB 0x00000 @0x14033f000 github.com/go-quickjs/go-quickjs/internal/vm.(*re
 anchor VA 0x009e0 @0x1403fb9e0 github.com/go-quickjs/go-quickjs/internal/vm.Value.IsNumber
 anchor PR 0x000c0 @0x1404140c0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).getProp
 anchor SH 0x00320 @0x140419320 github.com/go-quickjs/go-quickjs/internal/vm.rootFor
+anchor VT 0x00720 github.com/go-quickjs/go-quickjs/internal/vm.rsAdd
+anchor HT 0x009c0 github.com/go-quickjs/go-quickjs/internal/vm.regNativeTypedHandlers
+anchor GK 0x004c0 github.com/go-quickjs/go-quickjs/internal/vm.strAppend[go.shape.struct {}]
+anchor MVT 0x008e0 github.com/go-quickjs/go-quickjs/internal/vm.(*regexpLeaf[go.shape.struct {}]).match
 anchor DH 0x000 runtime.mheap_
 anchor DW 0x020 runtime.writeBarrier
 anchor DG 0x020 runtime.gcController
@@ -376,6 +380,10 @@ anchor JN 0x009e0 @0x1406a19e0 github.com/go-quickjs/go-quickjs/internal/vm.(*Ru
 anchor JS 0x005a0 @0x1406c85a0 github.com/go-quickjs/go-quickjs/internal/vm.jitHostCall
 anchor P  0x000a0 @0x1406fe0a0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).regCall
 anchor HJ 0x00940 @0x14080e940 github.com/go-quickjs/go-quickjs/internal/vm.jitLeafFast.abi0
+anchor VT 0x00fa0 github.com/go-quickjs/go-quickjs/internal/vm.rsAdd
+anchor HT 0x00fe0 github.com/go-quickjs/go-quickjs/internal/vm.regNativeTypedHandlers
+anchor GK 0x002c0 github.com/go-quickjs/go-quickjs/internal/vm.strAppend[go.shape.struct {}]
+anchor MVT 0x008e0 github.com/go-quickjs/go-quickjs/internal/vm.(*regexpLeaf[go.shape.struct {}]).match
 anchor DH 0x000 runtime.mheap_
 anchor DW 0x000 runtime.writeBarrier
 anchor DG 0x020 runtime.gcController
@@ -411,6 +419,10 @@ anchor CB 0x00240 @0x736240 github.com/go-quickjs/go-quickjs/internal/vm.(*regCa
 anchor VA 0x00c20 @0x7f2c20 github.com/go-quickjs/go-quickjs/internal/vm.Value.IsNumber
 anchor PR 0x00300 @0x80b300 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).getProp
 anchor SH 0x00560 @0x810560 github.com/go-quickjs/go-quickjs/internal/vm.rootFor
+anchor VT 0x00960 github.com/go-quickjs/go-quickjs/internal/vm.rsAdd
+anchor HT 0x00c00 github.com/go-quickjs/go-quickjs/internal/vm.regNativeTypedHandlers
+anchor GK 0x00700 github.com/go-quickjs/go-quickjs/internal/vm.strAppend[go.shape.struct {}]
+anchor MVT 0x00b80 github.com/go-quickjs/go-quickjs/internal/vm.(*regexpLeaf[go.shape.struct {}]).match
 anchor DH 0x000 runtime.mheap_
 anchor DW 0x020 runtime.writeBarrier
 anchor DG 0x000 runtime.gcController
@@ -453,6 +465,10 @@ anchor JN 0x008a0 @0xa6c8a0 github.com/go-quickjs/go-quickjs/internal/vm.(*Runti
 anchor JS 0x00460 @0xa93460 github.com/go-quickjs/go-quickjs/internal/vm.jitHostCall
 anchor P  0x00f40 @0xac8f40 github.com/go-quickjs/go-quickjs/internal/vm.(*Runtime).regCall
 anchor HJ 0x00800 @0xbd9800 github.com/go-quickjs/go-quickjs/internal/vm.jitLeafFast.abi0
+anchor VT 0x00e60 github.com/go-quickjs/go-quickjs/internal/vm.rsAdd
+anchor HT 0x00ea0 github.com/go-quickjs/go-quickjs/internal/vm.regNativeTypedHandlers
+anchor GK 0x00160 github.com/go-quickjs/go-quickjs/internal/vm.strAppend[go.shape.struct {}]
+anchor MVT 0x007e0 github.com/go-quickjs/go-quickjs/internal/vm.(*regexpLeaf[go.shape.struct {}]).match
 anchor DH 0x000 runtime.mheap_
 anchor DW 0x030 runtime.writeBarrier
 anchor DG 0x020 runtime.gcController

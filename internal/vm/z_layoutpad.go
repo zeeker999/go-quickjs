@@ -430,7 +430,10 @@ func init() {
 		if layoutPadNVT >= 0 {
 			layoutPadVT()
 		}
-		if layoutPadNK >= 0 {
+		if layoutPadNMVT >= 0 {
+			(*Runtime)(nil).layoutPadMVT()
+		}
+		if layoutPadNK >= 0 || layoutPadNGK >= 0 {
 			layoutPadK()
 		}
 		if layoutPadNVA >= 0 {
@@ -462,6 +465,9 @@ func init() {
 		}
 		if layoutPadNH >= 0 {
 			layoutPadH()
+		}
+		if layoutPadNHT >= 0 {
+			layoutPadHT()
 		}
 		layoutPadPtrs[0] = unsafe.Pointer(&layoutPadDH0)
 		layoutPadPtrs[1] = unsafe.Pointer(&layoutPadDH1)

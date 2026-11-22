@@ -82,9 +82,9 @@ const (
 	layoutPadNMV  = -1
 	layoutPadNVT  = 0
 	layoutPadNGVT = -1
-	layoutPadNMVT = -1
-	layoutPadNK   = 434
-	layoutPadNGK  = -1
+	layoutPadNMVT = 0
+	layoutPadNK   = 418
+	layoutPadNGK  = 0
 	layoutPadNMK  = -1
 	layoutPadNVA  = 0
 	layoutPadNGVA = -1
@@ -107,9 +107,10 @@ const (
 	layoutPadNZ   = 365
 	layoutPadNGZ  = -1
 	layoutPadNMZ  = -1
-	layoutPadNCZ  = 287
+	layoutPadNCZ  = 283
 	layoutPadNHJ  = 1
 	layoutPadNH   = 42
+	layoutPadNHT  = 1
 	layoutPadNDH  = 3
 	layoutPadNDW  = 1
 	layoutPadNDG  = 0
@@ -122,3 +123,7 @@ func layoutPadHJ()
 // layoutPadH is an assembly pad, in
 // native_a_layoutpad_jit_linux_amd64.s. It is never called.
 func layoutPadH()
+
+// layoutPadHT is an assembly pad, in
+// native_ta_layoutpad_jit_linux_amd64.s. It is never called.
+func layoutPadHT()

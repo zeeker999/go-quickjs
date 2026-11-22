@@ -110,6 +110,7 @@ const (
 	layoutPadNCZ  = 568
 	layoutPadNHJ  = -1
 	layoutPadNH   = 44
+	layoutPadNHT  = -1
 	layoutPadNDH  = 0
 	layoutPadNDW  = 2
 	layoutPadNDG  = 0
@@ -122,3 +123,7 @@ func layoutPadHJ()
 // layoutPadH is an assembly pad, in
 // native_a_layoutpad_wasm_windows_amd64.s. It is never called.
 func layoutPadH()
+
+// layoutPadHT is an assembly pad, in
+// native_ta_layoutpad_wasm_windows_amd64.s. It is never called.
+func layoutPadHT()
