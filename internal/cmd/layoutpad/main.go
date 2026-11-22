@@ -163,6 +163,7 @@ var positions = []position{
 	{"E", "builtin_layoutpad.go", "after bigown.go, before builtins.go: the built-ins' hot loops, firstElem"},
 	{"T", "builtins_j_layoutpad.go", "after builtins_iterzip.go, before builtins_json.go: the JSON codec, its encoder's encode"},
 	{"JP", "builtins_json_p_layoutpad.go", "after builtins_json.go, before builtins_json_parse.go: JSON.parse's parser, parseJSON first, and the built-ins after it up to C"},
+	{"BM", "builtins_ma_layoutpad.go", "after builtins_json_parse.go, before builtins_map.go: a Map's and a Set's lookups, (*jsMap).find"},
 	{"TA", "builtins_ty_layoutpad.go", "after builtins_string.go, before builtins_typedarray.go: a typed array's element reads and writes, (*typedArrayData).getElem"},
 	{"CB", "callb_layoutpad.go", "after byvalue.go, before callback.go: the array methods' calls of their callbacks, (*regCallback).call"},
 	{"C", "calls_layoutpad.go", "after callbound.go, before callsite.go: the case conversion's memo, asciiCaseMemo"},
@@ -438,8 +439,16 @@ func main() {
 				fatal(err)
 			}
 			for _, h := range list {
-				fmt.Printf("%s: %s (%s), %.2fs (%.1f%%), %d bytes past anchor %s\n", c, strings.TrimPrefix(h.name, modPrefix), h.file, h.seconds, 100*h.share, h.past, h.lever)
-				found = true
+				// A closure is laid out among the closures, which no
+				// position reaches (docs/optimizing.md): it is listed,
+				// and fails nothing.
+				closure := strings.Contains(h.name[strings.LastIndex(h.name, ")")+1:], ".func")
+				note := ""
+				if closure {
+					note = ": a closure, which no position holds"
+				}
+				fmt.Printf("%s: %s (%s), %.2fs (%.1f%%), %d bytes past anchor %s%s\n", c, strings.TrimPrefix(h.name, modPrefix), h.file, h.seconds, 100*h.share, h.past, h.lever, note)
+				found = found || !closure
 			}
 			if len(list) == 0 {
 				fmt.Printf("%s: no hot function more than %d bytes past its range's anchor\n", c, *hotDist)
