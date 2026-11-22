@@ -160,12 +160,18 @@ var positions = []position{
 	{"E", "builtin_layoutpad.go", "after bigown.go, before builtins.go: the built-ins' hot loops, firstElem"},
 	{"T", "builtins_j_layoutpad.go", "after builtins_iterzip.go, before builtins_json.go: the JSON codec, its encoder's encode"},
 	{"JP", "builtins_json_p_layoutpad.go", "after builtins_json.go, before builtins_json_parse.go: JSON.parse's parser, parseJSON first, and the built-ins after it up to C"},
+	{"TA", "builtins_ty_layoutpad.go", "after builtins_string.go, before builtins_typedarray.go: a typed array's element reads and writes, (*typedArrayData).getElem"},
+	{"CB", "callb_layoutpad.go", "after byvalue.go, before callback.go: the array methods' calls of their callbacks, (*regCallback).call"},
 	{"C", "calls_layoutpad.go", "after callbound.go, before callsite.go: the case conversion's memo, asciiCaseMemo"},
 	{"D", "defg_layoutpad.go", "after deferred.go, before define.go: the files after the built-ins"},
 	{"F", "generato_layoutpad.go", "after generate.go, before generator.go: an iterator's results, iterResult"},
 	{"L", "vl_layoutpad.go", "after value.go, before vm.go: the arithmetic in Go, add and arith"},
 	{"B", "vm_b_layoutpad.go", "after vm_amath.go, before vm_call.go: callObject, callDirect, runFD"},
+	{"JB", "jit_bi_layoutpad.go", "after jit_bg.go, before jit_bigint.go: the JIT's BigInt leaves, jitBigLeafMake"},
+	{"JU", "jit_bu_layoutpad.go", "after jit_bigtyped.go, before jit_builder.go: a string builder's appends, jitAppend"},
 	{"J", "jit_layoutpad.go", "after jit_keyedwrite.go, before jit_lazyframes.go and jit_leaffast.go: the JIT's leaf calls, jitLeafGo (without the JIT, N and P hold what follows)"},
+	{"JN", "jit_na_layoutpad.go", "after jit_loop.go, before jit_native.go: native code's entries and its calls of Go with a frame, jitRegWhole and jitRegGoCall"},
+	{"JS", "jit_ss_layoutpad.go", "after jit_snapshot_gen.go, before jit_ssa.go: native code's calls of host functions, jitHostCall"},
 	{"N", "native_r_layoutpad.go", "after native_predicate.go, before native_run.go: the native dispatcher's Go side, nativeRun first, and its calls of Go, nativeApply, nativeNew and nativeBuiltin"},
 	{"P", "reg_cal_layoutpad.go", "after reg_caches.go, before reg_call.go: without the JIT, the register interpreter's calls, regCall"},
 	{"Q", "reg_ru_layoutpad.go", "after reg_report.go, before reg_run.go: the register interpreter's loop, runReg"},
@@ -173,8 +179,12 @@ var positions = []position{
 	{"U", "reg_runr_layoutpad.go", "after reg_run_call.go, before reg_runs.go: the register interpreter's operations in Go, regBinImm first, regBinary"},
 	{"Y", "reg_gene_layoutpad.go", "after reg_genalloc.go, before reg_generator.go: generators and async functions, regGenOf first, regAsyncStart and regAsyncRun"},
 	{"V", "reg_sw_layoutpad.go", "after reg_slow.go, before reg_switch.go: the register handlers, newRegSwitchTable first, reg_table*.go, at 2f05d3fc's layout"},
+	{"VT", "reg_tab_layoutpad.go", "after reg_switch_cold.go, before reg_table.go: the register handlers in Go, rsAdd"},
 	{"K", "reg_table_c_layoutpad.go", "after reg_table.go, before reg_table_cold.go: the cold handlers, regColdInit first, rhAwait among them"},
+	{"VA", "valu_layoutpad.go", "after typeof.go, before value.go: a value's tests and accessors where they are not inlined, Value.IsNumber"},
 	{"O", "vm_o_layoutpad.go", "after vm_leaf_pure.go, before vm_object.go: what follows the literal constructors, newErrorObject first, vm_property.go and vm_shape.go"},
+	{"PR", "vm_p_layoutpad.go", "after vm_object.go, before vm_property.go: a property's read, getProp"},
+	{"SH", "vm_s_layoutpad.go", "after vm_property.go, before vm_shape.go: a shape's root, rootFor"},
 	{"R", "regexp_a_layoutpad.go", "after reg_yieldstar.go, before regexp_abstract.go: a replace's loop, regExpReplaceIn and its templates"},
 	{"S", "strh_layoutpad.go", "after strcut.go, before string.go: a string's builder, partsBuilder"},
 	{"Z", "z_layoutpad.go", "after every file: the closures, and the generics the last files call"},
@@ -215,8 +225,30 @@ func vmLever(name string) bool {
 	return !ok
 }
 
-// asmLever is the assembly pad's lever, before the native handlers' block.
-const asmLever = "H"
+// An asmPad is an assembly pad: a function of raw bytes in an assembly
+// file of package vm sorted where its gap opens. Package vm's assembly is
+// laid out after every closure of its named functions, in file order, so
+// that no Go pad reaches it without moving the closures.
+type asmPad struct {
+	name   string // the lever's letters
+	prefix string // its files' names, before the configuration
+	doc    string
+}
+
+var asmPads = []asmPad{
+	{"HJ", "jit_l_layoutpad_", "after the JIT's BigInt leaves' assembly, before jit_leaffast_<arch>.s: the JIT's leaf and Go call stubs, jitLeafFast and jitGoFast"},
+	{"H", "native_a_layoutpad_", "after the JIT's assembly, before the native handlers' block: regNativeHandlers"},
+}
+
+// asmPadOf is the assembly pad a lever is, if it is one.
+func asmPadOf(name string) (asmPad, bool) {
+	for _, a := range asmPads {
+		if a.name == name {
+			return a, true
+		}
+	}
+	return asmPad{}, false
+}
 
 // A lever is one constant of a configuration's file.
 type lever struct {
@@ -238,7 +270,9 @@ func levers() []lever {
 		ls = append(ls, lever{name: o.name, kind: 'f', pad: modPrefix + o.dir + ".layoutPad" + o.name})
 	}
 	// An assembly function's symbol is its ABI0 one.
-	ls = append(ls, lever{name: asmLever, kind: 'a', pad: vmPrefix + "layoutPad" + asmLever + ".abi0"})
+	for _, a := range asmPads {
+		ls = append(ls, lever{name: a.name, kind: 'a', pad: vmPrefix + "layoutPad" + a.name + ".abi0"})
+	}
 	ls = append(ls,
 		lever{name: "DH", kind: 'd', max: dataVars},
 		lever{name: "DW", kind: 'd', max: dataVars},
@@ -322,6 +356,9 @@ type anchor struct {
 	symbol string
 	target uint64
 	at     uint64
+	// fresh is an anchor the targets file names as new: the next
+	// regeneration records it where its pad, at its least, leaves it.
+	fresh bool
 }
 
 type targets struct {
@@ -338,6 +375,7 @@ func main() {
 	targetsPath := flag.String("targets", targetsRel, "the targets file, from the repository's root")
 	all := flag.Bool("all", false, "with -show, write the pads and set every lever of the configurations to 0 first, to see where each lands")
 	recordPages := flag.Bool("pages", false, "pad as by default, and record each code anchor's address (its page) as the build has it, where an anchor moved a page and the move is meant")
+	recordEq := flag.Bool("eq", false, "pad as by default, and record the builds' equality functions (type:.eq.*) in "+eqRel+", where a new one is meant")
 	flag.Parse()
 	root, err := repoRoot()
 	if err == nil {
@@ -347,6 +385,10 @@ func main() {
 		fatal(err)
 	}
 	t, err := readTargets(*targetsPath)
+	if err != nil {
+		fatal(err)
+	}
+	eqs, err := readEq(eqRel)
 	if err != nil {
 		fatal(err)
 	}
@@ -379,7 +421,7 @@ func main() {
 	}
 	switch {
 	case *check:
-		drift, paged := false, false
+		drift, paged, eqFailed := false, false, false
 		for _, c := range picked {
 			syms, err := build(c)
 			if err != nil {
@@ -393,11 +435,16 @@ func main() {
 			for _, line := range moved {
 				fmt.Printf("%s: %s\n", c, line)
 			}
-			if len(lines)+len(moved) == 0 {
-				fmt.Printf("%s: every anchor at its target, on its page\n", c)
+			eqLines, eqNew := eqCheck(c, syms, eqs)
+			for _, line := range eqLines {
+				fmt.Printf("%s: %s\n", c, line)
+			}
+			if len(lines)+len(moved) == 0 && !eqNew {
+				fmt.Printf("%s: every anchor at its target, on its page, and no new equality function\n", c)
 			}
 			drift = drift || len(lines) > 0
 			paged = paged || len(moved) > 0
+			eqFailed = eqFailed || eqNew
 		}
 		if drift {
 			fmt.Println("layoutpad: the layout has drifted from its targets: run go generate ./internal/vm (go run ./internal/cmd/layoutpad)")
@@ -405,7 +452,10 @@ func main() {
 		if paged {
 			fmt.Println(pageAdvice)
 		}
-		if drift || paged {
+		if eqFailed {
+			fmt.Println(eqAdvice)
+		}
+		if drift || paged || eqFailed {
 			os.Exit(1)
 		}
 	case *show:
@@ -451,21 +501,37 @@ func main() {
 					c.anchors[i].at = s.addr
 				}
 			}
+			eqs[c.String()] = eqOf(syms)
 			fmt.Printf("%s: recorded\n", c)
 		}
 		t.toolchain = goVersion()
 		if err := writeTargets(*targetsPath, t); err != nil {
 			fatal(err)
 		}
+		if err := writeEq(eqRel, t, eqs); err != nil {
+			fatal(err)
+		}
 	default:
 		if err := writeSources(t); err != nil {
 			fatal(err)
 		}
-		paged := false
+		paged, freshRecorded, eqFailed := false, false, false
 		for _, c := range picked {
 			syms, err := solve(c, *verbose)
 			if err != nil {
 				fatal(err)
+			}
+			if recordFresh(c, syms) {
+				freshRecorded = true
+			}
+			if *recordEq {
+				eqs[c.String()] = eqOf(syms)
+			} else {
+				lines, failed := eqCheck(c, syms, eqs)
+				for _, line := range lines {
+					fmt.Printf("%s: %s\n", c, line)
+				}
+				eqFailed = eqFailed || failed
 			}
 			if *recordPages {
 				setPages(c, syms)
@@ -476,14 +542,29 @@ func main() {
 				paged = true
 			}
 		}
-		if *recordPages {
+		if *recordPages || freshRecorded {
 			if err := writeTargets(*targetsPath, t); err != nil {
 				fatal(err)
 			}
+		}
+		if *recordPages {
 			fmt.Println("layoutpad: recorded the anchors' pages in", *targetsPath)
+		} else if freshRecorded {
+			fmt.Println("layoutpad: recorded the new anchors in", *targetsPath)
+		}
+		if *recordEq {
+			if err := writeEq(eqRel, t, eqs); err != nil {
+				fatal(err)
+			}
+			fmt.Println("layoutpad: recorded the equality functions in", eqRel)
 		}
 		if paged {
 			fmt.Println(pageAdvice)
+		}
+		if eqFailed {
+			fmt.Println(eqAdvice)
+		}
+		if paged || eqFailed {
 			os.Exit(1)
 		}
 	}
@@ -493,6 +574,25 @@ func main() {
 const pageAdvice = "layoutpad: an anchor is a page from where " + targetsRel + " records it, every offset modulo 4 KB the same: " +
 	"move what grew before it out of the pad's range, after its anchor (docs/optimizing.md, \"The layout lock\"), " +
 	"or, where the move is meant, record the new pages with go run ./internal/cmd/layoutpad -pages"
+
+// recordFresh records each of c's new anchors where syms has it, its pad
+// at its least, and says whether there was one.
+func recordFresh(c *config, syms *symtab) bool {
+	found := false
+	for i, a := range c.anchors {
+		if !a.fresh {
+			continue
+		}
+		s, ok := syms.byName[a.symbol]
+		if !ok {
+			fatal(fmt.Errorf("%s: anchor %s is not in the build", c, a.symbol))
+		}
+		c.anchors[i].target, c.anchors[i].at, c.anchors[i].fresh = s.addr%codeMod, s.addr, false
+		fmt.Printf("%s: anchor %s recorded at %#x\n", c, a.lever, s.addr)
+		found = true
+	}
+	return found
+}
 
 // setPages records each code anchor's address in syms as its page.
 func setPages(c *config, syms *symtab) {
@@ -579,9 +679,10 @@ func leverDoc(name string) string {
 	if o, ok := outerOf(name); ok {
 		return o.dir + "'s first file, " + o.doc
 	}
+	if a, ok := asmPadOf(name); ok {
+		return "package vm's assembly, " + a.doc
+	}
 	switch name {
-	case asmLever:
-		return "package vm's assembly, before the native handlers' block"
 	case "CZ":
 		return "the generics' closures, after the native handlers' block"
 	}
@@ -694,15 +795,20 @@ func readTargets(path string) (*targets, error) {
 			if _, ok := leverByName(f[1]); !ok {
 				return nil, fmt.Errorf("%s:%d: no lever %s", path, n+1, f[1])
 			}
-			v, err := strconv.ParseUint(f[2], 0, 64)
-			if err != nil {
+			fresh := f[2] == "new"
+			var v uint64
+			if !fresh {
+				if v, err = strconv.ParseUint(f[2], 0, 64); err != nil {
+					return nil, bad()
+				}
+			} else if at != 0 || modOf(f[1]) != codeMod {
 				return nil, bad()
 			}
 			sym := strings.Join(f[3:], " ")
 			if at != 0 && (modOf(f[1]) != codeMod || at%codeMod != v) {
 				return nil, fmt.Errorf("%s:%d: %s's recorded address %#x is not at its target %#x", path, n+1, sym, at, v)
 			}
-			cur.anchors = append(cur.anchors, anchor{lever: f[1], symbol: sym, target: v, at: at})
+			cur.anchors = append(cur.anchors, anchor{lever: f[1], symbol: sym, target: v, at: at, fresh: fresh})
 		default:
 			return nil, bad()
 		}
@@ -735,7 +841,9 @@ func writeTargets(path string, t *targets) error {
 			if modOf(a.lever) == codeMod {
 				width = 5
 			}
-			if a.at != 0 {
+			if a.fresh {
+				line = fmt.Sprintf("anchor %-2s new %s", a.lever, a.symbol)
+			} else if a.at != 0 {
 				line = fmt.Sprintf("anchor %-2s %#0*x @%#x %s", a.lever, width, a.target, a.at, a.symbol)
 			} else {
 				line = fmt.Sprintf("anchor %-2s %#0*x %s", a.lever, width, a.target, a.symbol)
@@ -766,6 +874,20 @@ func build(c *config) (*symtab, error) {
 		return nil, err
 	}
 	defer os.RemoveAll(dir)
+	exe, err := buildExe(c, dir)
+	if err != nil {
+		return nil, err
+	}
+	out, err := exec.Command("go", "tool", "nm", "-size", "-sort", "address", exe).Output()
+	if err != nil {
+		return nil, fmt.Errorf("go tool nm: %w", err)
+	}
+	return parseNM(out), nil
+}
+
+// buildExe builds v8bench for c in dir as its targets are measured, and
+// returns the binary's path.
+func buildExe(c *config, dir string) (string, error) {
 	exe := filepath.Join(dir, "v8bench.exe")
 	args := []string{"build", "-buildvcs=false", "-o", exe}
 	if tags := c.tags(); tags != "" {
@@ -775,13 +897,9 @@ func build(c *config) (*symtab, error) {
 	cmd := exec.Command("go", args...)
 	cmd.Env = append(os.Environ(), "GOOS="+c.goos, "GOARCH="+c.goarch, "CGO_ENABLED=0", "GOAMD64=v1", "GOFLAGS=", "GOWORK=off")
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("%s: go %s: %v\n%s", c, strings.Join(args, " "), err, out)
+		return "", fmt.Errorf("%s: go %s: %v\n%s", c, strings.Join(args, " "), err, out)
 	}
-	out, err := exec.Command("go", "tool", "nm", "-size", "-sort", "address", exe).Output()
-	if err != nil {
-		return nil, fmt.Errorf("go tool nm: %w", err)
-	}
-	return parseNM(out), nil
+	return exe, nil
 }
 
 func parseNM(out []byte) *symtab {
@@ -822,6 +940,10 @@ func compare(c *config, syms *symtab) []string {
 		s, ok := syms.byName[a.symbol]
 		if !ok {
 			out = append(out, fmt.Sprintf("anchor %s (%s) is not in the build: renamed? name the anchor anew in %s", a.lever, a.symbol, targetsRel))
+			continue
+		}
+		if a.fresh {
+			out = append(out, fmt.Sprintf("anchor %s (%s) is new: run go generate ./internal/vm to record it", a.lever, a.symbol))
 			continue
 		}
 		m := modOf(a.lever)
@@ -877,38 +999,41 @@ func configFileIn(c *config, dir string) string {
 }
 
 // configFiles are c's files: package vm's, then the outer pads', then the
-// assembly pad's.
+// assembly pads'.
 func configFiles(c *config) []string {
 	files := []string{configFile(c)}
 	for _, o := range outers {
 		files = append(files, configFileIn(c, o.dir))
 	}
-	return append(files, asmFile(c))
+	for _, a := range asmPads {
+		files = append(files, asmFile(c, a))
+	}
+	return files
 }
 
-// asmFile is c's assembly pad's file (lever H), named to sort after the
-// JIT's assembly and before every native handlers' file
-// (native_<arch>.s first), and so laid out right before them.
-func asmFile(c *config) string {
-	return filepath.Join(vmDir, "native_a_layoutpad_"+c.filePrefix()+c.goos+"_"+c.goarch+".s")
+// asmFile is c's file of the assembly pad a, named to sort where its gap
+// opens: H's after the JIT's assembly and before every native handlers'
+// file (native_<arch>.s first), HJ's before the JIT's leaf stubs.
+func asmFile(c *config, a asmPad) string {
+	return filepath.Join(vmDir, a.prefix+c.filePrefix()+c.goos+"_"+c.goarch+".s")
 }
 
-// asmSource is c's assembly pad of n 32-byte slots, int3 bytes, or a file
-// with no pad where n is below 1, the lever left out.
-func asmSource(c *config, n int) (string, error) {
+// asmSource is c's assembly pad a of n 32-byte slots, int3 bytes, or a
+// file with no pad where n is below 1, the lever left out.
+func asmSource(c *config, a asmPad, n int) (string, error) {
 	var b strings.Builder
 	b.WriteString("// Code generated by internal/cmd/layoutpad; DO NOT EDIT.\n\n")
 	b.WriteString(c.buildLine())
 	if n < 1 {
-		fmt.Fprintf(&b, "// The layout lock's assembly pad %s is left out for %s.\n", asmLever, c)
+		fmt.Fprintf(&b, "// The layout lock's assembly pad %s is left out for %s.\n", a.name, c)
 		return b.String(), nil
 	}
 	if c.goarch != "amd64" {
-		return "", fmt.Errorf("%s: the assembly pad %s is written for amd64 alone", c, asmLever)
+		return "", fmt.Errorf("%s: the assembly pad %s is written for amd64 alone", c, a.name)
 	}
 	fmt.Fprintf(&b, "#include \"textflag.h\"\n\n")
-	fmt.Fprintf(&b, "// layoutPad%s is the layout lock's assembly pad %s for %s:\n// %d slots of %d bytes before the native handlers' block\n// (layoutlock.txt). It is never called: see internal/cmd/layoutpad.\n", asmLever, asmLever, c, n, slot)
-	fmt.Fprintf(&b, "TEXT ·layoutPad%s(SB), NOSPLIT|NOFRAME, $0-0\n", asmLever)
+	fmt.Fprintf(&b, "// layoutPad%s is the layout lock's assembly pad %s for %s:\n// %d slots of %d bytes (layoutlock.txt). It is never called: see\n// internal/cmd/layoutpad.\n", a.name, a.name, c, n, slot)
+	fmt.Fprintf(&b, "TEXT ·layoutPad%s(SB), NOSPLIT|NOFRAME, $0-0\n", a.name)
 	for range n {
 		b.WriteString("\tQUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc; QUAD $0xcccccccccccccccc\n")
 	}
@@ -961,16 +1086,20 @@ func writeValues(c *config, v map[string]int) error {
 		}
 	}
 	b.WriteString(")\n")
-	fmt.Fprintf(&b, "\n// layoutPad%s is the assembly pad, in\n// %s. It is never called.\nfunc layoutPad%s()\n", asmLever, filepath.Base(asmFile(c)), asmLever)
+	for _, a := range asmPads {
+		fmt.Fprintf(&b, "\n// layoutPad%s is an assembly pad, in\n// %s. It is never called.\nfunc layoutPad%s()\n", a.name, filepath.Base(asmFile(c, a)), a.name)
+	}
 	if err := writeGo(configFile(c), b.String()); err != nil {
 		return err
 	}
-	asm, err := asmSource(c, v[asmLever])
-	if err != nil {
-		return err
-	}
-	if err := writeFile(asmFile(c), asm); err != nil {
-		return err
+	for _, a := range asmPads {
+		asm, err := asmSource(c, a, v[a.name])
+		if err != nil {
+			return err
+		}
+		if err := writeFile(asmFile(c, a), asm); err != nil {
+			return err
+		}
 	}
 	for _, o := range outers {
 		b.Reset()
@@ -1047,7 +1176,9 @@ func writeSources(t *targets) error {
 		fmt.Fprintf(&b, "\tlayoutPadN%s = %d\n", l.name, v)
 	}
 	b.WriteString(")\n")
-	fmt.Fprintf(&b, "\n// layoutPad%s stands for the assembly pad, which this platform has not.\nfunc layoutPad%s() {}\n", asmLever, asmLever)
+	for _, a := range asmPads {
+		fmt.Fprintf(&b, "\n// layoutPad%s stands for an assembly pad, which this platform has not.\nfunc layoutPad%s() {}\n", a.name, a.name)
+	}
 	if err := writeGo(filepath.Join(vmDir, "layoutpad_other.go"), b.String()); err != nil {
 		return err
 	}
@@ -1176,8 +1307,10 @@ var (
 	if cz {
 		b.WriteString("\t\tif layoutPadNCZ >= 0 {\n\t\t\tlayoutPadCZ[struct{}]()\n\t\t}\n")
 	}
-	if used[asmLever] {
-		fmt.Fprintf(&b, "\t\tif layoutPadN%s >= 0 {\n\t\t\tlayoutPad%s()\n\t\t}\n", asmLever, asmLever)
+	for _, a := range asmPads {
+		if used[a.name] {
+			fmt.Fprintf(&b, "\t\tif layoutPadN%s >= 0 {\n\t\t\tlayoutPad%s()\n\t\t}\n", a.name, a.name)
+		}
 	}
 	k := 0
 	for _, d := range dataLevers {
@@ -1277,7 +1410,7 @@ func solveCode(c *config, syms *symtab, v map[string]int, verbose bool) (bool, e
 	var items []item
 	for _, a := range c.anchors {
 		l, _ := leverByName(a.lever)
-		if l.kind == 'd' {
+		if l.kind == 'd' || a.fresh {
 			continue
 		}
 		pad, ok := syms.byName[l.pad]
