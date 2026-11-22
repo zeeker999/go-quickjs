@@ -238,6 +238,7 @@ type asmPad struct {
 var asmPads = []asmPad{
 	{"HJ", "jit_l_layoutpad_", "after the JIT's BigInt leaves' assembly, before jit_leaffast_<arch>.s: the JIT's leaf and Go call stubs, jitLeafFast and jitGoFast"},
 	{"H", "native_a_layoutpad_", "after the JIT's assembly, before the native handlers' block: regNativeHandlers"},
+	{"HT", "native_ta_layoutpad_", "after the native handlers' block, before native_typed_<arch>.s: the typed code's handlers, regNativeTypedHandlers"},
 }
 
 // asmPadOf is the assembly pad a lever is, if it is one.
@@ -264,6 +265,7 @@ func levers() []lever {
 		ls = append(ls, lever{name: p.name, kind: 'f', pad: vmPrefix + "layoutPad" + p.name})
 		ls = append(ls, lever{name: "G" + p.name, kind: 'g', pad: vmPrefix + "layoutPadG" + p.name + "[go.shape.struct {}]"})
 		ls = append(ls, lever{name: "M" + p.name, kind: 'g', pad: vmPrefix + "layoutPadM" + p.name + "[go.shape.struct {}]"})
+		ls = append(ls, lever{name: "Z" + p.name, kind: 'c', pad: vmPrefix + "layoutPad" + p.name + ".func1"})
 	}
 	ls = append(ls, lever{name: "CZ", kind: 'c', pad: vmPrefix + "layoutPadCZ[go.shape.struct {}].func1"})
 	for _, o := range outers {
@@ -373,6 +375,7 @@ func main() {
 	only := flag.String("config", "", "only the configurations named, comma-separated, as GOOS/GOARCH/KIND, KIND plain, jit, wasm or jit+wasm")
 	verbose := flag.Bool("v", false, "print each build's anchors away from their targets and what each lever is set to")
 	targetsPath := flag.String("targets", targetsRel, "the targets file, from the repository's root")
+	generics := flag.Bool("generics", false, "with -show -all, write every generic pad and closure pad as well")
 	all := flag.Bool("all", false, "with -show, write the pads and set every lever of the configurations to 0 first, to see where each lands")
 	recordPages := flag.Bool("pages", false, "pad as by default, and record each code anchor's address (its page) as the build has it, where an anchor moved a page and the move is meant")
 	hot := flag.Bool("hot", false, "profile this machine's configurations' micro-benchmarks and list the hot functions that lie far past their range's anchor, each wanting a position (docs/optimizing.md)")
@@ -482,6 +485,7 @@ func main() {
 		}
 	case *show:
 		if *all {
+			everyGeneric = *generics
 			if err := writeSources(t); err != nil {
 				fatal(err)
 			}
@@ -1146,6 +1150,10 @@ func writeGo(path, src string) error {
 	return os.WriteFile(path, formatted, 0o644)
 }
 
+// everyGeneric has writeSources write every generic pad, for -show -all
+// -generics, to see where each would land among the generics.
+var everyGeneric bool
+
 // writeSources writes the pads' files and, for every platform without
 // targets, a file of constants that leaves every pad out. A generic pad is
 // written only where some configuration has an anchor for it.
@@ -1154,6 +1162,11 @@ func writeSources(t *targets) error {
 	for _, c := range t.configs {
 		for _, a := range c.anchors {
 			used[a.lever] = true
+		}
+	}
+	if everyGeneric {
+		for _, p := range positions {
+			used["G"+p.name], used["M"+p.name], used["Z"+p.name] = true, true, true
 		}
 	}
 	for i, p := range positions {
@@ -1262,8 +1275,16 @@ func positionFile(p position, last bool, used map[string]bool) string {
 	if last {
 		b.WriteString("import \"unsafe\"\n\n")
 	}
-	g, m := used["G"+p.name], used["M"+p.name]
+	g, m, z := used["G"+p.name], used["M"+p.name], used["Z"+p.name]
 	fmt.Fprintf(&b, "// layoutPad%s is the layout lock's pad %s, %s.\n// It is never called: see internal/cmd/layoutpad.\n//\n//go:noinline\nfunc layoutPad%s() {\n", p.name, p.name, p.doc, p.name)
+	if z {
+		// The closure pad: the closures of the named functions are laid
+		// out in about their files' order, so this one comes right before
+		// those of the file after the position's.
+		fmt.Fprintf(&b, "\tif layoutPadNZ%s >= 0 {\n\t\tlayoutPadFunc = func() {\n", p.name)
+		stores(&b, "\t\t\t", "layoutPadNZ"+p.name)
+		b.WriteString("\t\t}\n\t}\n")
+	}
 	if g {
 		fmt.Fprintf(&b, "\tif layoutPadNG%s >= 0 {\n\t\tlayoutPadG%s[struct{}]()\n\t}\n", p.name, p.name)
 	}
@@ -1318,6 +1339,9 @@ var (
 	b.WriteString("// init keeps the pads in the binary: layoutPadLive is never true.\nfunc init() {\n\tif layoutPadLive {\n")
 	for _, q := range positions {
 		cond := "layoutPadN" + q.name + " >= 0"
+		if used["Z"+q.name] {
+			cond += " || layoutPadNZ" + q.name + " >= 0"
+		}
 		if used["G"+q.name] {
 			cond += " || layoutPadNG" + q.name + " >= 0"
 		}
