@@ -77,19 +77,30 @@ concurrently.
   before `bigint.go`, `builtin_layoutpad.go` before `builtins.go`,
   `builtins_j_layoutpad.go` before `builtins_json.go`,
   `builtins_json_p_layoutpad.go` before `builtins_json_parse.go`,
+  `builtins_ty_layoutpad.go` before `builtins_typedarray.go`,
+  `callb_layoutpad.go` before `callback.go`,
   `calls_layoutpad.go` before `callsite.go`, `generato_layoutpad.go`
   before `generator.go`, `regexp_a_layoutpad.go` before
   `regexp_abstract.go`, `strh_layoutpad.go` before `string.go`,
-  `jit_layoutpad.go` before `jit_leaffast.go`, `native_r_layoutpad.go`
+  `jit_bi_layoutpad.go` before `jit_bigint.go`,
+  `jit_bu_layoutpad.go` before `jit_builder.go`,
+  `jit_layoutpad.go` before `jit_leaffast.go`,
+  `jit_na_layoutpad.go` before `jit_native.go`,
+  `jit_ss_layoutpad.go` before `jit_ssa.go`, `native_r_layoutpad.go`
   before `native_run.go`, `reg_cal_layoutpad.go` before `reg_call.go`,
   `reg_gene_layoutpad.go` before `reg_generator.go`,
   `reg_ru_layoutpad.go` and `reg_run_a_layoutpad.go` around
   `reg_run.go`, `reg_runr_layoutpad.go` before `reg_runs.go`,
   `reg_sw_layoutpad.go` before `reg_switch.go`,
+  `reg_tab_layoutpad.go` before `reg_table.go`,
   `reg_table_c_layoutpad.go` before `reg_table_cold.go`,
+  `valu_layoutpad.go` before `value.go`,
   `vl_layoutpad.go` before `vm.go`, `vm_b_layoutpad.go` before
   `vm_call.go`, `vm_o_layoutpad.go` before `vm_object.go`,
-  `z_layoutpad.go` after every file), and the assembly pad,
+  `vm_p_layoutpad.go` before `vm_property.go`, `vm_s_layoutpad.go`
+  before `vm_shape.go`,
+  `z_layoutpad.go` after every file), and the assembly pads,
+  `jit_l_layoutpad_*.s` before `jit_leaffast_<arch>.s`, and
   `native_a_layoutpad_*.s`, after the JIT's assembly and before
   `native_<arch>.s`, the first of the native handlers' block. The
   linker lays out the packages linked before vm in the order vm's files
@@ -269,7 +280,7 @@ Do not manually edit generated files or their binary companions:
   fails while a file is out of date; on a host with no JIT (darwin amd64,
   say), it checks every file but the feedback dispatchers'.
 - `internal/vm/*_layoutpad.go`, `internal/vm/layoutpad_*.go`,
-  `internal/vm/native_a_layoutpad_*.s`,
+  `internal/vm/native_a_layoutpad_*.s`, `internal/vm/jit_l_layoutpad_*.s`,
   `internal/regexp/aa_layoutpad.go`, `internal/regexp/layoutpad_*.go`,
   `internal/jit/aa_layoutpad.go` and `internal/jit/layoutpad_*.go`,
   the layout lock's pads and the constants that size them for each
@@ -278,7 +289,12 @@ Do not manually edit generated files or their binary companions:
   written by `internal/cmd/layoutpad` from `layoutlock.txt`'s targets.
   `go generate ./internal/vm` runs it last, after the generators above,
   since it measures what they write; `TestLayoutLock` fails while an anchor
-  is off its target.
+  is off its target. `internal/vm/layouteq.txt` is its list of each
+  configuration's compiler-generated equality functions (`type:.eq.*`),
+  which a regeneration and `TestLayoutLock` fail on a new one of: give
+  the type it compares none (no padding hole, or a non-comparable
+  `_ [0]func()` field), or record the list with `layoutpad -eq` where the
+  new one is meant (docs/optimizing.md, "Equality functions").
 - `wasm/internal/engine/reg_num_gen.go`, the numeric operators as
   register code's operations and their handlers
   (wasm/internal/engine/README.md), and

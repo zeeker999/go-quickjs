@@ -169,11 +169,11 @@ var positions = []position{
 	{"B", "vm_b_layoutpad.go", "after vm_amath.go, before vm_call.go: callObject, callDirect, runFD"},
 	{"JB", "jit_bi_layoutpad.go", "after jit_bg.go, before jit_bigint.go: the JIT's BigInt leaves, jitBigLeafMake"},
 	{"JU", "jit_bu_layoutpad.go", "after jit_bigtyped.go, before jit_builder.go: a string builder's appends, jitAppend"},
-	{"J", "jit_layoutpad.go", "after jit_keyedwrite.go, before jit_lazyframes.go and jit_leaffast.go: the JIT's leaf calls, jitLeafGo (without the JIT, N and P hold what follows)"},
+	{"J", "jit_layoutpad.go", "after jit_keyedwrite.go, before jit_lazyframes.go and jit_leaffast.go: the JIT's leaf calls, jitLeafGo"},
 	{"JN", "jit_na_layoutpad.go", "after jit_loop.go, before jit_native.go: native code's entries and its calls of Go with a frame, jitRegWhole and jitRegGoCall"},
 	{"JS", "jit_ss_layoutpad.go", "after jit_snapshot_gen.go, before jit_ssa.go: native code's calls of host functions, jitHostCall"},
 	{"N", "native_r_layoutpad.go", "after native_predicate.go, before native_run.go: the native dispatcher's Go side, nativeRun first, and its calls of Go, nativeApply, nativeNew and nativeBuiltin"},
-	{"P", "reg_cal_layoutpad.go", "after reg_caches.go, before reg_call.go: without the JIT, the register interpreter's calls, regCall"},
+	{"P", "reg_cal_layoutpad.go", "after reg_caches.go, before reg_call.go: the register interpreter's calls, regCall"},
 	{"Q", "reg_ru_layoutpad.go", "after reg_report.go, before reg_run.go: the register interpreter's loop, runReg"},
 	{"W", "reg_run_a_layoutpad.go", "after reg_run.go, before reg_run_call.go: the register interpreter's calls after its loop, rhCallW first"},
 	{"U", "reg_runr_layoutpad.go", "after reg_run_call.go, before reg_runs.go: the register interpreter's operations in Go, regBinImm first, regBinary"},
@@ -432,7 +432,7 @@ func main() {
 				fatal(err)
 			}
 			for _, h := range list {
-				fmt.Printf("%s: %s, %.2fs (%.1f%%), %d bytes past anchor %s\n", c, strings.TrimPrefix(h.name, modPrefix), h.seconds, 100*h.share, h.past, h.lever)
+				fmt.Printf("%s: %s (%s), %.2fs (%.1f%%), %d bytes past anchor %s\n", c, strings.TrimPrefix(h.name, modPrefix), h.file, h.seconds, 100*h.share, h.past, h.lever)
 				found = true
 			}
 			if len(list) == 0 {

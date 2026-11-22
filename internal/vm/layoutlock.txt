@@ -55,10 +55,10 @@
 # (native_run.go: nativeApply, nativeNew, nativeBuiltin) and U the
 # register interpreter's operations in Go (reg_runs.go, regBinary):
 # forward_construct was 18%, generator_next 14%, bigint64_divmod 13%,
-# bigint256_arith 9% and string_upper 8% slower at 2f05d3fc. Without
-# the JIT, regCall (reg_call.go), which J held, comes after
-# native_run.go: P, the pad before reg_call.go, holds it there, and J
-# anchors nothing. V holds the handlers after U (reg_switch.go,
+# bigint256_arith 9% and string_upper 8% slower at 2f05d3fc. P, the pad
+# before reg_call.go, holds regCall after native_run.go in every
+# configuration: with the JIT it had been in N's range, 74 KB past
+# nativeRun. V holds the handlers after U (reg_switch.go,
 # reg_table*.go) at 2f05d3fc's layout, not 3ecb8200's: the native
 # block's time depends on where they sit against the generics after it,
 # which no position holds -- rsAdd at 3ecb8200's offset, with the
@@ -107,7 +107,14 @@
 # calls of Go (ExpandGoCall) at 8097c77b's layout in the builds with the
 # JIT: the keyed stores' and the megamorphic reads' code grew the JIT's
 # compiler, linked before it, by 7,456 bytes, and string_build3 was 4%
-# slower with the JIT at every placement.
+# slower with the JIT at every placement. TA, CB, JB, JU, JN, JS, VT,
+# VA, PR and SH, and the assembly pad HJ, are positions the lock's rule
+# for them asked for (docs/optimizing.md, "Adding a position"): hot
+# functions more than 8 KB past their range's anchor at 1d08a62d --
+# jitHostCall 251 KB past J, the JIT's leaf stubs (jitLeafFast,
+# jitGoFast) 485 KB past Z, the array methods' callbacks 140 KB past JP
+# -- each anchored where its pad, at its least, left it; P holds regCall
+# with the JIT too.
 #
 # The wasm and jit+wasm configurations are v8bench built with the
 # quickjs_wasm tag (and quickjs_jit), which links the WebAssembly engine

@@ -216,7 +216,8 @@ byte stores, 7 bytes of code each, so that it fills any whole number of
 
 | Lever | The pad | Moves | Pins |
 |---|---|---|---|
-| A I E T JP C D F L B J N P | `layoutPadX`, a function in a file sorted where the gap opens | every function after it in file order, then the closures and the generics | `joinSize` (the built-ins), `bigParts` (`bigint.go`, the BigInts' arithmetic), `firstElem` (`builtins*.go`), the JSON encoder's `encode` (`builtins_json.go`, T), JSON.parse's parser, `parseJSON` (`builtins_json_parse.go` on, JP), `asciiCaseMemo` (`callsite.go` and `casetables.go`), `descriptorObject` (`define.go` on), `iterResult` (`generator.go`), `add` (`vm.go`'s arithmetic, `arith`), `callObject` (with `callDirect` and `runFD` after it), with the JIT `jitLeafGo` (J), `nativeRun` (`native_run.go`: `nativeApply`, `nativeNew`, `nativeBuiltin`), and without the JIT `regCall` (P: the register calls' entries, `regCallSlow` and `regRunFD`) |
+| A I E T JP C D F L B J N P | `layoutPadX`, a function in a file sorted where the gap opens | every function after it in file order, then the closures and the generics | `joinSize` (the built-ins), `bigParts` (`bigint.go`, the BigInts' arithmetic), `firstElem` (`builtins*.go`), the JSON encoder's `encode` (`builtins_json.go`, T), JSON.parse's parser, `parseJSON` (`builtins_json_parse.go` on, JP), `asciiCaseMemo` (`callsite.go` and `casetables.go`), `descriptorObject` (`define.go` on), `iterResult` (`generator.go`), `add` (`vm.go`'s arithmetic, `arith`), `callObject` (with `callDirect` and `runFD` after it), with the JIT `jitLeafGo` (J), `nativeRun` (`native_run.go`: `nativeApply`, `nativeNew`, `nativeBuiltin`), and `regCall` (P: the register calls' entries, `regCallSlow` and `regRunFD`) |
+| TA CB JB JU JN JS VT VA PR SH | the same, positions the hot-function rule (below) asked for | every function after it to the next position | a typed array's element reads, `(*typedArrayData).getElem` (`builtins_typedarray.go`, TA), the array methods' calls of their callbacks, `(*regCallback).call` (`callback.go`, CB), with the JIT its BigInt leaves, `jitBigLeafMake` (`jit_bigint.go` on, JB), a string builder's appends, `jitAppend` (`jit_builder.go`, JU), native code's entries and its framed calls of Go, `jitRegWhole` and `jitRegGoCall` (`jit_native.go`, JN), and its calls of host functions, `jitHostCall` (`jit_ssa.go`, JS), the register handlers in Go, `rsAdd` (`reg_table.go`, VT), a value's tests and accessors where they are not inlined (`value.go`, VA), a property's read, `getProp` (`vm_property.go`, PR), and a shape's root, `rootFor` (`vm_shape.go`, SH) |
 | Q W U V | `layoutPadX`, the same, in the register interpreter's files | every function after it to the next position | the register interpreter's loop, `runReg` (Q), the call path after it, `rhCallW` (W), its operations in Go, `regBinImm` and `regBinary` (`reg_runs.go`, U), and its handlers, `newRegSwitchTable` (`reg_switch.go` and `reg_table*.go`, V, at `2f05d3fc`'s layout) |
 | Y K | `layoutPadX`, the same, in the register interpreter's files | every function after it to the next position | the generators and async functions, `regGenOf` (`reg_generator.go`, Y: `regAsyncStart`, `regAsyncRun`), and the cold handlers, `regColdInit` (`reg_table_cold.go`, K: await's `rhAwait`), at `16f8b5e9`'s layout |
 | O | `layoutPadO`, before `vm_object.go` | `vm_object.go` and every function after it | what follows the literal constructors, `newErrorObject`, and with it the property definitions after it (`setOwnRaw`, `appendProp`, `setArrayLength`, `vm_property.go`, `vm_shape.go`), at `16f8b5e9`'s layout; the functions before the constructors in `vm_object.go` (`newObject`) move with the pad |
@@ -227,6 +228,7 @@ byte stores, 7 bytes of code each, so that it fills any whole number of
 | X | `layoutPadX`, a function in `internal/regexp/aa_layoutpad.go`, its constant in that package's own configuration files | every function of package regexp, and what follows it up to vm, whose levers absorb it | the matcher, `(*matcherASCII).run`, and with it its `search` and the searches for a unit (`indexUnit`, `skipUnitsASCII`) |
 | XJ | `layoutPadXJ`, a function in `internal/jit/aa_layoutpad.go`, its constant in that package's own configuration files | every function of package jit, and what follows it up to vm, whose levers absorb it | native code's calls of Go, `ExpandGoCall`, at `8097c77b`'s layout, in the builds with the JIT |
 | H | `layoutPadH`, an assembly function of whole 32-byte slots of int3 bytes in `native_a_layoutpad_*.s`, one file a configuration, sorted after the JIT's assembly and before `native_<arch>.s` | the native handlers' block, and vm's `init` and the closures of generics after it, which CZ absorbs | `regNativeHandlers`, and with it `nativeEnter`, `nativeCallH` and, in a build with the JIT, the feedback handlers before it |
+| HJ | `layoutPadHJ`, the same in `jit_l_layoutpad_*.s`, sorted after the JIT's BigInt leaves' assembly and before `jit_leaffast_<arch>.s`, in the builds with the JIT | the JIT's leaf stubs and the assembly after them up to H | `jitLeafFast` and `jitGoFast`, native code's leaf and Go call stubs, which every closure added had moved |
 
 What each lever cannot move:
 
@@ -251,8 +253,9 @@ What each lever cannot move:
   `generator.go`, `vm.go` from `add`, `native_run.go`, `reg_call.go`,
   `reg_runs.go`):
   `forward_construct` was 18%, `generator_next` 14%, `bigint64_divmod`
-  13%, `bigint256_arith` 9% and `string_upper` 8% slower there. Without
-  the JIT, `regCall` comes after `native_run.go`, so P, not J, holds it.
+  13%, `bigint256_arith` 9% and `string_upper` 8% slower there. P holds
+  `regCall`, after `native_run.go`, in every configuration: with the JIT
+  it had been in N's range, 74 KB past `nativeRun`.
   V holds `reg_switch.go` and `reg_table*.go` where `2f05d3fc` had them,
   not `3ecb8200` (see Generics below). The positions trade some rows for
   others, as the code between them moves: over four placements against
@@ -440,6 +443,50 @@ The lock and the placements: a placement build adds its own pads to the
 locked tree and so varies what it varies around the locked layout, both
 labels by the same amounts as long as both are locked or one is the base
 the targets were recorded at.
+
+**Adding a position.** The rule: no function with 0.2% or more of a
+configuration's CPU samples over the micro-benchmarks lies more than
+8 KB past the anchor of the range it is in. Code between a range's
+anchor and the next pad keeps its own layout and moves with every change
+before it there, so a hot function far into a range moves with them: at
+1d08a62d `jitHostCall` lay 251 KB past J, the JIT's leaf stubs 485 KB
+past Z, every closure moving them, and the array methods' callbacks
+140 KB past JP. `go run ./internal/cmd/layoutpad -hot` lists what breaks
+the rule for this machine's configurations (`-config` picks them): it
+builds each as the targets are measured, runs its micro-benchmarks under
+the CPU profiler (`-hotruns`, 10), and names each hot function over
+`-hotdist` (8,192) bytes past its anchor, with its range, exiting 1 if
+there is one. A profile of a build of one's own does as well: `go tool
+pprof -top` of it beside `go tool nm` of the same binary. Such a function
+wants a position: a file in `positions` (`internal/cmd/layoutpad`)
+sorted right before the function's file, and an anchor on the function
+written in `layoutlock.txt` as `anchor LEVER new SYMBOL` in each
+configuration it is hot in. The next regeneration records the new
+anchor where its pad, at its least, leaves it, so that the position
+holds the layout from there: the code between the new pad and the next
+one moves by the pad's 32 bytes, once, and is compared then. The
+WebAssembly configurations take the targets of the configuration
+without the engine, as their other anchors do, written as numbers; then
+`-pages -config` those configurations records their addresses.
+
+**Equality functions.** The compiler makes an equality function
+(`type:.eq.*`) for a struct or array type that a comparison, a map key or
+an interface's `==` needs and that memequal cannot compare -- a padding
+hole, a float, a string or an interface among its fields -- and lays it
+out with the code of the package that first needs it: a new one moves
+every function after it up to the next pad. Three moved hot code in two
+days, each found by timing (`testConfig`, `strAppend` 64 bytes;
+`[64]primAbsentEntry`, `strAppend` and `strAppendOp` 128 bytes and
+`upvalue_string_append` 12.6% slower; regcomp's `tjump`, `wtf8.Scan` and
+the code after it up to regexp's pad 64 bytes). `internal/vm/layouteq.txt`
+lists each configuration's, and a regeneration and `TestLayoutLock` fail
+on one it does not list, naming where it is laid out and the functions
+whose code calls it (none: a map's key or an interface's comparison
+needs it). Make the type need none -- no padding hole, or a
+non-comparable `_ [0]func()` field where nothing should compare it --
+or, where the new one is meant, record the lists with
+`go run ./internal/cmd/layoutpad -eq`, beside `-pages`, and say so in
+the commit.
 
 When a change lands, run `go generate ./internal/vm`. A change that adds
 hot code where no lever reaches it should add a position or an anchor

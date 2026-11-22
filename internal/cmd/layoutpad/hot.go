@@ -31,6 +31,7 @@ type hotFunc struct {
 	share   float64 // of the profile's samples
 	lever   string  // the range's lever
 	past    int64   // bytes past the range's anchor; 0 before it
+	file    string  // its source file, where go tool objdump says
 }
 
 // hotRun profiles c's micro-benchmarks, runs times each, and lists the
@@ -62,7 +63,39 @@ func hotRun(c *config, runs int, share float64, dist int64) ([]hotFunc, error) {
 	if err != nil {
 		return nil, fmt.Errorf("go tool nm: %w", err)
 	}
-	return hotList(c, parseNM(nm), parseTop(top), share, dist), nil
+	list := hotList(c, parseNM(nm), parseTop(top), share, dist)
+	// A function in its anchor's own file is held as well as a position
+	// can hold it: a position is a file.
+	files := map[string]string{}
+	fileOf := func(name string) string {
+		if f, ok := files[name]; ok {
+			return f
+		}
+		f := ""
+		out, err := exec.Command("go", "tool", "objdump", "-s", "^"+regexp.QuoteMeta(name)+"$", exe).Output()
+		if err == nil {
+			if line, _, _ := strings.Cut(string(out), "\n"); strings.HasPrefix(line, "TEXT ") {
+				if g := strings.Fields(line); len(g) >= 3 {
+					f = g[len(g)-1]
+				}
+			}
+		}
+		files[name] = f
+		return f
+	}
+	anchorOf := map[string]string{}
+	for _, a := range c.anchors {
+		anchorOf[a.lever] = a.symbol
+	}
+	var kept []hotFunc
+	for _, h := range list {
+		if f := fileOf(h.name); f != "" && f == fileOf(anchorOf[h.lever]) {
+			continue
+		}
+		h.file = filepath.Base(fileOf(h.name))
+		kept = append(kept, h)
+	}
+	return kept, nil
 }
 
 // topLine is a line of go tool pprof -top: flat, flat%, sum%, cum, cum%,
@@ -136,7 +169,7 @@ func hotList(c *config, syms *symtab, flat map[string]float64, share float64, di
 		if past <= dist {
 			continue
 		}
-		out = append(out, hotFunc{name, v, v / total, rs[i].lever, past})
+		out = append(out, hotFunc{name: name, seconds: v, share: v / total, lever: rs[i].lever, past: past})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].seconds > out[j].seconds })
 	return out
