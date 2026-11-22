@@ -1113,6 +1113,9 @@ func (c *core) allocate() error {
 	rec := c.useRecs(nv)
 	iv := c.intervalList(nv)
 	count, most := 0, 0
+	// endCall says the block being numbered ends in a comparison its branch
+	// makes that calls Go (goesLive): its call is at the block's end.
+	endCall := false
 	inOrder := c.bools(nb)
 	for _, b := range c.order {
 		inOrder[b.ID] = true
@@ -1123,9 +1126,16 @@ func (c *core) allocate() error {
 			p := count
 			pos[v.ID] = p
 			count++
-			if savingCall(v) || goesLive(v) {
-				// A value read past one is not split: a split value's
-				// register is saved by no call.
+			switch {
+			case savingCall(v):
+				callIn[b.ID] = p
+			case goesLive(v) && c.isFused(v):
+				// Made at the block's branch: it comes after every value
+				// of the block, before the branch's edges (below).
+				endCall = true
+			case goesLive(v):
+				// Its call of Go saves what lives across it, as a call
+				// does: a value read past it is not split.
 				callIn[b.ID] = p
 			}
 			if v.Op == ssa.OpPhi {
@@ -1149,6 +1159,9 @@ func (c *core) allocate() error {
 			}
 		}
 		end[b.ID] = count
+		if endCall {
+			callIn[b.ID], endCall = count, false
+		}
 		count++
 	}
 	// xuses are the uses in another block than their value's, a block once
@@ -1413,6 +1426,9 @@ func (c *core) allocate() error {
 	// look at -- the calls, the keeps, the BigInts' boxes, the cells'
 	// addresses, the phis of sources -- in order, met with the uses.
 	kv := c.keepList()
+	// fusedLive are the values made at a block's branch that call Go out
+	// of line (goesLive), listed after the block's others.
+	var fusedLive []*ssa.Value
 	for _, b := range c.order {
 		cur = b
 		if masks == nil {
@@ -1493,7 +1509,11 @@ func (c *core) allocate() error {
 					c.keepRunAt(b, i, v)
 				}
 			default:
-				if goesLive(v) {
+				if goesLive(v) && c.isFused(v) {
+					// Made at the block's branch: its saves are made there,
+					// after the block's other values'.
+					fusedLive = append(fusedLive, v)
+				} else if goesLive(v) {
 					kv = append(kv, v)
 				}
 			}
@@ -1548,7 +1568,8 @@ func (c *core) allocate() error {
 				}
 			}
 			again = false
-			if savingCall(v) || goesLive(v) {
+			if savingCall(v) || goesLive(v) && !fused {
+				// A fused one's is at the block's end (callIn).
 				lastCall = p
 			}
 			at := p
@@ -1570,6 +1591,7 @@ func (c *core) allocate() error {
 			laterState(v.State, at)
 			refused, own, first = false, -1, -1
 		}
+		kv, fusedLive = append(kv, fusedLive...), fusedLive[:0]
 		if b.Control != nil {
 			if c.isLazy(b.Control) {
 				for _, a := range b.Control.Args {
@@ -2622,6 +2644,10 @@ func (c *core) allocate() error {
 			}
 			c.saveAt[2*v.ID] = len(c.saves)
 			p := pos[v.ID]
+			if goesLive(v) && c.isFused(v) {
+				// Made at its block's branch.
+				p = end[v.Block.ID]
+			}
 			for ; next < len(all) && all[next].start < p; next++ {
 				// Only what is in a register is saved; nor is a budget
 				// loop's, whose loop calls nothing.
@@ -2672,9 +2698,13 @@ func (c *core) allocate() error {
 				if o, ok := c.frameResident(it.v, v); ok {
 					sv.frame = o + 1
 				}
-				if it.end <= p {
+				if it.end <= p && !c.isFused(v) {
 					// Read after it by its refusal's exit alone: its own
-					// operands and state.
+					// operands and state. A comparison its branch makes
+					// is at the block's end, where what ends there may
+					// still be read by an edge -- a phi's move, a poll's
+					// state, a successor the loop's back edge goes to --
+					// and is restored either way.
 					sv.cold = true
 				}
 				if r := &rec[it.v.ID]; len(v.Calls()) != 0 && v.Calls()[0].Go != 0 && it.v.Op != ssa.OpPhi && r.def == int32(v.Block.ID)+1 && it.end == p+1 && int(r.hot) <= p {
@@ -3183,15 +3213,23 @@ func savingCall(v *ssa.Value) bool {
 // goesLive reports a value that is no call but whose operation calls Go out
 // of line, saving what lives across it in registers (savesOf), as a call
 // of Go does, and no other register (the backends' goLive): an oddball's
-// conversion that leaves a string to Go (ssa.GoNumber). Its saves are
-// made as a call's, and what is read past it is not split, as past a call
-// (useRec's slotFar): a split value's register is saved by no call.
-// Otherwise it is no call to the allocation, which keeps the values live
-// across it in registers as it would. Its saves also hold what ends at
-// it, which its refusal's exit reads after Go has had the registers
-// (saved's cold).
+// conversion that leaves a string to Go (ssa.GoNumber), a comparison that
+// leaves strings to Go (ssa.GoEqual). Its saves are made as a call's, and
+// what is read past it is not split, as past a call (useRec's slotFar):
+// a split value's register is saved by no call. Otherwise it is no call
+// to the allocation, which keeps the values live across it in registers
+// as it would. Its saves also hold what ends at it, which its refusal's
+// exit reads after Go has had the registers (saved's cold).
 func goesLive(v *ssa.Value) bool {
-	return v.Op == ssa.OpOddballF64 && v.Index == 1 && exitKind(v.Aux) == abi.ExitHost
+	switch v.Op {
+	case ssa.OpOddballF64:
+		return v.Index == 1 && exitKind(v.Aux) == abi.ExitHost
+	case ssa.OpEqTagged:
+		// A comparison of strings, or of what native code does not
+		// compare, by Go (ssa.GoEqual).
+		return exitKind(v.Aux) == abi.ExitHost
+	}
+	return false
 }
 
 // remat reports a value an exit recomputes from its operands rather than
