@@ -385,6 +385,7 @@ func main() {
 	hotRuns := flag.Int("hotruns", 10, "with -hot, the micro-benchmarks' runs")
 	hotShare := flag.Float64("hotshare", 0.002, "with -hot, the share of the samples that makes a function hot")
 	hotDist := flag.Int64("hotdist", 8192, "with -hot, the bytes past its range's anchor that a hot function may lie")
+	reserve := flag.String("reserve", "", "with -pages, the levers, comma-separated, whose pads take their reserve now, their anchors and every one after them recorded as many pages on as that needs (XJ,CZ)")
 	recordEq := flag.Bool("eq", false, "pad as by default, and record the builds' equality functions (type:.eq.*) in "+eqRel+", where a new one is meant")
 	flag.Parse()
 	root, err := repoRoot()
@@ -571,6 +572,15 @@ func main() {
 				eqFailed = eqFailed || failed
 			}
 			if *recordPages {
+				forced := map[string]bool{}
+				for _, name := range strings.Split(*reserve, ",") {
+					forced[name] = name != ""
+				}
+				if reservePages(c, syms, readValues(c), forced) {
+					if syms, err = solve(c, *verbose); err != nil {
+						fatal(err)
+					}
+				}
 				setPages(c, syms)
 				continue
 			}
