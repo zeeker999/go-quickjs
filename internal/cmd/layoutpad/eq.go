@@ -161,13 +161,13 @@ const eqAdvice = "layoutpad: a new compiler-generated equality function moves th
 	"make the type it compares need none (no padding hole, or a non-comparable _ [0]func() field where nothing should compare it), " +
 	"or, where it is meant, record the list with go run ./internal/cmd/layoutpad -eq (" + eqRel + ")"
 
-// symBefore names the text symbol at or before addr that is no equality
-// function: where the new one is laid out.
+// symBefore names the text symbol before addr that is no equality or hash
+// function the compiler made: where the new one is laid out.
 func symBefore(syms *symtab, addr uint64) string {
 	i := sort.Search(len(syms.list), func(i int) bool { return syms.list[i].addr >= addr })
 	for i--; i >= 0; i-- {
 		s := syms.list[i]
-		if (s.kind == "T" || s.kind == "t") && !strings.HasPrefix(s.name, eqPrefix) {
+		if (s.kind == "T" || s.kind == "t") && !strings.HasPrefix(s.name, "type:.") {
 			return s.name
 		}
 	}
@@ -218,7 +218,7 @@ func eqCallers(c *config, names []string) map[string][]string {
 		if j := strings.Index(n, "(SB)"); j >= 0 {
 			n = n[:j]
 		}
-		if want[n] && !seen[n+fn] && !strings.HasPrefix(fn, eqPrefix) {
+		if want[n] && !seen[n+fn] && !strings.HasPrefix(fn, n+" ") {
 			seen[n+fn] = true
 			out[n] = append(out[n], fn)
 		}
