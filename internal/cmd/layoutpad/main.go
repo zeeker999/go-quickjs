@@ -375,6 +375,10 @@ func main() {
 	targetsPath := flag.String("targets", targetsRel, "the targets file, from the repository's root")
 	all := flag.Bool("all", false, "with -show, write the pads and set every lever of the configurations to 0 first, to see where each lands")
 	recordPages := flag.Bool("pages", false, "pad as by default, and record each code anchor's address (its page) as the build has it, where an anchor moved a page and the move is meant")
+	hot := flag.Bool("hot", false, "profile this machine's configurations' micro-benchmarks and list the hot functions that lie far past their range's anchor, each wanting a position (docs/optimizing.md)")
+	hotRuns := flag.Int("hotruns", 10, "with -hot, the micro-benchmarks' runs")
+	hotShare := flag.Float64("hotshare", 0.002, "with -hot, the share of the samples that makes a function hot")
+	hotDist := flag.Int64("hotdist", 8192, "with -hot, the bytes past its range's anchor that a hot function may lie")
 	recordEq := flag.Bool("eq", false, "pad as by default, and record the builds' equality functions (type:.eq.*) in "+eqRel+", where a new one is meant")
 	flag.Parse()
 	root, err := repoRoot()
@@ -407,7 +411,7 @@ func main() {
 			if !slices.Contains(strings.Split(*only, ","), name) {
 				continue
 			}
-		} else if (*check || *show) && (c.goos != runtime.GOOS || c.goarch != runtime.GOARCH) {
+		} else if (*check || *show || *hot) && (c.goos != runtime.GOOS || c.goarch != runtime.GOARCH) {
 			continue
 		}
 		picked = append(picked, c)
@@ -420,6 +424,24 @@ func main() {
 		fatal(errors.New("no configuration picked"))
 	}
 	switch {
+	case *hot:
+		found := false
+		for _, c := range picked {
+			list, err := hotRun(c, *hotRuns, *hotShare, *hotDist)
+			if err != nil {
+				fatal(err)
+			}
+			for _, h := range list {
+				fmt.Printf("%s: %s, %.2fs (%.1f%%), %d bytes past anchor %s\n", c, strings.TrimPrefix(h.name, modPrefix), h.seconds, 100*h.share, h.past, h.lever)
+				found = true
+			}
+			if len(list) == 0 {
+				fmt.Printf("%s: no hot function more than %d bytes past its range's anchor\n", c, *hotDist)
+			}
+		}
+		if found {
+			os.Exit(1)
+		}
 	case *check:
 		drift, paged, eqFailed := false, false, false
 		for _, c := range picked {
