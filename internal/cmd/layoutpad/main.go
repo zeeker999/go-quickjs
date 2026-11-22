@@ -1275,16 +1275,18 @@ func positionFile(p position, last bool, used map[string]bool) string {
 		b.WriteString("import \"unsafe\"\n\n")
 	}
 	g, m := used["G"+p.name], used["M"+p.name]
+	if m {
+		// The method comes before the function pad: laid out at the end
+		// of the range before it, it moves nothing the pad holds.
+		fmt.Fprintf(&b, "// layoutPadM%s calls the generic pad of the layout lock's methods at %s:\n// Go reads the bodies of methods after those of functions, so the generic\n// is laid out among those methods call first. It is never called.\n//\n//go:noinline\nfunc (r *Runtime) layoutPadM%s() {\n", p.name, p.name, p.name)
+		fmt.Fprintf(&b, "\tlayoutPadM%s[struct{}]()\n}\n\n", p.name)
+	}
 	fmt.Fprintf(&b, "// layoutPad%s is the layout lock's pad %s, %s.\n// It is never called: see internal/cmd/layoutpad.\n//\n//go:noinline\nfunc layoutPad%s() {\n", p.name, p.name, p.doc, p.name)
 	if g {
 		fmt.Fprintf(&b, "\tif layoutPadNG%s >= 0 {\n\t\tlayoutPadG%s[struct{}]()\n\t}\n", p.name, p.name)
 	}
 	stores(&b, "\t", "layoutPadN"+p.name)
 	b.WriteString("}\n")
-	if m {
-		fmt.Fprintf(&b, "\n// layoutPadM%s calls the generic pad of the layout lock's methods at %s:\n// Go reads the bodies of methods after those of functions, so the generic\n// is laid out among those methods call first. It is never called.\n//\n//go:noinline\nfunc (r *Runtime) layoutPadM%s() {\n", p.name, p.name, p.name)
-		fmt.Fprintf(&b, "\tlayoutPadM%s[struct{}]()\n}\n", p.name)
-	}
 	if g {
 		fmt.Fprintf(&b, "\n// layoutPadG%s is the generic pad of layoutPad%s. It is never called.\n//\n//go:noinline\nfunc layoutPadG%s[_ any]() {\n", p.name, p.name, p.name)
 		stores(&b, "\t", "layoutPadNG"+p.name)
