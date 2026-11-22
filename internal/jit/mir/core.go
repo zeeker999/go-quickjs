@@ -1410,6 +1410,9 @@ func (c *core) allocate() error {
 	// look at -- the calls, the keeps, the BigInts' boxes, the cells'
 	// addresses, the phis of sources -- in order, met with the uses.
 	kv := c.keepList()
+	// fusedLive are the values made at a block's branch that go live (goesLive),
+	// listed after the block's others.
+	var fusedLive []*ssa.Value
 	for _, b := range c.order {
 		cur = b
 		if masks == nil {
@@ -1490,7 +1493,11 @@ func (c *core) allocate() error {
 					c.keepRunAt(b, i, v)
 				}
 			default:
-				if goesLive(v) {
+				if goesLive(v) && c.isFused(v) {
+					// Made at the block's branch: its saves are made there,
+					// after the block's other values'.
+					fusedLive = append(fusedLive, v)
+				} else if goesLive(v) {
 					kv = append(kv, v)
 				}
 			}
@@ -1563,10 +1570,11 @@ func (c *core) allocate() error {
 				// others, as they are in one block.
 				continue
 			}
-			refused, own = at != p && (goesLive(v) || v.Calls()[0].Go != 0), first
+			refused, own = at != p && v.Calls()[0].Go != 0, first
 			laterState(v.State, at)
 			refused, own, first = false, -1, -1
 		}
+		kv, fusedLive = append(kv, fusedLive...), fusedLive[:0]
 		if b.Control != nil {
 			if c.isLazy(b.Control) {
 				for _, a := range b.Control.Args {
@@ -2619,6 +2627,10 @@ func (c *core) allocate() error {
 			}
 			c.saveAt[2*v.ID] = len(c.saves)
 			p := pos[v.ID]
+			if goesLive(v) && c.isFused(v) {
+				// Made at its block's branch.
+				p = end[v.Block.ID]
+			}
 			for ; next < len(all) && all[next].start < p; next++ {
 				// Only what is in a register is saved; nor is a budget
 				// loop's, whose loop calls nothing.
@@ -2630,8 +2642,15 @@ func (c *core) allocate() error {
 			}
 			kept := open[:0]
 			c.steps += len(open)
+			// A value that goes live (goesLive) saves too what ends at it:
+			// what its state reads, which its refusal's exit reads after Go
+			// has had the registers (saved's cold).
+			last := p
+			if goesLive(v) {
+				last = p - 1
+			}
 			for _, it := range open {
-				if it.end > p {
+				if it.end > last {
 					kept = append(kept, it)
 				} else if s := home[it.v.ID]; s != 0 {
 					free = append(free, s-1)
@@ -2661,6 +2680,10 @@ func (c *core) allocate() error {
 				sv := saved{reg: l.reg, slot: s, float: isFloat(it.v), id: it.v.ID}
 				if o, ok := c.frameResident(it.v, v); ok {
 					sv.frame = o + 1
+				}
+				if it.end <= p {
+					// Read after it by its refusal's exit alone.
+					sv.cold = true
 				}
 				if r := &rec[it.v.ID]; len(v.Calls()) != 0 && v.Calls()[0].Go != 0 && it.v.Op != ssa.OpPhi && r.def == int32(v.Block.ID)+1 && it.end == p+1 && int(r.hot) <= p {
 					// A call of Go's, defined in the call's block before
@@ -3151,11 +3174,6 @@ func (c *core) frameSize() int {
 // whose pool Go fills, made again from its start (ssa.RefillsPools). What
 // it reads lives across it, saved and restored (allocate's saves).
 func callsAgain(v *ssa.Value) bool {
-	if goesLive(v) {
-		// Its call of Go, which may refuse: the exit reads its state after
-		// Go has had the registers.
-		return true
-	}
 	if v.Op != ssa.OpCall || len(v.Calls()) == 0 {
 		return false
 	}
@@ -3173,11 +3191,20 @@ func savingCall(v *ssa.Value) bool {
 // goesLive reports a value that is no call but whose operation calls Go out
 // of line, saving what lives across it in registers (savesOf), as a call
 // of Go does, and no other register (the backends' goLive): an oddball's
-// conversion that leaves a string to Go (ssa.GoNumber). Its saves are
+// conversion that leaves a string to Go (ssa.GoNumber), a comparison that
+// leaves strings to Go (ssa.GoEqual). Its saves are
 // made as a call's, but it is no call to the allocation, which keeps the
 // values live across it in registers as it would.
 func goesLive(v *ssa.Value) bool {
-	return v.Op == ssa.OpOddballF64 && v.Index == 1 && exitKind(v.Aux) == abi.ExitHost
+	switch v.Op {
+	case ssa.OpOddballF64:
+		return v.Index == 1 && exitKind(v.Aux) == abi.ExitHost
+	case ssa.OpEqTagged:
+		// A comparison of strings, or of what native code does not
+		// compare, by Go (ssa.GoEqual).
+		return exitKind(v.Aux) == abi.ExitHost
+	}
+	return false
 }
 
 // remat reports a value an exit recomputes from its operands rather than

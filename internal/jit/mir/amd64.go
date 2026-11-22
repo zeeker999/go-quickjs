@@ -8772,18 +8772,21 @@ func (c *compiler) goLive(v *ssa.Value, op uint64, stub amd64.Label) {
 	c.movImm(scratchB, c.enc.GoFast)
 	c.a.JmpReg(scratchB)
 	c.a.Bind(back)
-	restore := func() {
+	restore := func(refused bool) {
 		c.a.Load(regLocals, regCtx, abi.OffLocals)
 		c.a.Load(regStack, regCtx, abi.OffStack)
 		for _, sv := range saves {
-			if sv.float {
+			switch {
+			case sv.cold && !refused:
+				// What its state reads, read by its refusal's exit alone.
+			case sv.float:
 				c.spillLoadSD(amd64.XReg(sv.reg), sv.slot)
-			} else {
+			default:
 				c.spillLoad(amd64.Reg(sv.reg), sv.slot)
 			}
 		}
 	}
-	restore()
+	restore(false)
 	if reg >= 0 {
 		c.budgetStart(amd64.Reg(reg))
 	}
@@ -8794,7 +8797,7 @@ func (c *compiler) goLive(v *ssa.Value, op uint64, stub amd64.Label) {
 	c.goFails = append(c.goFails, goFail{st, back, fail})
 	c.cold = append(c.cold, func() {
 		c.a.Bind(fail)
-		restore()
+		restore(true)
 		c.a.Jmp(to)
 	})
 }
@@ -12429,7 +12432,7 @@ func (c *compiler) strictConst(v *ssa.Value, guard guardTo, to *target) bool {
 				size := int32(unsafe.Sizeof(abi.GoArg{}))
 				c.goArg(abi.OffGoArgs, v.Args[0])
 				c.goArg(abi.OffGoArgs+size, v.Args[1])
-				c.goSaving(uint64(ssa.GoEqual)|1<<abi.GoOpIndexShift, &exit)
+				c.goLive(v, uint64(ssa.GoEqual)|1<<abi.GoOpIndexShift, exit)
 				c.a.Load(scratchA, regCtx, abi.OffGoArgs+c.enc.NumOffset)
 				c.a.Op(amd64.Test, scratchA, scratchA, true)
 				c.a.Jcc(amd64.CondNE, yes)
@@ -12471,7 +12474,7 @@ func (c *compiler) eqTagged(v *ssa.Value, guard guardTo, to *target) {
 			size := int32(unsafe.Sizeof(abi.GoArg{}))
 			c.goArg(abi.OffGoArgs, x)
 			c.goArg(abi.OffGoArgs+size, y)
-			c.goSaving(uint64(ssa.GoEqual)|uint64(v.Index&1)<<abi.GoOpIndexShift, &stub)
+			c.goLive(v, uint64(ssa.GoEqual)|uint64(v.Index&1)<<abi.GoOpIndexShift, stub)
 			c.a.Load(scratchA, regCtx, abi.OffGoArgs+c.enc.NumOffset)
 			c.a.Op(amd64.Test, scratchA, scratchA, true)
 			c.a.Jcc(amd64.CondNE, yes)

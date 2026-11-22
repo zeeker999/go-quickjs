@@ -1853,7 +1853,7 @@ func (c *a64Compiler) strictConst(v *ssa.Value, guard a64Guard, to *a64Target) b
 				size := int32(unsafe.Sizeof(abi.GoArg{}))
 				c.goArg(abi.OffGoArgs, v.Args[0])
 				c.goArg(abi.OffGoArgs+size, v.Args[1])
-				c.goSaving(uint64(ssa.GoEqual)|1<<abi.GoOpIndexShift, &exit)
+				c.goLive(v, uint64(ssa.GoEqual)|1<<abi.GoOpIndexShift, exit)
 				c.a.Load(a64A, a64Ctx, abi.OffGoArgs+c.enc.NumOffset)
 				c.a.Cbnz(a64A, yes, true)
 				c.a.B(no)
@@ -1888,7 +1888,7 @@ func (c *a64Compiler) eqTagged(v *ssa.Value, guard a64Guard, to *a64Target) {
 			size := int32(unsafe.Sizeof(abi.GoArg{}))
 			c.goArg(abi.OffGoArgs, x)
 			c.goArg(abi.OffGoArgs+size, y)
-			c.goSaving(uint64(ssa.GoEqual)|uint64(v.Index&1)<<abi.GoOpIndexShift, &stub)
+			c.goLive(v, uint64(ssa.GoEqual)|uint64(v.Index&1)<<abi.GoOpIndexShift, stub)
 			c.a.Load(a64A, a64Ctx, abi.OffGoArgs+c.enc.NumOffset)
 			c.a.Cbnz(a64A, yes, true)
 			c.a.B(no)
@@ -2627,18 +2627,21 @@ func (c *a64Compiler) goLive(v *ssa.Value, op uint64, stub arm64.Label) {
 	c.movImm(a64B, c.enc.GoFast)
 	c.a.Br(a64B)
 	c.a.Bind(back)
-	restore := func() {
+	restore := func(refused bool) {
 		c.a.Load(a64Locals, a64Ctx, abi.OffLocals)
 		c.a.Load(a64Stack, a64Ctx, abi.OffStack)
 		for _, sv := range saves {
-			if sv.float {
+			switch {
+			case sv.cold && !refused:
+				// What its state reads, read by its refusal's exit alone.
+			case sv.float:
 				c.spillLoadF(arm64.FReg(sv.reg), sv.slot)
-			} else {
+			default:
 				c.spillLoad(arm64.Reg(sv.reg), sv.slot)
 			}
 		}
 	}
-	restore()
+	restore(false)
 	if reg >= 0 {
 		c.budgetStart(arm64.Reg(reg))
 	}
@@ -2649,7 +2652,7 @@ func (c *a64Compiler) goLive(v *ssa.Value, op uint64, stub arm64.Label) {
 	c.goFails = append(c.goFails, a64GoFail{st, back, fail})
 	c.cold = append(c.cold, func() {
 		c.a.Bind(fail)
-		restore()
+		restore(true)
 		c.a.B(to)
 	})
 }

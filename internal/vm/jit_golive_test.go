@@ -66,3 +66,51 @@ func TestJITStringConversionGoesLive(t *testing.T) {
 		})
 	}
 }
+
+// goLiveEqSetup's loops compare strings Go compares (ssa.GoEqual): ropes
+// made at each turn, strictly, the comparison its branch's; and loosely an
+// object, whose valueOf runs.
+const goLiveEqSetup = `
+var eqConv = 0, tail = 'q';
+var longs = ['abcdefghijklmnopqrstuvwxyz0123456789' + tail, 'cd', 'zyxwvutsrqponmlkjihgfedcba9876543210' + tail, 'gh'];
+function eqLoop(a, b, n) { var c = 0; for (var j = 0; j < n; j++) if (a[j & 3] + tail === b[j & 3]) c++; return c }
+function plainEq(n) { return eqLoop(['abcdefghijklmnopqrstuvwxyz0123456789', 'c', 'zyxwvutsrqponmlkjihgfedcba9876543210', 'g'], ['abcdefghijklmnopqrstuvwxyz0123456789q', 'cq', 'zyxwvutsrqponmlkjihgfedcba9876543210x', 'gq'], n) }
+function looseLoop(a, b, n) { var c = 0; for (var j = 0; j < n; j++) if (a[j & 3] == b[j & 3]) c++; return c }
+function oddEq(n) { eqConv = 0; return looseLoop(longs, ['abcdefghijklmnopqrstuvwxyz0123456789q', { valueOf() { eqConv++; return 'cd' } }, 'x', 'gh'], n) + ':' + eqConv }
+`
+
+// A comparison that leaves strings to Go (ssa.GoEqual) calls Go through
+// GoFast, saving only what lives across it, as a string's conversion does
+// (TestJITStringConversionGoesLive): each answer the interpreter's, a
+// comparison Go does not make too, with the collector idle and marking,
+// and each turn's comparison of ropes a call through the routine.
+func TestJITStringEqualityGoesLive(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			var rounds []string
+			for range 6 {
+				rounds = append(rounds, "plainEq(40)")
+			}
+			rounds = append(rounds, "oddEq(40)", "plainEq(40)", "oddEq(40)")
+			r := jitAgreesForTest(t, goLiveEqSetup, rounds...)
+			fast := r.jit.goFast
+			v, err := r.Run(compileForTest(t, "''+plainEq(40)"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := v.String().Go(); got != "30" {
+				t.Errorf("plainEq(40) = %q, want 30", got)
+			}
+			jitNativeForTest(t, r, "eqLoop")
+			if got := r.jit.goFast - fast; got < 20 {
+				t.Errorf("%d calls of Go through the routine in 40 turns, want at least one for each of the 20 turns that compare ropes", got)
+			}
+		})
+	}
+}
