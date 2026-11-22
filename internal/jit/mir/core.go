@@ -3214,12 +3214,13 @@ func savingCall(v *ssa.Value) bool {
 // of line, saving what lives across it in registers (savesOf), as a call
 // of Go does, and no other register (the backends' goLive): an oddball's
 // conversion that leaves a string to Go (ssa.GoNumber), a comparison that
-// leaves strings to Go (ssa.GoEqual). Its saves are made as a call's, and
-// what is read past it is not split, as past a call (useRec's slotFar):
-// a split value's register is saved by no call. Otherwise it is no call
-// to the allocation, which keeps the values live across it in registers
-// as it would. Its saves also hold what ends at it, which its refusal's
-// exit reads after Go has had the registers (saved's cold).
+// leaves strings to Go (ssa.GoEqual), a cursor's close (ssa.GoIterClose).
+// Its saves are made as a call's, and what is read past it is not split,
+// as past a call (useRec's slotFar): a split value's register is saved by
+// no call. Otherwise it is no call to the allocation, which keeps the
+// values live across it in registers as it would. Its saves also hold
+// what ends at it, which its refusal's exit reads after Go has had the
+// registers (saved's cold).
 func goesLive(v *ssa.Value) bool {
 	switch v.Op {
 	case ssa.OpOddballF64:
@@ -3228,6 +3229,9 @@ func goesLive(v *ssa.Value) bool {
 		// A comparison of strings, or of what native code does not
 		// compare, by Go (ssa.GoEqual).
 		return exitKind(v.Aux) == abi.ExitHost
+	case ssa.OpIterClosed:
+		// A cursor's close by Go (ssa.GoIterClose).
+		return v.Index == 1 && exitKind(v.Aux) == abi.ExitHost
 	}
 	return false
 }

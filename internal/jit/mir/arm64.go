@@ -10098,6 +10098,54 @@ func (c *a64Compiler) numberCell(guard a64Guard) {
 // that exits to v's state.
 func (c *a64Compiler) guardFor(v *ssa.Value) a64Guard { return a64Guard{c: c, v: v} }
 
+// iterClosed is amd64's.
+func (c *a64Compiler) iterClosed(v *ssa.Value, guard a64Guard) {
+	x, ok := v.Args[0], c.a.NewLabel()
+	if c.enc.IterState == 0 {
+		c.a.B(c.stubLabel(v.State, exitKind(v.Aux)))
+		return
+	}
+	closed := a64NoLabel
+	if v.Index == 1 && c.enc.CallGo != 0 && exitKind(v.Aux) == abi.ExitHost {
+		open, stub := c.a.NewLabel(), c.stubLabel(v.State, exitKind(v.Aux))
+		closed = c.a.NewLabel()
+		c.cold = append(c.cold, func() {
+			c.a.Bind(open)
+			c.goArg(abi.OffGoArgs, x)
+			c.goLive(v, uint64(ssa.GoIterClose), stub)
+			c.a.B(closed)
+		})
+		guard = a64GuardLabel(c, open)
+	}
+	fail, _ := guard.label()
+	c.pointerWord(x, c.gpr(x, a64A))
+	c.a.CmpImm(a64B, 0, true)
+	guard.jump(arm64.EQ)
+	c.objectPart(a64B, a64B, a64C, c.enc.ClassCursor, c.enc.IterState, guard)
+	c.a.LoadU8(a64C, a64B, c.enc.IterDone)
+	c.a.Cbnz(a64C, ok, false)
+	c.a.Load(a64C, a64B, c.enc.IterArr)
+	c.a.CmpImm(a64C, 0, true)
+	guard.jump(arm64.EQ)
+	if v.Const.Bits == 0 {
+		// No cell: a done cursor's alone, which jumps to ok.
+		c.a.B(fail)
+	} else {
+		c.movImm(a64C, v.Const.Bits)
+		c.a.Load(a64C, a64C, 0)
+		c.a.CmpImm(a64C, 0, true)
+		guard.jump(arm64.EQ)
+		c.a.LoadU8(a64C, a64C, 0)
+		c.a.CmpImm(a64C, 0, false)
+		guard.jump(arm64.EQ)
+	}
+	c.a.Bind(ok)
+	c.iterRelease()
+	if closed != a64NoLabel {
+		c.a.Bind(closed)
+	}
+}
+
 // a64Guard is where a guard that fails goes: v's exit (guardFor), a label
 // (a64GuardLabel), or, the zero value, nowhere, as on amd64.
 type a64Guard struct {
@@ -10338,37 +10386,7 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 	case ssa.OpTailSelf:
 		c.tailSelf(v, guard)
 	case ssa.OpIterClosed:
-		// As amd64's.
-		x, ok := v.Args[0], c.a.NewLabel()
-		if c.enc.IterState == 0 {
-			c.a.B(c.stubLabel(v.State, exitKind(v.Aux)))
-			break
-		}
-		c.pointerWord(x, c.gpr(x, a64A))
-		c.a.CmpImm(a64B, 0, true)
-		guard.jump(arm64.EQ)
-		c.objectPart(a64B, a64B, a64C, c.enc.ClassCursor, c.enc.IterState, guard)
-		c.a.LoadU8(a64C, a64B, c.enc.IterDone)
-		c.a.Cbnz(a64C, ok, false)
-		c.a.Load(a64C, a64B, c.enc.IterArr)
-		c.a.CmpImm(a64C, 0, true)
-		guard.jump(arm64.EQ)
-		if v.Const.Bits == 0 {
-			// No cell: a done cursor's alone, which jumps to ok.
-			c.a.B(c.stubLabel(v.State, exitKind(v.Aux)))
-			c.a.Bind(ok)
-			c.iterRelease()
-			break
-		}
-		c.movImm(a64C, v.Const.Bits)
-		c.a.Load(a64C, a64C, 0)
-		c.a.CmpImm(a64C, 0, true)
-		guard.jump(arm64.EQ)
-		c.a.LoadU8(a64C, a64C, 0)
-		c.a.CmpImm(a64C, 0, false)
-		guard.jump(arm64.EQ)
-		c.a.Bind(ok)
-		c.iterRelease()
+		c.iterClosed(v, guard)
 	case ssa.OpSameSymbol:
 		if c.reference(v, v.Args[0], c.enc.Symbol, guard) {
 			c.movImm(a64B, v.Const.Bits)
