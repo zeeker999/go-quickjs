@@ -23,7 +23,13 @@ const (
 	layoutPadNJP  = 13
 	layoutPadNGJP = -1
 	layoutPadNMJP = -1
-	layoutPadNC   = 406
+	layoutPadNTA  = 0
+	layoutPadNGTA = -1
+	layoutPadNMTA = -1
+	layoutPadNCB  = 0
+	layoutPadNGCB = -1
+	layoutPadNMCB = -1
+	layoutPadNC   = 397
 	layoutPadNGC  = -1
 	layoutPadNMC  = -1
 	layoutPadND   = 278
@@ -32,19 +38,31 @@ const (
 	layoutPadNF   = 466
 	layoutPadNGF  = -1
 	layoutPadNMF  = -1
-	layoutPadNL   = 420
+	layoutPadNL   = 415
 	layoutPadNGL  = -1
 	layoutPadNML  = -1
 	layoutPadNB   = 484
 	layoutPadNGB  = -1
 	layoutPadNMB  = -1
-	layoutPadNJ   = 63
+	layoutPadNJB  = 0
+	layoutPadNGJB = -1
+	layoutPadNMJB = -1
+	layoutPadNJU  = 0
+	layoutPadNGJU = -1
+	layoutPadNMJU = -1
+	layoutPadNJ   = 54
 	layoutPadNGJ  = -1
 	layoutPadNMJ  = -1
-	layoutPadNN   = 50
+	layoutPadNJN  = 0
+	layoutPadNGJN = -1
+	layoutPadNMJN = -1
+	layoutPadNJS  = 0
+	layoutPadNGJS = -1
+	layoutPadNMJS = -1
+	layoutPadNN   = 40
 	layoutPadNGN  = -1
 	layoutPadNMN  = -1
-	layoutPadNP   = -1
+	layoutPadNP   = 0
 	layoutPadNGP  = -1
 	layoutPadNMP  = -1
 	layoutPadNQ   = 525
@@ -56,34 +74,51 @@ const (
 	layoutPadNU   = 575
 	layoutPadNGU  = -1
 	layoutPadNMU  = -1
-	layoutPadNY   = 539
+	layoutPadNY   = 534
 	layoutPadNGY  = -1
 	layoutPadNMY  = -1
 	layoutPadNV   = 8
 	layoutPadNGV  = -1
 	layoutPadNMV  = -1
-	layoutPadNK   = 438
+	layoutPadNVT  = 0
+	layoutPadNGVT = -1
+	layoutPadNMVT = -1
+	layoutPadNK   = 434
 	layoutPadNGK  = -1
 	layoutPadNMK  = -1
+	layoutPadNVA  = 0
+	layoutPadNGVA = -1
+	layoutPadNMVA = -1
 	layoutPadNO   = 4
 	layoutPadNGO  = -1
 	layoutPadNMO  = -1
+	layoutPadNPR  = 0
+	layoutPadNGPR = -1
+	layoutPadNMPR = -1
+	layoutPadNSH  = 0
+	layoutPadNGSH = -1
+	layoutPadNMSH = -1
 	layoutPadNR   = 118
 	layoutPadNGR  = -1
 	layoutPadNMR  = -1
 	layoutPadNS   = 63
 	layoutPadNGS  = -1
 	layoutPadNMS  = -1
-	layoutPadNZ   = 388
+	layoutPadNZ   = 365
 	layoutPadNGZ  = -1
 	layoutPadNMZ  = -1
 	layoutPadNCZ  = 287
-	layoutPadNH   = 43
+	layoutPadNHJ  = 1
+	layoutPadNH   = 42
 	layoutPadNDH  = 3
 	layoutPadNDW  = 1
 	layoutPadNDG  = 0
 )
 
-// layoutPadH is the assembly pad, in
+// layoutPadHJ is an assembly pad, in
+// jit_l_layoutpad_jit_linux_amd64.s. It is never called.
+func layoutPadHJ()
+
+// layoutPadH is an assembly pad, in
 // native_a_layoutpad_jit_linux_amd64.s. It is never called.
 func layoutPadH()

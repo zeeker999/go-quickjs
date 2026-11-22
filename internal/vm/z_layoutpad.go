@@ -370,6 +370,12 @@ func init() {
 		if layoutPadNJP >= 0 {
 			layoutPadJP()
 		}
+		if layoutPadNTA >= 0 {
+			layoutPadTA()
+		}
+		if layoutPadNCB >= 0 {
+			layoutPadCB()
+		}
 		if layoutPadNC >= 0 {
 			layoutPadC()
 		}
@@ -385,8 +391,20 @@ func init() {
 		if layoutPadNB >= 0 {
 			layoutPadB()
 		}
+		if layoutPadNJB >= 0 {
+			layoutPadJB()
+		}
+		if layoutPadNJU >= 0 {
+			layoutPadJU()
+		}
 		if layoutPadNJ >= 0 {
 			layoutPadJ()
+		}
+		if layoutPadNJN >= 0 {
+			layoutPadJN()
+		}
+		if layoutPadNJS >= 0 {
+			layoutPadJS()
 		}
 		if layoutPadNN >= 0 {
 			layoutPadN()
@@ -409,11 +427,23 @@ func init() {
 		if layoutPadNV >= 0 {
 			layoutPadV()
 		}
+		if layoutPadNVT >= 0 {
+			layoutPadVT()
+		}
 		if layoutPadNK >= 0 {
 			layoutPadK()
 		}
+		if layoutPadNVA >= 0 {
+			layoutPadVA()
+		}
 		if layoutPadNO >= 0 {
 			layoutPadO()
+		}
+		if layoutPadNPR >= 0 {
+			layoutPadPR()
+		}
+		if layoutPadNSH >= 0 {
+			layoutPadSH()
 		}
 		if layoutPadNR >= 0 {
 			layoutPadR()
@@ -426,6 +456,9 @@ func init() {
 		}
 		if layoutPadNCZ >= 0 {
 			layoutPadCZ[struct{}]()
+		}
+		if layoutPadNHJ >= 0 {
+			layoutPadHJ()
 		}
 		if layoutPadNH >= 0 {
 			layoutPadH()
