@@ -179,7 +179,7 @@ func paramCaptured(fn *bytecode.Function) bool {
 // which Go takes from the frame -- stays native there, as a global's cell or
 // a reference, rather than add an exit.
 func selectNumericProperties(p *ir.Program, cells bool) {
-	const number, reference uint8 = 1, 2
+	const number, reference, stored uint8 = 1, 2, 4
 	// On the stack for a function of up to 256 slots, as nearly all are.
 	var room [256]uint8
 	needed := room[:]
@@ -254,7 +254,7 @@ func selectNumericProperties(p *ir.Program, cells bool) {
 				read(in.Left, number)
 			}
 		case ir.ArrayRead, ir.ArrayUpdate, ir.ArrayLength:
-			if kind := take(in.Dest); cells && in.Op != ir.ArrayLength && kind&number == 0 {
+			if kind := take(in.Dest); cells && in.Op != ir.ArrayLength && kind&(number|stored) == 0 {
 				in.Reference = true
 				p.Code[pc] = in
 			}
@@ -269,7 +269,14 @@ func selectNumericProperties(p *ir.Program, cells bool) {
 			read(in.Left, reference)
 			read(in.Right, number)
 			if in.Op == ir.ArrayWrite {
-				read(in.Third, number)
+				if cells {
+					// A store takes any value. Keep numeric element reads until
+					// their feedback says otherwise, without making a property's
+					// read speculate merely because it feeds a store.
+					read(in.Third, stored)
+				} else {
+					read(in.Third, number)
+				}
 			}
 		case ir.PropertyWrite:
 			read(in.Left, reference)

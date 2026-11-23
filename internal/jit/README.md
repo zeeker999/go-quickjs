@@ -211,6 +211,12 @@ property reads, each with its own origin, feedback site and frame state.
 Their combined dispatch and omitted intermediate store belong to the
 native interpreter; an exit from compiled code can resume at either read.
 
+A property's value is read as a number when its uses ask for one. An
+element store asks for a numeric index, but takes the stored value as it
+is, just as a property store does. A property read used only as that value
+therefore stays tagged. An element read feeding a store keeps its numeric
+path until the element-read feedback asks for a tagged value.
+
 Where a register instruction's operands are a run of registers that is not
 where its result goes -- `new_array`'s elements, `concat`'s parts -- they
 are copied to scratch slots first, which the operation reads as a run of
