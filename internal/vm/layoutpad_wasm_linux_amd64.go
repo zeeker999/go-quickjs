@@ -101,7 +101,7 @@ const (
 	layoutPadNSH  = 0
 	layoutPadNGSH = -1
 	layoutPadNMSH = -1
-	layoutPadNR   = 132
+	layoutPadNR   = 127
 	layoutPadNGR  = -1
 	layoutPadNMR  = -1
 	layoutPadNS   = 100

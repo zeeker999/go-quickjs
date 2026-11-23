@@ -830,9 +830,15 @@ func rsAdd(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
 		// An append to an upvalue: R[B] the string the binding alone
 		// holds, grown in place where it can be (strAppend).
 		v, err := strAppendOp[struct{}](st.r, regs[w.B()], regs[w.C()])
+		if st.r.jitOn() {
+			st.stringAddSeen(pc, v, err)
+		}
 		return st.put(regs, w, v, err)
 	}
 	v, err := st.r.add(regs[w.B()], regs[w.C()])
+	if st.r.jitOn() {
+		st.stringAddSeen(pc, v, err)
+	}
 	if regBigOf != nil && err == nil && v.IsBigInt() {
 		regBigOf(st.r, st.c, pc, regs[w.B()], regs[w.C()], v)
 	}
@@ -957,6 +963,9 @@ func rsAddI(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
 	}
 	st.at(pc)
 	v, err := st.r.regBinImm(bytecode.OpAdd, regs[w.B()], w.SC())
+	if st.r.jitOn() {
+		st.stringAddSeen(pc, v, err)
+	}
 	return st.put(regs, w, v, err)
 }
 

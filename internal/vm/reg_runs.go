@@ -21,6 +21,16 @@ import (
 // BigInt, one on the heap; nil without the JIT.
 var regBigOf func(r *Runtime, c *regCode, pc int, a, b, v Value)
 
+// regStringAddOf records a string addition for the first JIT compile;
+// nil without the JIT. Only an addition's slow path calls it.
+var regStringAddOf func(c *regCode, pc int)
+
+func (st *regState) stringAddSeen(pc int, v Value, err error) {
+	if err == nil && v.IsString() {
+		regStringAddOf(st.c, pc)
+	}
+}
+
 // regBinImm is bin_imm's slow path.
 func (r *Runtime) regBinImm(op bytecode.Op, a Value, imm int32) (Value, error) {
 	if op != bytecode.OpAdd && a.IsString() {
