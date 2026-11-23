@@ -8549,11 +8549,13 @@ func (c *a64Compiler) holder(v *ssa.Value, guard a64Guard) {
 	cases := v.Cases()
 	// As amd64's: at a megamorphic site, a receiver of a shape not among
 	// the cases has its own table searched, and so does one whose
-	// prototypes are no longer the case's; at any other, either fails.
-	wide := v.Megamorphic()
+	// prototypes are no longer the case's. A read whose cases share an own
+	// slot checks that slot on a new shape; otherwise either miss fails.
+	slot := v.SlotFallback()
+	wide := v.Megamorphic() || slot
 	done, scan, mega := c.a.NewLabel(), c.a.NewLabel(), arm64.Label(0)
 	stale := scan
-	if wide && c.enc.Mega && v.Op != ssa.OpPropWrite {
+	if wide && !slot && c.enc.Mega && v.Op != ssa.OpPropWrite {
 		// As amd64's: prototypes no longer the case's, the megamorphic
 		// cache's chain.
 		mega = c.a.NewLabel()
@@ -8566,7 +8568,33 @@ func (c *a64Compiler) holder(v *ssa.Value, guard a64Guard) {
 	if wide {
 		c.cold = append(c.cold, func() {
 			c.a.Bind(scan)
-			c.scan(v, guard, done, mega)
+			if slot {
+				// A new shape may keep the same own slot. Check its key
+				// and data attributes without assuming or learning a shape.
+				p := c.gpr(v.Args[0], a64A)
+				if p != a64A {
+					c.a.MovRR(a64A, p)
+				}
+				c.a.LoadU8(a64B, a64A, c.enc.ObjectClass)
+				c.a.CmpImm(a64B, int64(c.enc.ClassObject), false)
+				object := c.a.NewLabel()
+				c.a.BCond(arm64.EQ, object)
+				c.a.CmpImm(a64B, int64(c.enc.ClassFunction), false)
+				guard.jump(arm64.NE)
+				c.a.Bind(object)
+				c.keyAt(v, guard)
+				c.a.LoadU8(a64B, a64B, int32(v.Index)*c.enc.KeySize+c.enc.PropertyFlags)
+				c.movImm(a64C, uint64(c.enc.PropNotData|c.enc.PropUninit))
+				c.a.Tst(a64B, a64C, false)
+				guard.jump(arm64.NE)
+				c.a.Load(a64A, a64A, c.enc.ObjectProps)
+				if v.Index != 0 {
+					c.a.AddImm(a64A, a64A, int64(int32(v.Index)*c.enc.ValueSize), true)
+				}
+				c.a.B(done)
+			} else {
+				c.scan(v, guard, done, mega)
+			}
 		})
 	}
 	miss := func(to arm64.Label) {

@@ -911,6 +911,24 @@ func (v *Value) Megamorphic() bool { return v.IC != nil && v.IC.Mega }
 // its receiver's own small table (PropertySite's Scan).
 func (v *Value) Scans() bool { return v.IC != nil && v.IC.Scan }
 
+// SlotFallback reports whether a polymorphic read's cases all name the
+// same own slot. A new shape may use that slot too, after checking its key
+// and data attributes. This proves no particular receiver shape.
+func (v *Value) SlotFallback() bool {
+	if v.Op != OpPropRead && v.Op != OpPropCell || v.Upvalue || v.Global || v.Megamorphic() || v.Const.Bits == 0 || v.Index < 0 || len(v.Cases()) == 0 {
+		return false
+	}
+	if h := v.Holders(); h != nil && (h.Holders[0].Object != 0 || len(h.More) != 0) {
+		return false
+	}
+	for _, k := range v.Cases() {
+		if k.Shape == 0 || int(k.Index) != v.Index || k.Holders[0].Object != 0 || len(k.More) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // Primitive is the kind of receiver v, a primitive's property
 // (OpStringProp), reads (InlineCache): a string's but where its cache says.
 func (v *Value) Primitive() Primitive {

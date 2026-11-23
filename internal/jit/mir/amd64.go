@@ -9588,7 +9588,8 @@ func (c *compiler) bigBox(v *ssa.Value) {
 // -- on a prototype, which it checks, or the receiver's own -- into
 // scratchA, the address of its value; and, for a read that met objects of
 // several shapes, as V8's polymorphic inline caches do, for whichever of
-// them the receiver's is (ssa.PropertyCase). Any other shape fails.
+// them the receiver's is (ssa.PropertyCase). A miss takes the read's
+// fallback, where eligible, or fails its guard.
 func (c *compiler) holder(v *ssa.Value, guard guardTo) {
 	var first ssa.HolderChain
 	if v.Holders() != nil {
@@ -9603,13 +9604,14 @@ func (c *compiler) holder(v *ssa.Value, guard guardTo) {
 	// prototype, left its readers at every one. A receiver whose
 	// prototypes are no longer the case's -- a method added to one, or
 	// taken off -- is searched so too, rather than leave: the megamorphic
-	// cache has the chain as it is now (mega). At any other site either
-	// fails, as V8's map checks deoptimize: the interpreter makes the
-	// operation, and its cache learns the shape.
-	wide := v.Megamorphic()
+	// cache has the chain as it is now (mega). A read whose cases share an
+	// own slot checks that slot on a new shape. Otherwise a miss
+	// deoptimizes: the interpreter makes the operation and learns the shape.
+	slot := v.SlotFallback()
+	wide := v.Megamorphic() || slot
 	done, scan, mega := c.a.NewLabel(), c.a.NewLabel(), amd64.Label(0)
 	stale := scan
-	if wide && c.enc.Mega && v.Op != ssa.OpPropWrite {
+	if wide && !slot && c.enc.Mega && v.Op != ssa.OpPropWrite {
 		// Prototypes no longer the case's, the megamorphic cache's chain;
 		// the receiver's own table, the case's shape says, has no key.
 		mega = c.a.NewLabel()
@@ -9622,7 +9624,32 @@ func (c *compiler) holder(v *ssa.Value, guard guardTo) {
 	if wide {
 		c.cold = append(c.cold, func() {
 			c.a.Bind(scan)
-			c.scan(v, guard, done, mega)
+			if slot {
+				// A new shape may keep the same own slot. Check its key
+				// and data attributes without assuming or learning a shape.
+				p := c.gpr(v.Args[0], scratchA)
+				if p != scratchA {
+					c.a.MovRR(scratchA, p)
+				}
+				c.a.LoadU8(scratchB, scratchA, c.enc.ObjectClass)
+				c.a.OpImm(amd64.Cmp, scratchB, int32(c.enc.ClassObject), false)
+				object := c.a.NewLabel()
+				c.a.Jcc(amd64.CondE, object)
+				c.a.OpImm(amd64.Cmp, scratchB, int32(c.enc.ClassFunction), false)
+				guard.jump(amd64.CondNE)
+				c.a.Bind(object)
+				c.keyAt(v, guard)
+				c.a.LoadU8(scratchB, scratchB, int32(v.Index)*c.enc.KeySize+c.enc.PropertyFlags)
+				c.a.OpImm(amd64.And, scratchB, int32(c.enc.PropNotData|c.enc.PropUninit), false)
+				guard.jump(amd64.CondNE)
+				c.a.Load(scratchA, scratchA, c.enc.ObjectProps)
+				if v.Index != 0 {
+					c.a.OpImm(amd64.Add, scratchA, int32(v.Index)*c.enc.ValueSize, true)
+				}
+				c.a.Jmp(done)
+			} else {
+				c.scan(v, guard, done, mega)
+			}
 		})
 	}
 	miss := func(to amd64.Label) {

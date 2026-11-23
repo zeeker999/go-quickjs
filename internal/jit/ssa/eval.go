@@ -412,8 +412,8 @@ type Object struct {
 
 // holder is the object a property read of o finds its property in, and its
 // index there, as Holders say, or -1: o itself, as property finds it, for a
-// site without them, or, at a megamorphic site, a shape none of its cases
-// has; at any other site such a shape fails, as mir's map checks do.
+// site without them, or a new shape whose common own slot still matches;
+// otherwise a megamorphic site's search, or a failure.
 func (h *Heap) holder(o *Object, v *Value) (*Object, int) {
 	if v.Holders() == nil && v.Cases() == nil {
 		return h.property(o, v)
@@ -455,9 +455,13 @@ func (h *Heap) holder(o *Object, v *Value) (*Object, int) {
 		o = recv
 		break
 	}
-	// A shape none of the cases has: at a megamorphic site the receiver's
-	// own table, as for a site without them (mir's scan); at any other, a
-	// failure.
+	// A shape none of the cases has: the cases' common own slot, if its
+	// key and attributes still permit the read; otherwise a megamorphic
+	// site's search, or a failure.
+	if v.SlotFallback() && o.Ordinary && v.Index < len(o.Keys) && v.Index < len(o.Props) && o.Keys[v.Index] == v.Key &&
+		o.Data[v.Index] && (v.Index >= len(o.Uninit) || !o.Uninit[v.Index]) {
+		return o, v.Index
+	}
 	if !wide {
 		return nil, -1
 	}

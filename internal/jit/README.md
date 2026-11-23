@@ -1212,9 +1212,16 @@ interpreter cache has held data properties of different receiver shapes
 keeps its cases and uses the lookup fallback for another shape
 (`PropertySite.Fallback`). The site stays polymorphic; the fallback policy
 is separate from its megamorphic state (`jitPolySite.fallback`, `mega`). It
-does not invalidate its function again merely to add that shape. At other
-sites, a receiver of any other shape, and any receiver at a site whose cache
-knows none, deoptimizes (`ir.GuardExit`), as
+does not invalidate its function again merely to add that shape. A
+polymorphic read whose cases all name the same own slot also keeps its code
+on a new shape when that slot still holds its key and plain initialized
+data (`ssa.Value.SlotFallback`). The known shapes keep their direct loads;
+the miss checks the receiver's class, the table's length, the key and its
+attributes out of line. It searches no other slot or prototype and learns
+no shape. As with any polymorphic read, it establishes no shape fact for a
+later operation (`knownShapes`). Writes and monomorphic reads keep their
+existing guards. At other sites, a receiver of any other shape, and any
+receiver at a site whose cache knows none, deoptimizes (`ir.GuardExit`), as
 V8's map checks do and its code does for insufficient feedback: the
 interpreter makes the operation, the site's cache learning the shape -- the
 deoptimization fills it where the interpreter's read of a small table would
