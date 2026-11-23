@@ -40,6 +40,12 @@ func TestJITPlainCallsOfThisReaders(t *testing.T) {
 		}
 	}
 	r := jitAgreesForTest(t, plainThisSetup, rounds...)
+	// The first catch reads e.message without feedback. It leaves once
+	// for that property, then learns the Error shape; all other exits throw.
+	ops := r.RegNativeStats().HostOps
+	if ops["get_prop"] != 1 || ops["throw"] != 8 || len(ops) != 2 {
+		t.Errorf("host operations: %v; want one property read and eight throws", ops)
+	}
 	for _, name := range callers {
 		e := jitCodeEntryNamedForTest(r, name)
 		if e == nil {
@@ -48,8 +54,12 @@ func TestJITPlainCallsOfThisReaders(t *testing.T) {
 		}
 		// Had Go made its calls, the caller would leave its code at the
 		// first call of each entry, and be judged slow for it; throws
-		// leaves once a round, for its throw.
-		if e.ssaStats.hosts > 8 || e.entrySlow {
+		// leaves once a round, for its throw, and once for its cold read.
+		limit := uint64(8)
+		if name == "throws" {
+			limit++
+		}
+		if e.ssaStats.hosts > limit || e.entrySlow {
 			t.Errorf("%s left its code %d times, judged slow %v", name, e.ssaStats.hosts, e.entrySlow)
 		}
 	}

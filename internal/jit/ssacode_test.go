@@ -2318,10 +2318,9 @@ func isTestReference(v ir.Value) bool { return v.Kind == ir.Opaque || v.Kind == 
 // exit. Anywhere else it deoptimizes (ir.GuardExit), as V8's map checks
 // do, even where its own table has the property: the interpreter makes
 // the read, and the site's cache learns the shape -- but where the cache is
-// empty, which may only say the VM's interpreter, which fills none, ran
-// it (ssa.PropertySite's Scan): its own table is searched, and it
-// deoptimizes only where that has not the property. Each as the SSA
-// evaluator says.
+// empty (ssa.PropertySite's Scan): a root's tagged read searches its own
+// table and the shared cache, and a miss leaves for Go without discarding
+// the code. Each as the SSA evaluator says.
 func TestSSANativeMegamorphic(t *testing.T) {
 	s0, s1 := testShapes[0], testShapes[1]
 	link := func(i int, shape unsafe.Pointer) abi.MegaLink {
@@ -2349,7 +2348,7 @@ func TestSSANativeMegamorphic(t *testing.T) {
 		want  ir.Value // its value, or Undefined's Kind 0 for an exit
 		exits bool
 		// scan marks a site whose cache is empty (ssa.PropertySite's Scan):
-		// compiled for no shape, it searches the receiver's own table.
+		// compiled for no shape, it searches the own table and shared cache.
 		scan bool
 	}{
 		{12, 0, true, ir.Float(7), false, false},
@@ -2361,7 +2360,11 @@ func TestSSANativeMegamorphic(t *testing.T) {
 		{11, 0, true, ir.Float(4), false, false},
 		{11, 0, false, ir.Value{}, true, false},
 		{11, 0, false, ir.Float(4), false, true},
-		{12, 0, false, ir.Value{}, true, true},
+		{12, 0, false, ir.Float(7), false, true},
+		{14, 0, false, ir.Value{Kind: ir.Undefined}, false, true},
+		{14, 1, false, ir.Value{}, true, true},
+		{13, 0, false, ir.Value{}, true, true},
+		{12, -1, false, ir.Value{}, true, true},
 	} {
 		p := &ir.Program{Locals: 4, Code: []ir.Instruction{{Op: ir.ReferenceRead, Dest: 3, Left: ir.Slot(0), Key: tc.key},
 			{Op: ir.Return, Left: ir.Slot(3)}}}
@@ -2392,7 +2395,7 @@ func TestSSANativeMegamorphic(t *testing.T) {
 		if got := exit.Kind != ir.Returned; got != tc.exits || !tc.exits && exit.Value != tc.want {
 			t.Fatalf("%+v: %+v", tc, exit)
 		}
-		if want := map[bool]ir.ExitKind{true: ir.HostExit, false: ir.GuardExit}[tc.mega]; tc.exits && exit.Kind != want {
+		if want := map[bool]ir.ExitKind{true: ir.HostExit, false: ir.GuardExit}[tc.mega || tc.scan]; tc.exits && exit.Kind != want {
 			t.Fatalf("%+v: exit %v, want %v", tc, exit.Kind, want)
 		}
 		c.code.Close()

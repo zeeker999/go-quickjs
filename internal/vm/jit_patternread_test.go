@@ -77,11 +77,10 @@ func TestJITPatternReadPending(t *testing.T) {
 }
 
 // An object pattern's read compiled before it has run is compiled to
-// search its source's own table alone until it misses there: its first
-// miss deoptimizes, once, and the read learns the shape it missed in, as
-// V8's load of an absent property learns its map, Go reading nothing from
-// then on (jitRegDeoptSeen, jitRegFeedback's Property). A read that never
-// misses has no branch for Go -- microbench's local_destruct, compiled
+// search its source's own table and the shared cache: its first miss
+// leaves for Go without discarding its code and learns the absence in
+// the cache, Go reading nothing from then on. A read that never
+// misses has no call branch for Go -- microbench's local_destruct, compiled
 // with one at each of its eight reads, had taken 9% longer. The loop
 // before each pattern is what has its reads compiled before they run: run
 // by the interpreter first, a read's cache holds what it met, a miss
@@ -106,9 +105,9 @@ func TestJITPatternReadsLearnTheirMisses(t *testing.T) {
 		}
 	}
 	for _, c := range []struct {
-		name   string
-		deopts uint16
-	}{{"hits", 0}, {"misses", 1}} {
+		name string
+		mega bool
+	}{{"hits", false}, {"misses", true}} {
 		e := jitCodeNamedForTest(t, r, c.name).e
 		mega, missed := false, 0
 		// The register form's sites are by register pc: the pattern's
@@ -117,8 +116,8 @@ func TestJITPatternReadsLearnTheirMisses(t *testing.T) {
 			mega = mega || e.poly[i].mega
 			missed += len(e.poly[i].missed)
 		}
-		if mega || e.deopts != c.deopts || missed != int(c.deopts) {
-			t.Errorf("%s: a pattern read megamorphic %v, %d shapes missed in, %d deoptimizations; want false, %d, %d (run inlines %v; sites %+v)", c.name, mega, missed, e.deopts, c.deopts, c.deopts, jitInlinedNamesForTest(r, "run"), e.poly)
+		if mega != c.mega || e.deopts != 0 || missed != 0 {
+			t.Errorf("%s: a pattern read megamorphic %v, %d shapes missed in, %d deoptimizations; want %v, 0, 0 (run inlines %v; sites %+v)", c.name, mega, missed, e.deopts, c.mega, jitInlinedNamesForTest(r, "run"), e.poly)
 		}
 	}
 }

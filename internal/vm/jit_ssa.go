@@ -474,6 +474,12 @@ func (r *Runtime) jitPolySeenOp(e *jitEntry, pc int, op jitPropOp) {
 	if c.idx < int32(holder.valn) && !holder.vals()[c.idx].IsNumber() {
 		jitNumberMissed(e, pc)
 	}
+	if recv.Object().class != ClassObject && recv.Object().class != ClassFunction && jitAddReadCase(jitPolySiteAt(e, pc), c, c.shape) {
+		// An empty site's lookup searches ordinary objects' and functions'
+		// tables. Other classes need their shape recorded for the next build:
+		// a cold Error.message read otherwise leaves at every invocation.
+		e.polyReopt = true
+	}
 	// A shape it was not compiled for: at a megamorphic site, the
 	// megamorphic cache, filled above, has it natively from now on.
 }

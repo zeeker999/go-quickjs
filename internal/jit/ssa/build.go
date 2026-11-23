@@ -8642,6 +8642,14 @@ func (b *builder) instruction(blk *Block, pc int) {
 			break
 		}
 		site := *cached
+		coldRead := b.cur == b.root && in.Op == ir.ReferenceRead && !in.Private && site.Scan &&
+			site.Shape == 0 && len(site.Cases) == 0 && site.Holders[0].Object == 0 && !site.hasFallback()
+		if coldRead {
+			// A cold tagged read keeps its code after a lookup miss. It
+			// resumes at existing entries, without a call branch for every
+			// cold site. Inlined reads keep their callee's learned policy.
+			site.Fallback = true
+		}
 		if !in.Private && unfedSite(&site) {
 			// A site that knows no shape deoptimizes, as V8's code does for
 			// insufficient feedback: the interpreter makes the operation,
@@ -8704,7 +8712,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 			b.assign(in.Dest, blk, k)
 			break
 		}
-		if (in.Op == ir.ReferenceRead || in.Op == ir.PropertyRead) && site.hasFallback() && !in.Private && b.goCalls() && f.Keeps < f.keepLimit() &&
+		if (in.Op == ir.ReferenceRead || in.Op == ir.PropertyRead) && site.hasFallback() && !coldRead && !in.Private && b.goCalls() && f.Keeps < f.keepLimit() &&
 			!b.originGoesOn(pc) {
 			// A read with lookup fallback: what neither the receiver's own
 			// table nor the megamorphic cache has -- a shape the site never

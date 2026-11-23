@@ -66,7 +66,9 @@ func testJITRegSortNative(t *testing.T) {
 		"sortString(i32, c_i32)", "sortNaNGlobal(i32, c_i32)", "sortCaptured(i32, c_i32)", "sortProp(i32, c_i32)",
 		"sortCall(i32, c_i32)", "sortLogs(i32, c_i32)", "sortBig()", "sortThrows(i32, c_i32)", "sortThrowsArr(nums)",
 	}
-	rts := regNativeRuntimes(t, sortSetup+drivers())
+	// Measure sorting without show's callbacks and property reads. The
+	// exact formatted answers are checked separately after the exit counts.
+	rts := regNativeRuntimes(t, sortSetup+strings.ReplaceAll(drivers(), "return show(r)", "return r"))
 	r := rts[0]
 	// Counted as the code asks, not as stress configures it, each
 	// function compiled at its first calls.

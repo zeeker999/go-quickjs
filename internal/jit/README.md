@@ -1240,8 +1240,17 @@ interpreter makes the operation, the site's cache learning the shape -- the
 deoptimization fills it where the interpreter's read of a small table would
 not -- and the code is compiled again for it. A read whose cache is empty,
 though the interpreter, which fills none there, may have run it, searches
-its receiver's own small table, and deoptimizes only where that has not the
-property (`PropertySite.Scan`). What a cache cannot hold -- a primitive
+its receiver's own small table (`PropertySite.Scan`). If the read carries
+any value and belongs to the root function, a miss looks in the shared
+megamorphic cache and leaves for Go with the code still valid (`ir.HostExit`).
+The site has not become megamorphic. There is no extra call branch or
+resumption entry: the interpreter runs to an existing entry or finishes
+the invocation, and later reads can use what the miss cached. A receiver
+whose class the lookup excludes, such as an Error, requests recompilation
+for the shape the interpreter learns. Numeric and inlined reads keep
+their guard exits on a miss.
+
+What a cache cannot hold -- a primitive
 receiver, an object with no shape, an object's own accessor, more shapes
 than the cases hold -- makes the site megamorphic, once. Inside an inlined
 callee, whose exits all leave their operation to Go, such an exit has the
