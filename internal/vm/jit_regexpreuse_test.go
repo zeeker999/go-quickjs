@@ -9,6 +9,68 @@ import (
 	"testing"
 )
 
+// A fresh invocation has no live locals from the previous invocation.
+// Its native exec site can keep the array owned by the same stack window.
+func TestJITRegExpReuseFreshCalls(t *testing.T) {
+	for _, marking := range []bool{false, true} {
+		name := "idle"
+		if marking {
+			name = "marking"
+		}
+		t.Run(name, func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			r := jitRuntimeForTest(t, Config{JIT: true})
+			if _, err := r.Run(compileForTest(t, `
+				function Exec(re, s) { var m = re.exec(s); return m ? m.length + m[1].length : 0 }
+				var re = /(a)(b)(c)/;
+			`)); err != nil {
+				t.Fatal(err)
+			}
+			fn := r.global.getOwn(r.atoms.intern("Exec")).value()
+			re := r.global.getOwn(r.atoms.intern("re")).value()
+			args := []Value{re, Str(NewString("abc"))}
+			call := func() {
+				v, err := r.Call(fn, Undefined, args)
+				if err != nil || !v.IsNumber() || v.Number() != 5 {
+					t.Fatalf("Exec: %v, %v; want 5", v, err)
+				}
+			}
+			for range 64 {
+				call()
+			}
+			jitNativeForTest(t, r, "Exec")
+			if !jitReuseNativeForTest(r, 4) {
+				t.Fatal("no native reusable array")
+			}
+			tb := execReuseLeaf[struct{}](r).reuseTable
+			var saved *execReuseEntry
+			for i := range tb.e {
+				if e := &tb.e[i]; e.site != nil && e.n == 4 {
+					own := false
+					for _, site := range fn.Object().fn().closure.reg.reuse {
+						own = own || e.site == site
+					}
+					if !own {
+						saved = e
+					}
+				}
+			}
+			if saved == nil {
+				t.Fatal("native site's entry not found")
+			}
+			site, arr := saved.site, saved.arr
+			for range 8 {
+				call()
+				if saved.site != site || saved.arr != arr {
+					t.Fatal("fresh call discarded its reusable array")
+				}
+			}
+		})
+	}
+}
+
 // Where a runtime runs the JIT, exec's leaf is told of the arrays it may
 // make again by native code's calls too (jit_regexpreuse.go), each array
 // made again only by the frame that made the last. The calls are made
