@@ -2192,6 +2192,12 @@ only for a successful answer; a rejected inline keeps just its asked bit.
 `TestJITRejectedInlineAllocations` checks that rejected probes allocate no
 site once the answer table has room.
 
+The builder caches ordinary and primitive property feedback by instruction
+in each frame (`siteAnswer`). Planning and translation share pointers to
+these read-only answers, so checking a site's availability copies no
+property record. Translation takes a private copy before adjusting a
+write's shape or selecting its leading case.
+
 On arm64, the workspace also keeps the byte buffer the assembler's
 instruction words are encoded into (`FinishInto`). A workspace compile's
 bytes hold until its next compile;

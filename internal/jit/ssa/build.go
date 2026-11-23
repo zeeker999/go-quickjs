@@ -1913,11 +1913,11 @@ func (b *builder) keyedRead(pc int) bool {
 
 // stringProperty is the feedback for a method read at pc whose receivers
 // have been strings, or another primitive (PropertySite's Primitive), if
-// any.
-func (b *builder) stringProperty(pc int) (PropertySite, bool) {
+// any. The answer is cached and shared read-only, as property's is.
+func (b *builder) stringProperty(pc int) (*PropertySite, bool) {
 	f, ok := b.fb.(StringFeedback)
 	if !ok || b.p.Code[pc].Op != ir.ReferenceRead {
-		return PropertySite{}, false
+		return nil, false
 	}
 	a := b.answer(pc)
 	if a.asked&askedString == 0 {
@@ -1925,7 +1925,7 @@ func (b *builder) stringProperty(pc int) (PropertySite, bool) {
 		a = b.answer(pc)
 		a.str, a.strOK, a.asked = s, ok && s.Shape != 0, a.asked|askedString
 	}
-	return a.str, a.strOK
+	return &a.str, a.strOK
 }
 
 // LiteralFeedback is Feedback that knows object literals' sites (Literal)
@@ -3224,7 +3224,7 @@ func (b *builder) unfed(pc int) bool {
 }
 
 // unfedSite reports whether site knows nothing to make its operation with.
-func unfedSite(site PropertySite) bool {
+func unfedSite(site *PropertySite) bool {
 	return site.Shape == 0 && len(site.Cases) == 0 && site.Add == nil && len(site.Adds) == 0 && site.Holders[0].Object == 0 && !site.hasFallback() && !site.Scan
 }
 
@@ -3606,10 +3606,11 @@ type givenState struct {
 	state *FrameState
 }
 
-// property is the feedback for a property operation at pc, if any.
-func (b *builder) property(pc int) (PropertySite, bool) {
+// property is the cached feedback for a property operation at pc, if any.
+// Callers share it read-only; translation copies what it changes.
+func (b *builder) property(pc int) (*PropertySite, bool) {
 	if op := b.p.Code[pc].Op; b.fb == nil || op != ir.PropertyRead && op != ir.PropertyWrite && op != ir.ReferenceRead {
-		return PropertySite{}, false
+		return nil, false
 	}
 	a := b.answer(pc)
 	if a.asked&askedSite == 0 {
@@ -3617,7 +3618,7 @@ func (b *builder) property(pc int) (PropertySite, bool) {
 		a = b.answer(pc)
 		a.site, a.ok, a.asked = site, ok, a.asked|askedSite
 	}
-	return a.site, a.ok
+	return &a.site, a.ok
 }
 
 // host reports whether the instruction at pc is left to Go whole: it ends
@@ -8627,7 +8628,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 			b.assign(in.Dest, blk, v)
 			break
 		}
-		site, ok := b.property(pc)
+		cached, ok := b.property(pc)
 		if !ok {
 			if in.Private && b.whole(blk, pc, in, guard) {
 				// Register code's private member Go reads or writes from
@@ -8640,7 +8641,8 @@ func (b *builder) instruction(blk *Block, pc int) {
 			blk.State.addUse()
 			break
 		}
-		if !in.Private && unfedSite(site) {
+		site := *cached
+		if !in.Private && unfedSite(&site) {
 			// A site that knows no shape deoptimizes, as V8's code does for
 			// insufficient feedback: the interpreter makes the operation,
 			// its cache learning the shape (unfed).
