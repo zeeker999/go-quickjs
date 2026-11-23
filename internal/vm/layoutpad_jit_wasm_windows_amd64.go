@@ -53,13 +53,13 @@ const (
 	layoutPadNJU  = 585
 	layoutPadNGJU = -1
 	layoutPadNMJU = -1
-	layoutPadNJ   = 669
+	layoutPadNJ   = 701
 	layoutPadNGJ  = -1
 	layoutPadNMJ  = -1
 	layoutPadNJN  = 376
 	layoutPadNGJN = -1
 	layoutPadNMJN = -1
-	layoutPadNJS  = 576
+	layoutPadNJS  = 596
 	layoutPadNGJS = -1
 	layoutPadNMJS = -1
 	layoutPadNN   = 593
