@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
+	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
 
@@ -971,8 +972,8 @@ func TestJITMegamorphicGetterNotInlined(t *testing.T) {
 					run(`drive(96)`)
 				}
 				look := jitGlobalClosureForTest(r, "look")
-				if !jitSiteMegamorphicForTest(t, r, look, r.jit.regLearnedOf(r.jitRegKeyOf(look)), bytecode.OpGetProp, bytecode.RGetProp) {
-					t.Fatal("look's read is not megamorphic: no test of its rule")
+				if site := regLearnSite(t, r, "look", ir.ReferenceRead); !site.Megamorphic && !site.Fallback {
+					t.Fatal("look's read has no lookup fallback: no test of its rule")
 				}
 				jitNativeForTest(t, r, "drive")
 				if slices.Contains(inlined, uintptr(unsafe.Pointer(look))) {
@@ -1018,8 +1019,8 @@ func TestJITMegamorphicAccessorReadsByGo(t *testing.T) {
 					run(`drive(96)`)
 				}
 				look := jitGlobalClosureForTest(r, "look")
-				if !jitSiteMegamorphicForTest(t, r, look, r.jit.regLearnedOf(r.jitRegKeyOf(look)), bytecode.OpGetProp, bytecode.RGetProp) {
-					t.Fatal("look's read is not megamorphic: no test of its misses")
+				if site := regLearnSite(t, r, "look", ir.ReferenceRead); !site.Megamorphic && !site.Fallback {
+					t.Fatal("look's read has no lookup fallback: no test of its misses")
 				}
 				if slices.Contains(inlined, uintptr(unsafe.Pointer(look))) {
 					t.Fatal("drive inlines look, whose megamorphic read meets a getter")

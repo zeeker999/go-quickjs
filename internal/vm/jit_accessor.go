@@ -216,11 +216,11 @@ func (fb *jitFeedback) accessorOf(pc int, c *propCache, key Atom, write bool) (s
 	return a, callee, cl, true
 }
 
-// megamorphicOf is megamorphic's, of either form's code: the site at pc,
-// its cache c (nil for none), a write's or a read's.
-func (fb *jitFeedback) megamorphicOf(pc int, c *propCache, write bool, site ssa.PropertySite) bool {
+// propertyFallbackOf reports whether the site is megamorphic, or a
+// polymorphic read whose misses use the lookup fallback.
+func (fb *jitFeedback) propertyFallbackOf(pc int, c *propCache, write bool, site ssa.PropertySite) (megamorphic, fallback bool) {
 	if len(site.Cases)+len(site.Adds) >= jitPropertyCases {
-		return true
+		return true, false
 	}
 	if c != nil && c.fills >= maxCacheFills {
 		// An inlined callee's write whose cache gave up for additions
@@ -233,7 +233,7 @@ func (fb *jitFeedback) megamorphicOf(pc int, c *propCache, write bool, site ssa.
 		// is constructed itself too, new ASTSpan(), inlined: its own
 		// objects, of none of the subclasses' shapes, had left native code
 		// at each.
-		return true
+		return true, false
 	}
 	if c != nil {
 		if write && (c.shape == nil || c.shape == noShape) && c.fills != 0 && len(site.Cases)+len(site.Adds) == 0 {
@@ -247,7 +247,7 @@ func (fb *jitFeedback) megamorphicOf(pc int, c *propCache, write bool, site ssa.
 			// but megamorphic: Go makes what the receiver's table and the
 			// megamorphic cache do not, from native code, as main's code
 			// did for the fresh prototypes' layouts such writes then met.
-			return true
+			return true, false
 		}
 		if c.shape == dictShape || c.cell != nil {
 			// A cache of dictionary objects (dictShape), or of a chain's
@@ -255,7 +255,7 @@ func (fb *jitFeedback) megamorphicOf(pc int, c *propCache, write bool, site ssa.
 			// nothing has: native code reads the receiver's own table and
 			// the megamorphic cache, whose entries name a chain's holder,
 			// or that the chain has none (abi.MegaChain, MegaAbsent).
-			return true
+			return true, false
 		}
 	}
 	e := fb.e
@@ -264,16 +264,16 @@ func (fb *jitFeedback) megamorphicOf(pc int, c *propCache, write bool, site ssa.
 		// nothing its own code learned. A register callee's holds what
 		// its code learned (regLearned), which a deoptimization of the
 		// code inlining it learns in too.
-		return false
+		return false, false
 	}
 	if e != nil {
 		for i := range e.poly {
-			if p := &e.poly[i]; int(p.pc) == pc && p.mega {
-				return true
+			if p := &e.poly[i]; int(p.pc) == pc {
+				return p.mega, !write && p.fallback
 			}
 		}
 	}
-	return false
+	return false, false
 }
 
 // dataSeen reports whether the property site at pc, its cache c, has met

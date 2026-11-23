@@ -346,7 +346,7 @@ func (r *Runtime) jitRegLeftAtSite(x *jitRegInlineLevel) bool {
 }
 
 // jitRegShapeMiss reports whether the innermost inlined level x left at a
-// host exit at a property's read or write whose site is not megamorphic: a
+// host exit at a property's read or write whose site has no lookup fallback: a
 // shape its cases lack, a site that knew none, a receiver whose read
 // throws. It is a map check's failure, as a guard at a site of the code's
 // own is (jitRegDeoptSeen), learned as one, the code that inlined the
@@ -373,7 +373,7 @@ func (r *Runtime) jitRegShapeMiss(x *jitRegInlineLevel) bool {
 	}
 	l := r.jit.regLearnedOf(r.jitRegKeyOf(x.cl))
 	for i := range l.poly {
-		if p := &l.poly[i]; int(p.pc) == x.pc && p.mega {
+		if p := &l.poly[i]; int(p.pc) == x.pc && (p.mega || p.fallback) {
 			return false
 		}
 	}

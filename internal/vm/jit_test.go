@@ -4892,7 +4892,8 @@ func TestJITSSACallsSettleLate(t *testing.T) {
 // prototypes, is compiled for each, up to jitPropertyCases, as V8's
 // polymorphic inline caches are (jitPolySeenOp, ssa.PropertyCase): a loop
 // over four kinds of object then never leaves native code for its reads, a
-// method's or a field's. A fifth leaves for Go; a prototype's property
+// method's or a field's, using its cases and the megamorphic cache. A fifth
+// leaves for Go; a prototype's property
 // changed is read again, and one a nearer prototype comes to have fails that
 // one's shape check. Each answer is the interpreter's.
 func TestJITSSAPolymorphicReads(t *testing.T) {
@@ -4944,7 +4945,7 @@ func TestJITSSAPolymorphicReads(t *testing.T) {
 			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
 		}
 		if i == 3 {
-			if e := entry("reads"); len(e.poly) != 1 || len(e.poly[0].cases) < 3 || e.ssaStats.hosts != hosts {
+			if e := entry("reads"); len(e.poly) != 1 || len(e.poly[0].cases) == 0 || !e.poly[0].mega && !e.poly[0].fallback && len(e.poly[0].cases) < 3 || e.ssaStats.hosts != hosts {
 				t.Fatalf("reads left native code %d times for four shapes; %+v", e.ssaStats.hosts-hosts, e.poly)
 			}
 		}

@@ -180,10 +180,10 @@ function run(n) { var s = 0; for (var i = 0; i < n; i++) s = (s + heavy(i) + lig
 // read met two classes' objects when its caller was compiled, then runs
 // the caller over a third's, and checks that the caller does not leave
 // native code at every call, nor do its native callers stop calling it;
-// and that a host exit at the read, its site not megamorphic, is a shape
-// miss (jitRegShapeMiss), which has the caller compiled again for the new
-// shape. AWFY's Dictionary.at, compiled while DeltaBlue's keys
-// were hashed, left so at each of Havlak's two million calls.
+// and that a host exit at the polymorphic read is handled without
+// invalidating its caller (jitRegShapeMiss). AWFY's Dictionary.at,
+// compiled while DeltaBlue's keys were hashed, left so at each of Havlak's
+// two million calls.
 func TestJITRegInlinedShapeMissCompiledAgain(t *testing.T) {
 	t.Parallel()
 	const src = `
@@ -209,8 +209,8 @@ function runB(n) { return run(new B(2), n) }
 		r.SetJITWarmUp(1, 1)
 		r.SetJITReport(true)
 		// A1's objects, then A2's, whose read deoptimizes the code at it,
-		// which is compiled again with the read's two cases and leaves
-		// for Go at a third.
+		// which is compiled again with the read's two cases and a fallback
+		// for a third.
 		regProfitRun(t, rts, "runA1", 6, "4000", Float(2000))
 		regProfitRun(t, rts, "runA2", 6, "4000", Float(2000))
 		left := func() uint64 {
@@ -248,6 +248,12 @@ function runB(n) { return run(new B(2), n) }
 			t.Fatalf("hash has no get_method_w")
 		}
 		x := jitRegInlineLevel{cl: hcl, pc: read, kind: abi.ExitHost}
+		p := jitPolySiteAt(r.jit.regLearnedOf(r.jitRegKeyOf(hcl)), read)
+		if !p.fallback || r.jitRegShapeMiss(&x) {
+			t.Fatal("the polymorphic reader's fallback is a shape miss")
+		}
+		// A site without lookup fallback must still invalidate its caller.
+		p.fallback = false
 		if !r.jitRegShapeMiss(&x) {
 			t.Errorf("a host exit at hash's read, its site not megamorphic, is no shape miss")
 		}
@@ -262,6 +268,7 @@ function runB(n) { return run(new B(2), n) }
 			t.Errorf("a host exit at hash's read, its site megamorphic, is a shape miss")
 		}
 		site.fills = fills
+		p.fallback = true
 	})
 }
 

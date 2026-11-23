@@ -68,7 +68,7 @@ func jitRegLoopsForTest(c *regCode) []int {
 // jitSiteMegamorphicForTest reports whether the property site of cl's
 // function's first instruction of op -- its register code's first of
 // regOps, where the runtime runs register code -- is megamorphic, e being
-// what its code learned (jitRegSiteMegamorphic): its cache gave up, or its
+// what its code learned: its cache gave up, or its
 // code learned it megamorphic at its exits (jitPolySite's mega), by the
 // instruction's pc in its form.
 func jitSiteMegamorphicForTest(t *testing.T, r *Runtime, cl *closure, e *jitEntry, op bytecode.Op, regOps ...bytecode.ROp) bool {

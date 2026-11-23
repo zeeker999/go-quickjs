@@ -505,16 +505,17 @@ func TestJITRegPolymorphicLearned(t *testing.T) {
 	if st := r.RegNativeStats(); st.Entries == 0 {
 		t.Fatalf("no native code entered")
 	}
-	// What the stack form's code learned of both sites, before it was
-	// removed: the second shape's case beside the first, each a slot of
-	// the object's own, and not megamorphic.
+	// Both sites keep the second shape beside the first, each a slot of
+	// the object's own. The read also looks up shapes it has not met;
+	// the write still deoptimizes for them.
 	for _, c := range []struct {
 		name string
 		op   ir.Op
 	}{{"get", ir.PropertyRead}, {"put", ir.PropertyWrite}} {
 		reg := regLearnSite(t, r, c.name, c.op)
-		if reg.Shape == 0 || reg.Index != 1 || len(reg.Cases) != 1 || reg.Cases[0].Shape == 0 || reg.Cases[0].Index != 0 || reg.Megamorphic {
-			t.Errorf("%s: register %+v, want a shape at index 1, one more case at index 0, not megamorphic", c.name, reg)
+		fallback := c.op == ir.PropertyRead
+		if reg.Shape == 0 || reg.Index != 1 || len(reg.Cases) != 1 || reg.Cases[0].Shape == 0 || reg.Cases[0].Index != 0 || reg.Megamorphic || reg.Fallback != fallback {
+			t.Errorf("%s: register %+v, want a shape at index 1, one more case at index 0, fallback %v", c.name, reg, fallback)
 		}
 	}
 }

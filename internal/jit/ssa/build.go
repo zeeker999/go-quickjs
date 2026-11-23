@@ -3175,11 +3175,14 @@ type PropertySite struct {
 	// shape has its own table searched and is looked for in the
 	// megamorphic cache (abi.MegaCache), and leaves for Go only if neither
 	// has the property, as V8's megamorphic loads and stores look further
-	// rather than deoptimize. At any other site such a receiver, and any
-	// receiver at a site that knows no shape, deoptimizes (ir.GuardExit),
+	// rather than deoptimize. At a site without lookup fallback such a
+	// receiver, and any receiver at a site that knows no shape, deoptimizes (ir.GuardExit),
 	// as V8's map checks do: the interpreter makes the operation, its cache
 	// learning the shape, and the code is compiled again for it.
 	Megamorphic bool
+	// Fallback keeps a polymorphic read's known cases, but uses the same
+	// lookup path as a megamorphic read on a miss, rather than deoptimizing.
+	Fallback bool
 	// Primitives, for a megamorphic site's read or write, says it has met
 	// receivers that are primitives -- strings, numbers, booleans -- whose
 	// reads and writes Go makes on the operation's branch of its own
@@ -3196,6 +3199,8 @@ type PropertySite struct {
 	// another's, whose method the prototype at Holders[0] has.
 	Primitive Primitive
 }
+
+func (s *PropertySite) hasFallback() bool { return s.Megamorphic || s.Fallback }
 
 // unfed reports whether the property operation at pc has a site that
 // knows nothing to make it natively with -- no shape, no case, no
@@ -3220,7 +3225,7 @@ func (b *builder) unfed(pc int) bool {
 
 // unfedSite reports whether site knows nothing to make its operation with.
 func unfedSite(site PropertySite) bool {
-	return site.Shape == 0 && len(site.Cases) == 0 && site.Add == nil && len(site.Adds) == 0 && site.Holders[0].Object == 0 && !site.Megamorphic && !site.Scan
+	return site.Shape == 0 && len(site.Cases) == 0 && site.Add == nil && len(site.Adds) == 0 && site.Holders[0].Object == 0 && !site.hasFallback() && !site.Scan
 }
 
 // PropertyAdd is a write that adds its property, as the VM's cache has it
@@ -8645,12 +8650,12 @@ func (b *builder) instruction(blk *Block, pc int) {
 			break
 		}
 		// A receiver none of the site's cases has deoptimizes, as V8's map
-		// checks do, but at a megamorphic site, which leaves for Go only
-		// what neither its receiver's own table nor the megamorphic cache
-		// has (PropertySite's Megamorphic); and a private member's, whose
-		// shapes Go learns at its exits (the VM's jitRegPrivateSeen).
+		// checks do, but at a site with lookup fallback, which leaves for
+		// Go only what neither its receiver's own table nor the megamorphic
+		// cache has (PropertySite's Megamorphic or Fallback); and a private
+		// member's, whose shapes Go learns at its exits (jitRegPrivateSeen).
 		kind := ir.GuardExit
-		if site.Megamorphic || in.Private {
+		if site.hasFallback() || in.Private {
 			kind = ir.HostExit
 		}
 		if in.Private {
@@ -8697,9 +8702,9 @@ func (b *builder) instruction(blk *Block, pc int) {
 			b.assign(in.Dest, blk, k)
 			break
 		}
-		if (in.Op == ir.ReferenceRead || in.Op == ir.PropertyRead) && site.Megamorphic && !in.Private && b.goCalls() && f.Keeps < f.keepLimit() &&
+		if (in.Op == ir.ReferenceRead || in.Op == ir.PropertyRead) && site.hasFallback() && !in.Private && b.goCalls() && f.Keeps < f.keepLimit() &&
 			!b.originGoesOn(pc) {
-			// A megamorphic site's read: what neither the receiver's own
+			// A read with lookup fallback: what neither the receiver's own
 			// table nor the megamorphic cache has -- a shape the site never
 			// met, a property found where the code does not look -- Go
 			// reads, on a branch of its own (split): the property's cell
@@ -8752,7 +8757,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 			}
 			break
 		}
-		if in.Op == ir.ReferenceRead || in.Op == ir.PropertyRead && (b.fb != nil && b.fb.Generic(pc) || site.Scan && site.Megamorphic && site.Shape == 0) {
+		if in.Op == ir.ReferenceRead || in.Op == ir.PropertyRead && (b.fb != nil && b.fb.Generic(pc) || site.Scan && site.hasFallback() && site.Shape == 0) {
 			// A reference's read; or a number's that met a value that was
 			// not one, read as a value now, whose uses that want a number
 			// unbox it (Feedback's Generic); or one of no shape that looks
@@ -8761,7 +8766,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 			cell := guard(OpPropCell, Source, kind, object)
 			cell.Const, cell.Index, cell.Key = ir.Value{Bits: uint64(site.Shape)}, int(site.Index), site.Key
 			f.setProperty(cell, holders, cases, nil, nil)
-			if site.Megamorphic {
+			if site.hasFallback() {
 				f.cache(cell).Mega = true
 			}
 			if site.Scan && site.Shape == 0 && cases == nil && holders == nil {
@@ -8776,7 +8781,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 			v := guard(OpPropRead, Float64, kind, object)
 			v.Const, v.Index, v.Key = ir.Value{Bits: uint64(site.Shape)}, int(site.Index), site.Key
 			f.setProperty(v, holders, cases, nil, nil)
-			if site.Megamorphic {
+			if site.hasFallback() {
 				f.cache(v).Mega = true
 			}
 			if site.Scan && site.Shape == 0 && cases == nil && holders == nil {
@@ -8791,7 +8796,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 		// transition; or, to an object that has it, stores: of any of the
 		// shapes the site met.
 		f.setProperty(v, nil, cases, site.Add, site.Adds)
-		if site.Megamorphic {
+		if site.hasFallback() {
 			f.cache(v).Mega = true
 			if in.Op == ir.PropertyWrite && !in.Private && (site.Add == nil || !site.Add.Define) && b.goCalls() && f.Keeps < f.keepLimit() {
 				// What neither the receiver's own table nor the megamorphic

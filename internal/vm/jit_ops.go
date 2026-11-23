@@ -602,7 +602,7 @@ func (f *jitRegFeedback) regWholeSite(pc int, w bytecode.RInstr) []ssa.CallSite 
 // jitRegReadSeen learns, after Go made a property's read native code did
 // not find -- a megamorphic site's miss, an accessor's read Go makes -- at
 // register pc rpc of run's code, of receiver recv, what the read met: at a
-// site that is megamorphic (jitRegSiteMegamorphic), as at an exit
+// site using the lookup fallback (jitRegSiteFallback), as at an exit
 // (jitPolySeenOp): the megamorphic cache filled for the receiver's shape, a
 // case its cache cannot hold (a typed array's method, found past the two
 // prototypes its cache holds, or on objects no cache holds), which the code
@@ -620,7 +620,7 @@ func (r *Runtime) jitRegReadSeen(f *frame, c *regCode, run jitRegRun, rpc int, r
 	}
 	op.recv = recv
 	l := r.jitRegLearnedFor(f, run.e)
-	if !r.jitRegSiteMegamorphic(f.cl, c, l, rpc) {
+	if !r.jitRegSiteFallback(f.cl, c, l, rpc) {
 		if op.plain() && recv.IsObject() {
 			// Its prototype's too, for a key the receiver lacks: register
 			// code's pattern reads are plain reads, each absent key -- an
@@ -637,15 +637,15 @@ func (r *Runtime) jitRegReadSeen(f *frame, c *regCode, run jitRegRun, rpc int, r
 	}
 }
 
-// jitRegSiteMegamorphic reports whether the property site of the register
-// instruction at rpc of c, cl's code, l what it learned, is megamorphic:
-// its cache gave up, or the code met more than its cases hold.
-func (r *Runtime) jitRegSiteMegamorphic(cl *closure, c *regCode, l *jitEntry, rpc int) bool {
+// jitRegSiteFallback reports whether the property site at rpc uses the
+// lookup fallback: it is megamorphic, or a polymorphic read that
+// deoptimized. c is cl's register code, l what it learned.
+func (r *Runtime) jitRegSiteFallback(cl *closure, c *regCode, l *jitEntry, rpc int) bool {
 	if site := int(c.rc.Code[rpc].C()); site < len(cl.ic) && cl.ic[site].fills >= maxCacheFills {
 		return true
 	}
 	for i := range l.poly {
-		if p := &l.poly[i]; int(p.pc) == rpc && p.mega {
+		if p := &l.poly[i]; int(p.pc) == rpc && (p.mega || p.fallback) {
 			return true
 		}
 	}

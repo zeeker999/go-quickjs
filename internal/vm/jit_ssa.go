@@ -250,6 +250,9 @@ type jitPolySite struct {
 	// the code that did (jitEntry's ssaSerial).
 	mega   bool
 	missed []jitMissed
+	// fallback lets a polymorphic read use the lookup path on a miss
+	// after the read deoptimized, without making the site megamorphic.
+	fallback bool
 	// prim marks a read or a write that met a receiver that is a
 	// primitive, but not undefined or null, whose read or write throws:
 	// Go reads or writes such a receiver's property on the operation's
@@ -353,8 +356,8 @@ func (r *Runtime) jitPolyWriteSeenOp(e *jitEntry, pc int, cache *propCache, key 
 	e.polyReopt = true
 }
 
-// jitPropertyCases is how many shapes a read is compiled for, as V8's
-// polymorphic inline caches keep: one more leaves for Go.
+// jitPropertyCases is how many known shapes a property operation checks
+// before its fallback.
 const jitPropertyCases = 4
 
 // jitPropOp is a named property's operation as what the JIT learns at its
@@ -1110,7 +1113,11 @@ func (r *Runtime) jitSeenSite(e *jitEntry, pc int, cache *propCache, write bool,
 	if !write {
 		// The reads a cache could not hold, past its two prototypes.
 		for _, d := range seen.reads {
-			jitAddDeepRead(jitPolySiteAt(e, pc), d)
+			p := jitPolySiteAt(e, pc)
+			jitAddDeepRead(p, d)
+			if len(p.missed) != 0 && len(p.cases)+len(p.reads) > 1 {
+				p.fallback = true
+			}
 		}
 		return
 	}
@@ -1151,6 +1158,12 @@ func jitSeenCase(e *jitEntry, pc int, c propCache, write bool, now *shape) {
 		// What the site's objects were before they took the shape its
 		// cache remembers now (now) is a case while there is room.
 		jitAddReadCase(p, c, now)
+		if len(p.missed) != 0 && now != nil && now != noShape && c.shape != now {
+			// A read already shared by several layouts keeps its cases,
+			// but after a deoptimization looks up new layouts without
+			// invalidating the function again.
+			p.fallback = true
+		}
 		return
 	}
 	if len(p.cases)+len(p.adds) >= jitPropertyCases || slices.ContainsFunc(p.cases, func(k propCache) bool { return k.shape == c.shape }) {

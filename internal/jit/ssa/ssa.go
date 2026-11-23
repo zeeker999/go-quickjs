@@ -875,8 +875,8 @@ type InlineCache struct {
 	// consumes, whose words the call's state leaves out (Consumes).
 	Calls    []*CallSite
 	Consumed uint64
-	// Mega, for a read, is its site's Megamorphic (PropertySite); Scan its
-	// Scan. Try, for a megamorphic read's cell (OpPropCell), makes it none
+	// Mega, for a read, is its site's Megamorphic or Fallback (PropertySite);
+	// Scan its Scan. Try, for a read's cell (OpPropCell), makes it none
 	// where it finds no property -- the receiver's own table and the
 	// megamorphic cache have none -- for a call of Go on a branch of its
 	// own to read (OpCellNone), where that had left native code.

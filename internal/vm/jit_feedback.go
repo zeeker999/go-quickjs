@@ -238,7 +238,7 @@ func (f *jitRegFeedback) Property(pc int) (ssa.PropertySite, bool) {
 	} else if site.Shape != 0 && !deep {
 		site.Cases = fb.cases(rpc, site.Shape)
 	}
-	site.Megamorphic = fb.megamorphicOf(rpc, cache, write, site)
+	site.Megamorphic, site.Fallback = fb.propertyFallbackOf(rpc, cache, write, site)
 	site.Primitives = jitPolyPrim(fb.e, rpc)
 	if write && cache.jitPrimWriteSeen() && !fb.r.jitStress.primLeave {
 		// A write the interpreter has seen make of a primitive's property
@@ -1877,8 +1877,7 @@ func (f *jitRegFeedback) TypedKind(pc int) (ssa.TypedSite, bool) {
 }
 
 // jitMegaGetter reports whether a read of cl's register code, at a site
-// that is megamorphic -- its cache gave up, or the code met more shapes
-// than its cases hold (jitRegSiteMegamorphic) -- has met a getter on its
+// using the lookup fallback (jitRegSiteFallback), has met a getter on its
 // receivers' prototypes and receivers of more than one shape: an entry of
 // its cache's, or of those it held before (poly, seen), is an accessor's
 // (propCache's getter), and their shapes are not all one. Such a callee
@@ -1897,7 +1896,7 @@ func (r *Runtime) jitMegaGetter(cl *closure) bool {
 			continue
 		}
 		site := int(w.C())
-		if site >= len(cl.ic) || !r.jitRegSiteMegamorphic(cl, c, l, rpc) {
+		if site >= len(cl.ic) || !r.jitRegSiteFallback(cl, c, l, rpc) {
 			continue
 		}
 		var one *shape
