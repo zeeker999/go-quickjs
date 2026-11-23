@@ -4,6 +4,7 @@ package regexp
 
 import (
 	"encoding/binary"
+	"sync"
 
 	"github.com/go-quickjs/go-quickjs/internal/jit/asm/amd64"
 	"github.com/go-quickjs/go-quickjs/internal/jit/asm/arm64"
@@ -148,6 +149,43 @@ func newMasm(arch string) masm {
 		return &arm64Masm{}
 	}
 	return nil
+}
+
+var nativeAsmPools [2]sync.Pool
+
+func borrowNativeMasm(arch string) masm {
+	index := 0
+	switch arch {
+	case "amd64":
+	case "arm64":
+		index = 1
+	default:
+		return nil
+	}
+	if m := nativeAsmPools[index].Get(); m != nil {
+		return m.(masm)
+	}
+	return newMasm(arch)
+}
+
+func giveNativeMasm(m masm) {
+	// Keep ordinary compiles' scratch, without retaining a large pattern's
+	// buffers. Bytes counts the assembler's code and fixup buffers.
+	switch a := m.(type) {
+	case *amd64Masm:
+		// Tables truncates the slice after emission, leaving its references.
+		clear(a.tables[:cap(a.tables)])
+		a.tables = a.tables[:0]
+		a.a.Reset()
+		if a.a.Bytes() <= 256<<10 {
+			nativeAsmPools[0].Put(a)
+		}
+	case *arm64Masm:
+		a.a.Reset()
+		if a.a.Bytes() <= 256<<10 {
+			nativeAsmPools[1].Put(a)
+		}
+	}
 }
 
 // amd64Masm writes amd64 code: each operation is one instruction. The

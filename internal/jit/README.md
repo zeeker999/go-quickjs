@@ -3521,6 +3521,11 @@ ASCII by a 128-byte table, the rest of the BMP by a two-level bit table or a
 compare tree. One generator writes both machines' code through a macro
 assembler (`native_masm.go`), as Irregexp's writes through its
 `RegExpMacroAssembler`, so every instruction's code changes on both at once.
+Each compile borrows its assembler exclusively from a pool for its
+architecture and returns it on success or refusal, resetting its labels,
+fixups and table references. Code returned to the host owns its bytes.
+The pools share only scratch across runtimes; an assembler whose reported
+code and fixup storage exceeds 256 KiB is discarded.
 
 **The same work as the matcher.** Steps are counted exactly as the matcher
 counts them, so the 100M-step budget fails at the same instruction and the

@@ -90,10 +90,11 @@ type nativeGen struct {
 // bytes, the input reading pairs of surrogates as one character where
 // unicode is set; or reports that it is not code native code is made for.
 func genNative(arch string, prog *program, ncaps int, wide, unicode bool) (nativeProgram, bool) {
-	m := newMasm(arch)
+	m := borrowNativeMasm(arch)
 	if m == nil {
 		return nativeProgram{}, false
 	}
+	defer giveNativeMasm(m)
 	g := &nativeGen{m: m, prog: prog, code: prog.code, ncaps: ncaps, wide: wide, unicode: unicode && wide, uflag: unicode, us: 1,
 		data: map[string]label{}, undoCaps: map[int]label{}, undoCtrs: map[int]label{}, undoMk: map[int]label{}}
 	if wide {
