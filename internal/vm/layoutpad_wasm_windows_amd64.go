@@ -114,7 +114,7 @@ const (
 	layoutPadNHJ  = -1
 	layoutPadNH   = 44
 	layoutPadNHT  = 1
-	layoutPadNDH  = 0
+	layoutPadNDH  = 1
 	layoutPadNDW  = 2
 	layoutPadNDG  = 0
 )
