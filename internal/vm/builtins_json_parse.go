@@ -33,7 +33,7 @@ type jsonParser struct {
 	src string
 	pos int
 	// depth is how deeply the parser has descended, which is bounded: the
-	// stack it recurses on cannot grow for ever.
+	// stack it recurses on cannot grow for ever (jsonLevelsPerNest).
 	depth int
 	// scratch collects the elements of the arrays and the values of the
 	// objects being parsed, each above its parent's. Each is copied out at
@@ -210,9 +210,10 @@ func (p *jsonParser) parseValueAt() (Value, error) {
 	case '"':
 		return p.parseStringValue()
 	case '{', '[':
-		if p.depth >= jsonMaxDepth {
-			return Undefined, p.rt.throwRangeError(
-				"JSON nests too deeply to be parsed")
+		if p.depth%jsonLevelsPerNest == 0 {
+			if err := p.rt.nest(); err != nil {
+				return Undefined, err
+			}
 		}
 		p.depth++
 		var v Value
@@ -223,6 +224,9 @@ func (p *jsonParser) parseValueAt() (Value, error) {
 			v, err = p.parseArray()
 		}
 		p.depth--
+		if p.depth%jsonLevelsPerNest == 0 {
+			p.rt.unnest()
+		}
 		return v, err
 	case 't':
 		if strings.HasPrefix(p.src[p.pos:], "true") {
