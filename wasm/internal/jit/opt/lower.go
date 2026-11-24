@@ -309,7 +309,7 @@ func (g *lowering) allocate(ws *allocScratch, classes [][]int, cl *clobbers) {
 					// The code copies or fills in registers of its own.
 					in.Clobber = cl.bulk
 					if k := copyTemps(v); k > 0 {
-						g.addTemps(lf, &in, &ws.vregs, v, k)
+						g.addTemps(lf, &in, &ws.vregs, v, k, classXMM)
 					}
 					break
 				}
@@ -332,6 +332,12 @@ func (g *lowering) allocate(ws *allocScratch, classes [][]int, cl *clobbers) {
 				// does.
 				ft := g.sigOf(v)
 				area = max(area, 2*(len(ft.Params)+extraArgs(v.Op)))
+			case OpRef:
+				if fillsArray(v) {
+					// The fill's loop walks the elements and counts them in
+					// registers of its own.
+					g.addTemps(lf, &in, &ws.vregs, v, 2, classGPR)
+				}
 			case OpDivS, OpDivU, OpRemS, OpRemU, OpMulHU, OpMulHS:
 				in.Clobber = cl.div
 			case OpAtomicStore, OpAtomicAdd, OpAtomicSub, OpAtomicAnd, OpAtomicOr, OpAtomicXor, OpAtomicXchg, OpAtomicCmpxchg:
@@ -349,7 +355,7 @@ func (g *lowering) allocate(ws *allocScratch, classes [][]int, cl *clobbers) {
 					break
 				}
 				if k := simdTemps(v); k > 0 {
-					g.addTemps(lf, &in, &ws.vregs, v, k)
+					g.addTemps(lf, &in, &ws.vregs, v, k, classXMM)
 				}
 				if a := v.Args[0]; a.Type == TV128 && v.Type == TV128 {
 					in.Hint = vreg(a)
@@ -422,9 +428,9 @@ func smallCopy(v *Value) (uint64, bool) {
 // by loads of them all then stores.
 const maxSmallCopy = 64
 
-// addTemps gives instruction in, value v's, k temporaries of the float
-// class, numbered after every value's register.
-func (g *lowering) addTemps(lf *lsra.Func, in *lsra.Inst, vregs *arena[lsra.VReg], v *Value, k int) {
+// addTemps gives instruction in, value v's, k temporaries of class,
+// numbered after every value's register.
+func (g *lowering) addTemps(lf *lsra.Func, in *lsra.Inst, vregs *arena[lsra.VReg], v *Value, k int, class int8) {
 	if len(g.temps) == 0 {
 		g.temps = append(g.temps[:0], make([]int32, len(g.byVreg))...)
 	}
@@ -432,7 +438,7 @@ func (g *lowering) addTemps(lf *lsra.Func, in *lsra.Inst, vregs *arena[lsra.VReg
 	g.temps[v.vreg] = int32(first)
 	in.Temps = vregs.take(k)
 	for j := range k {
-		lf.Class = append(lf.Class, classXMM)
+		lf.Class = append(lf.Class, class)
 		lf.FixedSlot = append(lf.FixedSlot, -1)
 		if lf.Width != nil {
 			lf.Width = append(lf.Width, 0)

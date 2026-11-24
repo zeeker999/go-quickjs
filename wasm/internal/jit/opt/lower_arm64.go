@@ -516,6 +516,10 @@ const (
 	stubRefRoom
 	stubAlloc
 	stubAllocExit
+	// stubFill fills the array the engine made past the pools for
+	// refArrayNew v, into the slot past off from R, as code's type, and
+	// goes on at to.
+	stubFill
 )
 
 // stub emits out-of-line code.
@@ -574,6 +578,11 @@ func (g *gen) stub(st *stub) {
 		g.restoreAll()
 		a.Load(s0, rCtx, offResume)
 		a.Br(s0)
+	case stubFill:
+		a.Bind(st.l)
+		g.mark("cold array fill")
+		g.fillMade(st.v, st.off, uint32(st.code))
+		a.B(st.to)
 	case stubCall, stubCallIndirect, stubCallRef:
 		v := st.v
 		a.Bind(st.l)
