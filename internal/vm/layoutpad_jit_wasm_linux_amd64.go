@@ -47,7 +47,7 @@ const (
 	layoutPadNB   = 484
 	layoutPadNGB  = -1
 	layoutPadNMB  = -1
-	layoutPadNJB  = 488
+	layoutPadNJB  = 434
 	layoutPadNGJB = -1
 	layoutPadNMJB = -1
 	layoutPadNJU  = 589
@@ -65,7 +65,7 @@ const (
 	layoutPadNN   = 594
 	layoutPadNGN  = -1
 	layoutPadNMN  = -1
-	layoutPadNP   = 671
+	layoutPadNP   = 484
 	layoutPadNGP  = -1
 	layoutPadNMP  = -1
 	layoutPadNQ   = 456
@@ -87,7 +87,7 @@ const (
 	layoutPadNGVT = -1
 	layoutPadNMVT = 0
 	layoutPadNK   = 409
-	layoutPadNGK  = 584
+	layoutPadNGK  = 580
 	layoutPadNMK  = -1
 	layoutPadNVA  = 589
 	layoutPadNGVA = -1
@@ -111,7 +111,7 @@ const (
 	layoutPadNGZ  = -1
 	layoutPadNMZ  = -1
 	layoutPadNCZ  = 868
-	layoutPadNHJ  = 114
+	layoutPadNHJ  = 132
 	layoutPadNH   = 170
 	layoutPadNHT  = 129
 	layoutPadNDH  = 0
