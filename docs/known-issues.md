@@ -664,6 +664,29 @@ Paths are relative to this repository; `go-intl:` paths are in
   `select` returns.
 - **Status:** open.
 
+### KI-98 A typed array's iterable source is not counted, and is cut at 2^22 values
+- **Where:** `internal/vm/builtins_typedarray.go`: the TypedArray
+  constructors and `%TypedArray%.from` collect what an iterable gives into a
+  Go slice before the view is made, as IterableToList says, which the memory
+  limit's walk does not see and nothing charged; the constructor refused a
+  source past 2^22 values (`maxTypedArrayCollectedLength`), `from` none.
+- **Effect:** under a 32 MB limit, `Uint8Array.from` of an iterator of 30
+  million steps took the process to 1.6 GB and finished; one that never
+  ends takes the process down whatever the limit. And `new
+  Float64Array(new Array(5e6).fill(1))` threw `RangeError: the typed array
+  length is too large`, where `Float64Array.from` of the same array, and
+  Node, make 5,000,000 elements.
+- **Repro:** `qjs --memory-limit 32m` of `let n = 0;
+  Uint8Array.from({[Symbol.iterator]: () => ({next: () => (++n > 3e7 ?
+  {done: true} : {value: 0, done: false})})})`.
+- **Expected:** `ErrMemoryLimit` under a limit; Node's 5,000,000 elements.
+- **Status:** fixed. Both collect into one collector (`typedSource`),
+  charged to the limit as it grows, as a builder of the script's output is,
+  and bounded as a buffer is, at 2 GiB of values (2^27 on a 64-bit
+  platform), past which it is a RangeError: a runtime without a limit
+  meets that after 2 to 3 GiB where it had after 64 MB. Tests:
+  `TestTypedArrayIterableSources`, `TestTypedArrayFromEndlessIterable`.
+
 ## P2: wrong results
 
 ### KI-29 Generator and async frames skip part of a call's setup
