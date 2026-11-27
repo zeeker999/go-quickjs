@@ -136,6 +136,8 @@ type core struct {
 	// rehomeFollow's.
 	rehomes     []*rehomePlan
 	rehomeStack []*ssa.Value
+	// shIn is what the lsra shadow reads (lsraShadowRun).
+	shIn shadowIn
 }
 
 // budget is an innermost loop that calls nothing (findBudgets): its back
@@ -539,6 +541,10 @@ func prepare(w *Workspace, f *ssa.Func, enc abi.Encoding, opts Options, gprs, fp
 		return nil, err
 	}
 	c.lap(PhaseSaves)
+	if lsraShadow != "" {
+		c.lsraShadowRun(&c.shIn)
+		c.lap(PhaseLSRA)
+	}
 	return c, nil
 }
 
@@ -2701,6 +2707,9 @@ func (c *core) allocate() error {
 		}
 	}
 	c.spills = spills
+	if lsraShadow != "" {
+		c.shIn = shadowIn{rec: rec, xuses: xuses, pos: pos, start: start, end: end, count: count}
+	}
 	if c.opts.CheckAllocations {
 		c.checkAllocation(iv, rec, scanSpills)
 	}

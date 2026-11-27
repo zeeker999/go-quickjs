@@ -33,11 +33,14 @@ const (
 	// PhaseEncode is the assembler's finish -- jumps shortened, labels
 	// bound -- and the code's descriptions copied out.
 	PhaseEncode
+	// PhaseLSRA is the lsra shadow's (QJS_LSRA_SHADOW), outside the
+	// compile.
+	PhaseLSRA
 	// NumPhases bounds the phases.
 	NumPhases
 )
 
-var phaseNames = [NumPhases]string{"build", "optimize", "prepare", "uses", "liveness", "intervals", "hints", "scan", "saves", "emit", "encode"}
+var phaseNames = [NumPhases]string{"build", "optimize", "prepare", "uses", "liveness", "intervals", "hints", "scan", "saves", "emit", "encode", "lsra"}
 
 // String is the phase's name.
 func (p Phase) String() string {

@@ -47,6 +47,8 @@ type Workspace struct {
 	// the lists its calls' states are built from.
 	core  core
 	calls callScratch
+	// shadow is the lsra shadow's (lsraShadowRun).
+	shadow *shadowWork
 	// xuses is allocate's list of uses in other blocks, kept from compile
 	// to compile, and gpool its room for the phis' groups' members; of
 	// each, what the last compile used.

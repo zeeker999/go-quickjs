@@ -113,6 +113,17 @@ func reportTimes() {
 	if n := runs - 1; n > 0 {
 		fmt.Printf("  jit compile, heap per run: %.2f MB, %.0f objects\n", float64(t.Bytes)/n/(1<<20), float64(t.Objects)/n)
 	}
+	if st := &mir.LSRAStats; st.Compiles.Load() > 0 {
+		fmt.Printf("  lsra shadow: %d compiles, %d errors, %d insts; spilled mir %d lsra %d; spill cost mir %d lsra %d; edge moves mir %d lsra %d; edge cost mir %d lsra %d; slots mir %d lsra %d; lsra split %d\n",
+			st.Compiles.Load(), st.Errors.Load(), st.Ins.Load(), st.MirSpilled.Load(), st.LSRASpilled.Load(), st.MirSpillCost.Load(), st.LSRASpillCost.Load(),
+			st.MirEdgeMoves.Load(), st.LSRAEdgeMoves.Load(), st.MirEdgeCost.Load(), st.LSRAEdgeCost.Load(), st.MirSlots.Load(), st.LSRASlots.Load(), st.LSRASplit.Load())
+		fmt.Printf("  lsra shadow, ms per run: func %.2f liveness %.2f ranges %.2f webs %.2f scan %.2f slots %.2f\n",
+			float64(st.Ticks[0].Load())/runs/1e6, float64(st.Ticks[1].Load())/runs/1e6, float64(st.Ticks[2].Load())/runs/1e6,
+			float64(st.Ticks[3].Load())/runs/1e6, float64(st.Ticks[4].Load())/runs/1e6, float64(st.Ticks[5].Load())/runs/1e6)
+		for i := range st.Ticks {
+			st.Ticks[i].Store(0)
+		}
+	}
 	*t = mir.Times{Clock: t.Clock}
 }
 
